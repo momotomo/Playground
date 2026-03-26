@@ -3,12 +3,13 @@ use std::fmt::{self, Display, Formatter};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
-use crate::model::PaintDocument;
+use crate::model::{PaintDocument, PaintElement, Stroke};
 use crate::render::render_document_png;
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
-const EDITABLE_FORMAT_VERSION: u32 = 1;
+const EDITABLE_FORMAT_VERSION: u32 = 2;
+const LEGACY_EDITABLE_FORMAT_VERSION: u32 = 1;
 const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
 const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
 const JSON_EXTENSION: &str = "json";
@@ -97,18 +98,26 @@ impl StorageFacade {
             return Err(StorageError::EmptyFile);
         }
 
-        let payload: EditablePaintFile = serde_json::from_slice(bytes)
+        let header: EditablePaintFileHeader = serde_json::from_slice(bytes)
             .map_err(|error| StorageError::Deserialize(error.to_string()))?;
 
-        if payload.format.id != EDITABLE_FORMAT_ID {
-            return Err(StorageError::UnsupportedFormat(payload.format.id));
+        if header.format.id != EDITABLE_FORMAT_ID {
+            return Err(StorageError::UnsupportedFormat(header.format.id));
         }
 
-        if payload.format.version != EDITABLE_FORMAT_VERSION {
-            return Err(StorageError::UnsupportedVersion(payload.format.version));
+        match header.format.version {
+            EDITABLE_FORMAT_VERSION => {
+                let payload: EditablePaintFile = serde_json::from_slice(bytes)
+                    .map_err(|error| StorageError::Deserialize(error.to_string()))?;
+                Ok(payload.document)
+            }
+            LEGACY_EDITABLE_FORMAT_VERSION => {
+                let payload: LegacyEditablePaintFile = serde_json::from_slice(bytes)
+                    .map_err(|error| StorageError::Deserialize(error.to_string()))?;
+                Ok(payload.document.into_current())
+            }
+            version => Err(StorageError::UnsupportedVersion(version)),
         }
-
-        Ok(payload.document)
     }
 
     pub fn export_png_bytes(&self, document: &PaintDocument) -> Result<Vec<u8>, StorageError> {
@@ -124,7 +133,7 @@ impl StorageFacade {
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
-        "Editable JSON envelope (.paint.json)"
+        "Editable JSON envelope v2 (.paint.json)"
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
@@ -300,6 +309,11 @@ struct FileFormatDescriptor {
     version: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EditablePaintFileHeader {
+    format: FileFormatDescriptor,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileMetadata {
     #[serde(default)]
@@ -323,6 +337,31 @@ impl EditablePaintFile {
             },
             metadata: FileMetadata::default(),
             document,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LegacyEditablePaintFile {
+    format: FileFormatDescriptor,
+    #[serde(default)]
+    metadata: FileMetadata,
+    document: PaintDocumentV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PaintDocumentV1 {
+    canvas_size: crate::model::CanvasSize,
+    background: crate::model::RgbaColor,
+    strokes: Vec<Stroke>,
+}
+
+impl PaintDocumentV1 {
+    fn into_current(self) -> PaintDocument {
+        PaintDocument {
+            canvas_size: self.canvas_size,
+            background: self.background,
+            elements: self.strokes.into_iter().map(PaintElement::Stroke).collect(),
         }
     }
 }
@@ -378,7 +417,9 @@ fn normalize_file_name(file_name: String, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{StorageError, StorageFacade};
-    use crate::model::{CanvasSize, PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
+    use crate::model::{
+        CanvasSize, PaintDocument, PaintPoint, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
+    };
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
     use tiny_skia::Pixmap;
@@ -387,13 +428,20 @@ mod tests {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(64.0, 32.0),
             background: RgbaColor::white(),
-            strokes: Vec::new(),
+            elements: Vec::new(),
         };
 
         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::default(), 6.0);
         stroke.push_point(PaintPoint::new(4.0, 4.0));
         stroke.push_point(PaintPoint::new(28.0, 12.0));
         document.push_stroke(stroke);
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::new(220, 64, 64, 255),
+            3.0,
+            PaintPoint::new(40.0, 4.0),
+            PaintPoint::new(60.0, 28.0),
+        ));
         document
     }
 
@@ -424,7 +472,7 @@ mod tests {
         let storage = StorageFacade::new();
         let error = storage
             .decode_document(
-                br#"{"format":{"id":"another-app","version":1},"metadata":{},"document":{"canvas_size":{"width":1600.0,"height":900.0},"background":{"r":255,"g":255,"b":255,"a":255},"strokes":[]}}"#,
+                br#"{"format":{"id":"another-app","version":2},"metadata":{},"document":{"canvas_size":{"width":1600.0,"height":900.0},"background":{"r":255,"g":255,"b":255,"a":255},"elements":[]}}"#,
             )
             .expect_err("wrong format id should fail");
 
@@ -432,6 +480,32 @@ mod tests {
             error,
             StorageError::UnsupportedFormat(String::from("another-app"))
         );
+    }
+
+    #[test]
+    fn decode_legacy_v1_document() {
+        let storage = StorageFacade::new();
+        let legacy = br#"{
+          "format":{"id":"rust-paint-foundation/document","version":1},
+          "metadata":{},
+          "document":{
+            "canvas_size":{"width":64.0,"height":32.0},
+            "background":{"r":255,"g":255,"b":255,"a":255},
+            "strokes":[
+              {
+                "tool":"brush",
+                "color":{"r":37,"g":37,"b":41,"a":255},
+                "width":6.0,
+                "points":[{"x":4.0,"y":4.0},{"x":28.0,"y":12.0}]
+              }
+            ]
+          }
+        }"#;
+
+        let decoded = storage
+            .decode_document(legacy)
+            .expect("legacy should decode");
+        assert_eq!(decoded.element_count(), 1);
     }
 
     #[test]
@@ -456,8 +530,8 @@ mod tests {
         let png = storage.export_png_bytes(&decoded).expect("must render");
         let pixmap = Pixmap::decode_png(&png).expect("png should decode");
         let pixel = pixmap
-            .pixel(16, 8)
-            .expect("stroke pixel should exist")
+            .pixel(50, 16)
+            .expect("shape pixel should exist")
             .demultiply();
 
         assert_ne!((pixel.red(), pixel.green(), pixel.blue()), (255, 255, 255));

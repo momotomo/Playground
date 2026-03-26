@@ -3,23 +3,66 @@ use eframe::egui::{
     Vec2,
 };
 
-use crate::model::{CanvasSize, PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
+use crate::model::{
+    CanvasSize, ElementBounds, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor,
+    ShapeElement, ShapeKind, Stroke, ToolKind,
+};
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const FIT_MARGIN: f32 = 24.0;
+const HIT_TOLERANCE_SCREEN: f32 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasToolKind {
+    Select,
+    Brush,
+    Eraser,
+    Rectangle,
+    Ellipse,
+    Line,
+}
+
+impl CanvasToolKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Brush => "Brush",
+            Self::Eraser => "Eraser",
+            Self::Rectangle => "Rectangle",
+            Self::Ellipse => "Ellipse",
+            Self::Line => "Line",
+        }
+    }
+
+    fn shape_kind(self) -> Option<ShapeKind> {
+        match self {
+            Self::Rectangle => Some(ShapeKind::Rectangle),
+            Self::Ellipse => Some(ShapeKind::Ellipse),
+            Self::Line => Some(ShapeKind::Line),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ToolSettings {
-    pub tool: ToolKind,
+    pub tool: CanvasToolKind,
     pub color: RgbaColor,
     pub width: f32,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct CanvasOutput {
-    pub committed_stroke: Option<Stroke>,
+    pub committed_element: Option<PaintElement>,
+    pub move_commit: Option<MoveCommit>,
     pub needs_repaint: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MoveCommit {
+    pub index: usize,
+    pub delta: PaintVector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +70,7 @@ enum InteractionMode {
     Idle,
     Drawing,
     Panning(PanMode),
+    MovingSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,19 +166,48 @@ impl CanvasViewState {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct SelectionState {
+    selected_index: Option<usize>,
+    drag_origin: Option<PaintPoint>,
+    preview_delta: PaintVector,
+}
+
+impl SelectionState {
+    fn clear(&mut self) {
+        self.selected_index = None;
+        self.drag_origin = None;
+        self.preview_delta = PaintVector::default();
+    }
+
+    fn is_valid_for(&self, document: &PaintDocument) -> bool {
+        self.selected_index
+            .and_then(|index| document.element(index))
+            .is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ActivePreview {
+    Stroke(Stroke),
+    Shape(ShapeElement),
+}
+
 #[derive(Debug)]
 pub struct CanvasController {
-    active_stroke: Option<Stroke>,
+    active_preview: Option<ActivePreview>,
     interaction_mode: InteractionMode,
     view: CanvasViewState,
+    selection: SelectionState,
 }
 
 impl Default for CanvasController {
     fn default() -> Self {
         Self {
-            active_stroke: None,
+            active_preview: None,
             interaction_mode: InteractionMode::Idle,
             view: CanvasViewState::default(),
+            selection: SelectionState::default(),
         }
     }
 }
@@ -146,6 +219,8 @@ impl CanvasController {
         document: &PaintDocument,
         tool_settings: ToolSettings,
     ) -> CanvasOutput {
+        self.sync_with_document(document);
+
         let available = ui.available_size_before_wrap();
         let desired_size = Vec2::new(available.x.max(320.0), available.y.max(240.0));
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
@@ -153,7 +228,7 @@ impl CanvasController {
         self.view.remember_viewport(viewport);
         self.view.ensure_visible_defaults(document);
 
-        let cursor_icon = self.cursor_icon(ui);
+        let cursor_icon = self.cursor_icon(ui, tool_settings.tool);
         let response = response.on_hover_cursor(cursor_icon);
         let mut output = self.handle_input(ui, &response, document, tool_settings);
 
@@ -166,23 +241,33 @@ impl CanvasController {
         );
 
         paint_background(&painter, canvas_rect, document.background);
-        paint_document(&painter, canvas_rect, self.view.zoom, document);
+        paint_document(
+            &painter,
+            canvas_rect,
+            self.view.zoom,
+            document,
+            self.selection_overlay_element(document),
+        );
 
-        if let Some(active_stroke) = &self.active_stroke {
-            paint_stroke(
+        if let Some(preview) = &self.active_preview {
+            paint_preview(
                 &painter,
                 canvas_rect,
                 self.view.zoom,
-                active_stroke,
+                preview,
                 document.background,
             );
         }
 
-        if !document.has_strokes() && self.active_stroke.is_none() {
+        if let Some(bounds) = self.selected_bounds(document) {
+            paint_selection_overlay(&painter, canvas_rect, self.view.zoom, bounds);
+        }
+
+        if !document.has_elements() && self.active_preview.is_none() {
             painter.text(
                 canvas_rect.center(),
                 Align2::CENTER_CENTER,
-                "Drag to draw. Space + Drag or Middle Drag to pan.",
+                "Select, draw, or drag shapes. Space + Drag pans the view.",
                 FontId::proportional(22.0),
                 Color32::from_gray(120),
             );
@@ -190,7 +275,9 @@ impl CanvasController {
 
         if matches!(
             self.interaction_mode,
-            InteractionMode::Drawing | InteractionMode::Panning(_)
+            InteractionMode::Drawing
+                | InteractionMode::Panning(_)
+                | InteractionMode::MovingSelection
         ) {
             output.needs_repaint = true;
         }
@@ -199,12 +286,32 @@ impl CanvasController {
     }
 
     pub fn has_active_stroke(&self) -> bool {
-        self.active_stroke.is_some()
+        self.active_preview.is_some()
     }
 
     pub fn discard_active_stroke(&mut self) -> bool {
         self.interaction_mode = InteractionMode::Idle;
-        self.active_stroke.take().is_some()
+        self.active_preview.take().is_some()
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    pub fn sync_with_document(&mut self, document: &PaintDocument) {
+        if !self.selection.is_valid_for(document) {
+            self.selection.clear();
+        }
+    }
+
+    pub fn selection_summary(&self, document: &PaintDocument) -> String {
+        if let Some(index) = self.selection.selected_index
+            && let Some(element) = document.element(index)
+        {
+            return format!("Selection: {} #{}", element.kind_label(), index + 1);
+        }
+
+        "Selection: None".to_owned()
     }
 
     pub fn zoom_label(&self) -> String {
@@ -256,7 +363,10 @@ impl CanvasController {
         let space_pan = ui.input(|input| input.key_down(egui::Key::Space));
         let mut output = CanvasOutput::default();
 
-        if self.active_stroke.is_none() && hovered {
+        if self.active_preview.is_none()
+            && !matches!(self.interaction_mode, InteractionMode::MovingSelection)
+            && hovered
+        {
             let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
             if zoom_delta != 1.0
                 && let Some(pointer_pos) = hover_pos
@@ -282,46 +392,53 @@ impl CanvasController {
                     return output;
                 }
 
-                if hovered && pointer.primary_pressed() {
-                    let mut stroke = Stroke::new(
-                        tool_settings.tool,
-                        match tool_settings.tool {
-                            ToolKind::Brush => tool_settings.color,
-                            ToolKind::Eraser => document.background,
-                        },
-                        tool_settings.width,
+                if hovered
+                    && pointer.primary_pressed()
+                    && let Some(position) = pointer.interact_pos()
+                {
+                    let world = screen_to_canvas(
+                        viewport,
+                        self.view.pan,
+                        self.view.zoom,
+                        document.canvas_size,
+                        position,
                     );
-                    if let Some(position) = pointer.interact_pos() {
-                        stroke.push_point(screen_to_canvas(
-                            viewport,
-                            self.view.pan,
-                            self.view.zoom,
-                            document.canvas_size,
-                            position,
-                        ));
-                        self.active_stroke = Some(stroke);
-                        self.interaction_mode = InteractionMode::Drawing;
-                        output.needs_repaint = true;
+
+                    match tool_settings.tool {
+                        CanvasToolKind::Select => {
+                            self.begin_selection_drag(document, world);
+                            output.needs_repaint = true;
+                        }
+                        CanvasToolKind::Brush | CanvasToolKind::Eraser => {
+                            self.begin_stroke_preview(document, tool_settings, world);
+                            output.needs_repaint = true;
+                        }
+                        CanvasToolKind::Rectangle
+                        | CanvasToolKind::Ellipse
+                        | CanvasToolKind::Line => {
+                            self.begin_shape_preview(tool_settings, world);
+                            output.needs_repaint = true;
+                        }
                     }
                 }
             }
             InteractionMode::Drawing => {
                 if pointer.primary_down()
                     && let Some(position) = pointer.interact_pos()
-                    && let Some(stroke) = &mut self.active_stroke
                 {
-                    stroke.push_point(screen_to_canvas(
+                    let world = screen_to_canvas(
                         viewport,
                         self.view.pan,
                         self.view.zoom,
                         document.canvas_size,
                         position,
-                    ));
+                    );
+                    self.update_active_preview(world);
                     output.needs_repaint = true;
                 }
 
                 if pointer.primary_released() {
-                    output.committed_stroke = self.commit_active_stroke();
+                    output.committed_element = self.commit_active_preview();
                     self.interaction_mode = InteractionMode::Idle;
                     output.needs_repaint = true;
                 }
@@ -337,25 +454,146 @@ impl CanvasController {
                     self.interaction_mode = InteractionMode::Idle;
                 }
             }
+            InteractionMode::MovingSelection => {
+                if pointer.primary_down()
+                    && let Some(position) = pointer.interact_pos()
+                {
+                    let world = screen_to_canvas_unclamped(
+                        viewport,
+                        self.view.pan,
+                        self.view.zoom,
+                        document.canvas_size,
+                        position,
+                    );
+                    if let Some(origin) = self.selection.drag_origin {
+                        self.selection.preview_delta =
+                            PaintVector::new(world.x - origin.x, world.y - origin.y);
+                    }
+                    output.needs_repaint = true;
+                }
+
+                if pointer.primary_released() {
+                    output.move_commit = self.finish_move_commit();
+                    self.interaction_mode = InteractionMode::Idle;
+                    output.needs_repaint = true;
+                }
+            }
         }
+
         output
     }
 
-    fn commit_active_stroke(&mut self) -> Option<Stroke> {
-        let stroke = self.active_stroke.take()?;
-
-        if stroke.is_committable() {
-            Some(stroke)
+    fn begin_selection_drag(&mut self, document: &PaintDocument, world: PaintPoint) {
+        let tolerance = HIT_TOLERANCE_SCREEN / self.view.zoom.max(MIN_ZOOM);
+        if let Some(index) = document.hit_test(world, tolerance) {
+            self.selection.selected_index = Some(index);
+            self.selection.drag_origin = Some(world);
+            self.selection.preview_delta = PaintVector::default();
+            self.interaction_mode = InteractionMode::MovingSelection;
         } else {
-            None
+            self.selection.clear();
+            self.interaction_mode = InteractionMode::Idle;
         }
     }
 
-    fn cursor_icon(&self, ui: &egui::Ui) -> egui::CursorIcon {
-        if matches!(self.interaction_mode, InteractionMode::Panning(_)) {
+    fn begin_stroke_preview(
+        &mut self,
+        document: &PaintDocument,
+        tool_settings: ToolSettings,
+        start: PaintPoint,
+    ) {
+        self.selection.clear();
+        let color = match tool_settings.tool {
+            CanvasToolKind::Brush => tool_settings.color,
+            CanvasToolKind::Eraser => document.background,
+            _ => tool_settings.color,
+        };
+        let tool = match tool_settings.tool {
+            CanvasToolKind::Eraser => ToolKind::Eraser,
+            _ => ToolKind::Brush,
+        };
+
+        let mut stroke = Stroke::new(tool, color, tool_settings.width);
+        stroke.push_point(start);
+        self.active_preview = Some(ActivePreview::Stroke(stroke));
+        self.interaction_mode = InteractionMode::Drawing;
+    }
+
+    fn begin_shape_preview(&mut self, tool_settings: ToolSettings, start: PaintPoint) {
+        self.selection.clear();
+        let Some(kind) = tool_settings.tool.shape_kind() else {
+            return;
+        };
+
+        self.active_preview = Some(ActivePreview::Shape(ShapeElement::new(
+            kind,
+            tool_settings.color,
+            tool_settings.width,
+            start,
+            start,
+        )));
+        self.interaction_mode = InteractionMode::Drawing;
+    }
+
+    fn update_active_preview(&mut self, world: PaintPoint) {
+        match self.active_preview.as_mut() {
+            Some(ActivePreview::Stroke(stroke)) => stroke.push_point(world),
+            Some(ActivePreview::Shape(shape)) => shape.end = world,
+            None => {}
+        }
+    }
+
+    fn commit_active_preview(&mut self) -> Option<PaintElement> {
+        let preview = self.active_preview.take()?;
+        match preview {
+            ActivePreview::Stroke(stroke) => {
+                stroke_is_committable(&stroke).then_some(PaintElement::Stroke(stroke))
+            }
+            ActivePreview::Shape(shape) => shape_is_committable(shape).map(PaintElement::Shape),
+        }
+    }
+
+    fn finish_move_commit(&mut self) -> Option<MoveCommit> {
+        let index = self.selection.selected_index?;
+        let delta = self.selection.preview_delta;
+        self.selection.drag_origin = None;
+        self.selection.preview_delta = PaintVector::default();
+
+        (!delta.is_zero()).then_some(MoveCommit { index, delta })
+    }
+
+    fn selection_overlay_element(&self, document: &PaintDocument) -> Option<(usize, PaintElement)> {
+        let index = self.selection.selected_index?;
+        let element = document.element(index)?.clone();
+
+        if self.selection.preview_delta.is_zero() {
+            None
+        } else {
+            Some((index, element.translated(self.selection.preview_delta)))
+        }
+    }
+
+    fn selected_bounds(&self, document: &PaintDocument) -> Option<ElementBounds> {
+        let index = self.selection.selected_index?;
+        let element = document.element(index)?;
+        let element = if self.selection.preview_delta.is_zero() {
+            element.clone()
+        } else {
+            element.translated(self.selection.preview_delta)
+        };
+        element.bounds()
+    }
+
+    fn cursor_icon(&self, ui: &egui::Ui, tool: CanvasToolKind) -> egui::CursorIcon {
+        if matches!(
+            self.interaction_mode,
+            InteractionMode::Panning(_) | InteractionMode::MovingSelection
+        ) {
             egui::CursorIcon::Grabbing
         } else if ui.input(|input| input.key_down(egui::Key::Space)) {
             egui::CursorIcon::Grab
+        } else if tool == CanvasToolKind::Select {
+            egui::CursorIcon::PointingHand
         } else {
             egui::CursorIcon::Crosshair
         }
@@ -385,9 +623,63 @@ fn paint_background(painter: &Painter, rect: Rect, background: RgbaColor) {
     );
 }
 
-fn paint_document(painter: &Painter, rect: Rect, zoom: f32, document: &PaintDocument) {
-    for stroke in &document.strokes {
-        paint_stroke(painter, rect, zoom, stroke, document.background);
+fn paint_document(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    document: &PaintDocument,
+    overlay: Option<(usize, PaintElement)>,
+) {
+    for (index, element) in document.elements.iter().enumerate() {
+        if overlay
+            .as_ref()
+            .is_some_and(|(overlay_index, _)| *overlay_index == index)
+        {
+            continue;
+        }
+        paint_element(painter, rect, zoom, element, document.background);
+    }
+
+    if let Some((_, element)) = overlay {
+        paint_element(painter, rect, zoom, &element, document.background);
+    }
+}
+
+fn paint_preview(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    preview: &ActivePreview,
+    background: RgbaColor,
+) {
+    match preview {
+        ActivePreview::Stroke(stroke) => paint_element(
+            painter,
+            rect,
+            zoom,
+            &PaintElement::Stroke(stroke.clone()),
+            background,
+        ),
+        ActivePreview::Shape(shape) => paint_element(
+            painter,
+            rect,
+            zoom,
+            &PaintElement::Shape(*shape),
+            background,
+        ),
+    }
+}
+
+fn paint_element(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    element: &PaintElement,
+    background: RgbaColor,
+) {
+    match element {
+        PaintElement::Stroke(stroke) => paint_stroke(painter, rect, zoom, stroke, background),
+        PaintElement::Shape(shape) => paint_shape(painter, rect, zoom, shape),
     }
 }
 
@@ -417,6 +709,97 @@ fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, backg
                 EguiStroke::new(stroke.width * zoom, color),
             ));
         }
+    }
+}
+
+fn paint_shape(painter: &Painter, rect: Rect, zoom: f32, shape: &ShapeElement) {
+    let stroke = EguiStroke::new(shape.width * zoom, color32_from_rgba(shape.color));
+    let start = canvas_to_screen(rect, zoom, shape.start);
+    let end = canvas_to_screen(rect, zoom, shape.end);
+
+    match shape.kind {
+        ShapeKind::Line => {
+            painter.line_segment([start, end], stroke);
+        }
+        ShapeKind::Rectangle => {
+            painter.rect_stroke(
+                Rect::from_two_pos(start, end),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        ShapeKind::Ellipse => {
+            let ellipse_points = ellipse_outline_points(Rect::from_two_pos(start, end));
+            if ellipse_points.len() >= 2 {
+                painter.add(egui::Shape::closed_line(ellipse_points, stroke));
+            }
+        }
+    }
+}
+
+fn paint_selection_overlay(painter: &Painter, rect: Rect, zoom: f32, bounds: ElementBounds) {
+    let screen_rect = Rect::from_two_pos(
+        canvas_to_screen(rect, zoom, bounds.min),
+        canvas_to_screen(rect, zoom, bounds.max),
+    )
+    .expand(6.0);
+
+    let accent = Color32::from_rgb(26, 115, 232);
+    painter.rect_stroke(
+        screen_rect,
+        6.0,
+        EguiStroke::new(2.0, accent),
+        egui::StrokeKind::Outside,
+    );
+
+    for handle in [
+        screen_rect.left_top(),
+        screen_rect.right_top(),
+        screen_rect.left_bottom(),
+        screen_rect.right_bottom(),
+    ] {
+        painter.rect_filled(
+            Rect::from_center_size(handle, Vec2::splat(8.0)),
+            2.0,
+            Color32::WHITE,
+        );
+        painter.rect_stroke(
+            Rect::from_center_size(handle, Vec2::splat(8.0)),
+            2.0,
+            EguiStroke::new(1.0, accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+fn ellipse_outline_points(rect: Rect) -> Vec<Pos2> {
+    let center = rect.center();
+    let rx = rect.width().abs() * 0.5;
+    let ry = rect.height().abs() * 0.5;
+    if rx <= f32::EPSILON || ry <= f32::EPSILON {
+        return Vec::new();
+    }
+
+    (0..48)
+        .map(|step| {
+            let t = step as f32 / 48.0 * std::f32::consts::TAU;
+            Pos2::new(center.x + rx * t.cos(), center.y + ry * t.sin())
+        })
+        .collect()
+}
+
+fn stroke_is_committable(stroke: &Stroke) -> bool {
+    !stroke.points.is_empty()
+}
+
+fn shape_is_committable(shape: ShapeElement) -> Option<ShapeElement> {
+    let dx = (shape.end.x - shape.start.x).abs();
+    let dy = (shape.end.y - shape.start.y).abs();
+    match shape.kind {
+        ShapeKind::Line if dx.max(dy) > 0.5 => Some(shape),
+        ShapeKind::Rectangle | ShapeKind::Ellipse if dx > 0.5 && dy > 0.5 => Some(shape),
+        _ => None,
     }
 }
 
@@ -520,7 +903,7 @@ mod tests {
             Pos2::new(240.0, 130.0),
         );
 
-        assert!((after.x - 100.0).abs() < 0.01);
-        assert!((after.y - 50.0).abs() < 0.01);
+        assert!((before.x - after.x).abs() < 0.01);
+        assert!((before.y - after.y).abs() < 0.01);
     }
 }
