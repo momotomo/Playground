@@ -4,12 +4,15 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use crate::model::PaintDocument;
+use crate::render::render_document_png;
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
 const EDITABLE_FORMAT_VERSION: u32 = 1;
 const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
+const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
 const JSON_EXTENSION: &str = "json";
+const PNG_EXTENSION: &str = "png";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageFeature {
@@ -34,6 +37,7 @@ pub enum StorageError {
     UnsupportedVersion(u32),
     Serialize(String),
     Deserialize(String),
+    Render(String),
     Io(String),
 }
 
@@ -50,6 +54,7 @@ impl Display for StorageError {
             }
             Self::Serialize(error) => write!(f, "Failed to serialize document: {error}"),
             Self::Deserialize(error) => write!(f, "Failed to read document: {error}"),
+            Self::Render(error) => write!(f, "Failed to render export: {error}"),
             Self::Io(error) => write!(f, "File I/O failed: {error}"),
         }
     }
@@ -59,6 +64,11 @@ impl Error for StorageError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedDocument {
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportedImage {
     pub file_name: String,
 }
 
@@ -101,8 +111,16 @@ impl StorageFacade {
         Ok(payload.document)
     }
 
+    pub fn export_png_bytes(&self, document: &PaintDocument) -> Result<Vec<u8>, StorageError> {
+        render_document_png(document).map_err(|error| StorageError::Render(error.to_string()))
+    }
+
     pub const fn suggested_file_name(&self) -> &'static str {
         DEFAULT_FILE_NAME
+    }
+
+    pub fn suggested_png_file_name(&self, document_name: &str) -> String {
+        to_png_file_name(document_name)
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
@@ -110,7 +128,7 @@ impl StorageFacade {
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
-        "PNG raster export (planned)"
+        "PNG raster export (.png)"
     }
 
     pub const fn storage_strategy_summary(&self) -> &'static str {
@@ -128,6 +146,21 @@ impl StorageFacade {
         std::fs::write(&path, bytes).map_err(|error| StorageError::Io(error.to_string()))?;
 
         Ok(SavedDocument {
+            file_name: file_name_from_path(&path),
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_png_to_path<P: AsRef<Path>>(
+        &self,
+        document: &PaintDocument,
+        path: P,
+    ) -> Result<ExportedImage, StorageError> {
+        let bytes = self.export_png_bytes(document)?;
+        let path = ensure_png_file_name(path.as_ref().to_path_buf());
+        std::fs::write(&path, bytes).map_err(|error| StorageError::Io(error.to_string()))?;
+
+        Ok(ExportedImage {
             file_name: file_name_from_path(&path),
         })
     }
@@ -164,6 +197,22 @@ impl StorageFacade {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_png_via_dialog(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+    ) -> Result<ExportedImage, StorageError> {
+        let path = rfd::FileDialog::new()
+            .set_title("Export PNG")
+            .set_file_name(suggested_name)
+            .add_filter("PNG image", &[PNG_EXTENSION])
+            .save_file()
+            .ok_or(StorageError::Cancelled)?;
+
+        self.export_png_to_path(document, path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_document_via_dialog(&self) -> Result<LoadedDocument, StorageError> {
         let path = rfd::FileDialog::new()
             .set_title("Load drawing")
@@ -194,7 +243,31 @@ impl StorageFacade {
             .map_err(|error| StorageError::Io(error.to_string()))?;
 
         Ok(SavedDocument {
-            file_name: normalize_file_name(file.file_name()),
+            file_name: normalize_file_name(file.file_name(), DEFAULT_FILE_NAME),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn export_png_via_dialog(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+    ) -> Result<ExportedImage, StorageError> {
+        let bytes = self.export_png_bytes(document)?;
+        let file = rfd::AsyncFileDialog::new()
+            .set_title("Export PNG")
+            .set_file_name(suggested_name)
+            .add_filter("PNG image", &[PNG_EXTENSION])
+            .save_file()
+            .await
+            .ok_or(StorageError::Cancelled)?;
+
+        file.write(&bytes)
+            .await
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+
+        Ok(ExportedImage {
+            file_name: normalize_file_name(file.file_name(), DEFAULT_PNG_FILE_NAME),
         })
     }
 
@@ -211,7 +284,7 @@ impl StorageFacade {
         let document = self.decode_document(&bytes)?;
 
         Ok(LoadedDocument {
-            file_name: normalize_file_name(file.file_name()),
+            file_name: normalize_file_name(file.file_name(), DEFAULT_FILE_NAME),
             document,
         })
     }
@@ -256,11 +329,33 @@ impl EditablePaintFile {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_json_file_name(path: PathBuf) -> PathBuf {
-    let file_name = file_name_from_path(&path);
-    if file_name.ends_with(".json") {
+    if file_name_from_path(&path).ends_with(".json") {
         path
     } else {
         path.with_extension("paint.json")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_png_file_name(path: PathBuf) -> PathBuf {
+    if file_name_from_path(&path).ends_with(".png") {
+        path
+    } else {
+        path.with_extension(PNG_EXTENSION)
+    }
+}
+
+fn to_png_file_name(document_name: &str) -> String {
+    if let Some(stripped) = document_name.strip_suffix(".paint.json") {
+        format!("{stripped}.png")
+    } else if let Some(stripped) = document_name.strip_suffix(".json") {
+        format!("{stripped}.png")
+    } else if let Some(stripped) = document_name.strip_suffix(".png") {
+        format!("{stripped}.png")
+    } else if document_name.is_empty() {
+        DEFAULT_PNG_FILE_NAME.to_owned()
+    } else {
+        format!("{document_name}.png")
     }
 }
 
@@ -272,9 +367,9 @@ fn file_name_from_path(path: &Path) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn normalize_file_name(file_name: String) -> String {
+fn normalize_file_name(file_name: String, fallback: &str) -> String {
     if file_name.is_empty() {
-        DEFAULT_FILE_NAME.to_owned()
+        fallback.to_owned()
     } else {
         file_name
     }
@@ -283,15 +378,21 @@ fn normalize_file_name(file_name: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{StorageError, StorageFacade};
-    use crate::model::{PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
+    use crate::model::{CanvasSize, PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tiny_skia::Pixmap;
 
     fn sample_document() -> PaintDocument {
-        let mut document = PaintDocument::default();
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 32.0),
+            background: RgbaColor::white(),
+            strokes: Vec::new(),
+        };
+
         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::default(), 6.0);
         stroke.push_point(PaintPoint::new(4.0, 4.0));
-        stroke.push_point(PaintPoint::new(12.0, 12.0));
+        stroke.push_point(PaintPoint::new(28.0, 12.0));
         document.push_stroke(stroke);
         document
     }
@@ -331,6 +432,35 @@ mod tests {
             error,
             StorageError::UnsupportedFormat(String::from("another-app"))
         );
+    }
+
+    #[test]
+    fn export_png_bytes_can_be_decoded() {
+        let storage = StorageFacade::new();
+        let bytes = storage
+            .export_png_bytes(&sample_document())
+            .expect("png export should succeed");
+        let pixmap = Pixmap::decode_png(&bytes).expect("png bytes should decode");
+
+        assert_eq!(pixmap.width(), 64);
+        assert_eq!(pixmap.height(), 32);
+    }
+
+    #[test]
+    fn serialized_document_can_render_to_png() {
+        let storage = StorageFacade::new();
+        let encoded = storage
+            .encode_document(&sample_document())
+            .expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+        let png = storage.export_png_bytes(&decoded).expect("must render");
+        let pixmap = Pixmap::decode_png(&png).expect("png should decode");
+        let pixel = pixmap
+            .pixel(16, 8)
+            .expect("stroke pixel should exist")
+            .demultiply();
+
+        assert_ne!((pixel.red(), pixel.green(), pixel.blue()), (255, 255, 255));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
