@@ -1,15 +1,19 @@
 # Rust Paint Foundation
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
-同じコードベースから native 実行と WebAssembly 実行を行い、GitHub Pages へ静的配信できる最小 MVP を整えています。
+同じコードベースから native 実行と WebAssembly 実行を行い、GitHub Pages へ静的配信できるお絵かきツール基盤です。  
+今回のフェーズでは、再編集可能な JSON 保存形式、`Save` / `Load`、`Redo` を追加しています。
 
 ## プロジェクト概要
 
 - Rust だけで UI とアプリケーション本体を構築
 - `egui` で分かりやすい即時モード UI を実装
 - `eframe` で native / web の両ターゲットを共通化
-- MVP として「描ける・色を変えられる・太さを変えられる・消せる・Undo できる・Clear できる」まで実装
-- 保存はまだ未実装だが、将来の編集用独自形式と PNG 出力に進みやすいデータ構造を用意
+- 線描画、色変更、線幅変更、消しゴム、`Undo`、`Redo`、`Clear`
+- 編集用 JSON 形式での保存 / 読込
+- native の実ファイル保存 / 読込
+- web のダウンロード保存 / ファイル選択読込
+- 将来の PNG 出力、レイヤー、図形追加に進みやすいデータ構造
 
 ## 技術選定理由
 
@@ -18,7 +22,11 @@
 - `eframe`
   - `egui` 公式フレームワークであり、native と wasm の両対応を同一コードベースで進めやすい
 - `serde`
-  - 作品データを将来ローカルファイル保存するためのシリアライズ基盤として導入
+  - 作品データと保存形式を堅実にシリアライズするために導入
+- `serde_json`
+  - 再編集可能な独自保存形式を、読みやすく壊れにくい JSON envelope で扱うために導入
+- `rfd`
+  - native のファイルダイアログと web のダウンロード / アップロード導線を Rust だけで扱うために導入
 - `Trunk`
   - `eframe_template` 系でも使われる定番構成で、wasm ビルドとローカル確認を簡潔にできる
   - このリポジトリでは `0.21.14` で検証
@@ -59,6 +67,15 @@ cargo fetch
 cargo run
 ```
 
+### Save / Load / Redo の使い方
+
+- `Undo`: 直前の変更を戻します
+- `Redo`: `Undo` した変更を戻します
+- 新しく線を描くと、既存の `Redo` 履歴は破棄されます
+- `Clear` と `Load` も履歴に乗るので、必要なら `Undo` / `Redo` で往復できます
+- `Save`: 現在の作品を再編集可能な JSON ファイルとして保存します
+- `Load`: 保存済み JSON ファイルを読み込んで再編集状態を復元します
+
 ## web 起動手順
 
 ### ローカル開発サーバー
@@ -78,6 +95,31 @@ trunk build --release
 
 - 出力は `dist/`
 - GitHub Pages へ載せる静的成果物になります
+
+## 保存形式
+
+- 形式は JSON ベースの独自 envelope です
+- 既定ファイル名は `untitled.paint.json`
+- 主な保持項目
+  - `format.id`
+  - `format.version`
+  - `metadata`
+  - `document.canvas_size`
+  - `document.background`
+  - `document.strokes[]`
+  - 各 stroke の `tool` / `color` / `width` / `points`
+- 現在の format version は `1`
+- 壊れた JSON や別形式ファイルを読み込んだ場合は、エラーメッセージを UI に表示します
+
+## native / web の Save / Load の違い
+
+- native
+  - `Save` は OS の保存ダイアログで任意の場所へ保存
+  - `Load` は OS のファイル選択ダイアログで読込
+- web
+  - `Save` はブラウザのダウンロードとして保存
+  - `Load` はブラウザのファイル選択で読込
+  - GitHub Pages 上ではブラウザ制約のため、native のような任意パス保存や継続的ファイルハンドル保持はしません
 
 ## GitHub Pages デプロイ手順
 
@@ -106,7 +148,6 @@ trunk build --release
 
 ## 今後の拡張候補
 
-- 編集用保存形式の実装
 - PNG 出力
 - レイヤー
 - 図形ツール
@@ -125,6 +166,12 @@ cargo build
 cargo build --target wasm32-unknown-unknown
 trunk build --release
 ```
+
+## GitHub Pages 上の制約
+
+- Pages は静的配信なので、保存はブラウザダウンロードになります
+- web 版の `Load` はユーザーが毎回ファイルを選択する形です
+- サーバー保存、認証、DB は使っていません
 
 ### Trunk の色設定エラーを避けるメモ
 
