@@ -2,7 +2,7 @@
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
 同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
-このフェーズでは、再編集用 JSON 保存に加えて、`PNG 出力`、`ズーム / パン`、主要ショートカットを追加しています。
+このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン` に加えて、`選択 / 移動` と基本 `図形ツール` を追加しています。
 
 ## プロジェクト概要
 
@@ -13,6 +13,8 @@
 - 編集用 JSON 形式での `Save` / `Load`
 - 共有用 `Export PNG`
 - キャンバスのズーム、パン、表示リセット
+- 単一選択、ドラッグ移動
+- 矩形、楕円、直線ツール
 - native / web の保存導線差分吸収
 
 ## 技術選定理由
@@ -89,6 +91,21 @@ trunk build --release
 
 ## 操作方法
 
+### ツール
+
+- `Select`
+  - 要素をクリックして選択し、そのままドラッグで移動します
+- `Brush`
+  - フリーハンドの線を描きます
+- `Eraser`
+  - キャンバス背景色で消すフリーハンドツールです
+- `Rectangle`
+  - ドラッグした範囲の外枠を描きます
+- `Ellipse`
+  - ドラッグした範囲の楕円外枠を描きます
+- `Line`
+  - ドラッグ開始点から終了点まで直線を描きます
+
 ### 編集
 
 - `Undo`: 直前の編集を戻します
@@ -96,7 +113,14 @@ trunk build --release
 - `Clear`: 作品全体を消去します
 - `Save`: 再編集用 JSON を保存します
 - `Load`: JSON から再編集状態を復元します
-- `Export PNG`: 背景とストロークを含む共有用 PNG を書き出します
+- `Export PNG`: 背景と全要素を含む共有用 PNG を書き出します
+
+### 選択 / 移動
+
+- `Select` ツールでストロークと図形のどちらも選択できます
+- 選択中の要素にはハイライト付きバウンディングボックスを表示します
+- ドラッグ中はプレビュー表示し、ドロップ時に履歴へコミットします
+- 選択状態そのものは `Undo` / `Redo` に含めません
 
 ### ズーム / パン
 
@@ -117,6 +141,12 @@ trunk build --release
 - `Ctrl/Cmd + +` または `Ctrl/Cmd + =`: Zoom in
 - `Ctrl/Cmd + -`: Zoom out
 - `Ctrl/Cmd + 0`: Reset View
+- `V`: Select
+- `B`: Brush
+- `R`: Rectangle
+- `O`: Ellipse
+- `L`: Line
+- `E`: Eraser
 
 ## 保存形式
 
@@ -130,16 +160,19 @@ trunk build --release
   - `metadata`
   - `document.canvas_size`
   - `document.background`
-  - `document.strokes[]`
-  - 各 stroke の `tool` / `color` / `width` / `points`
-- 現在の format version は `1`
+  - `document.elements[]`
+  - 各 element の `element_type`
+  - stroke の `tool` / `color` / `width` / `points`
+  - shape の `kind` / `color` / `width` / `start` / `end`
+- 現在の format version は `2`
+- 旧 `version = 1` の stroke-only JSON も読込互換を残しています
 
 ### PNG 出力
 
 - 用途は「共有 / 閲覧用」
 - 既定ファイル名は `untitled.png`
-- 表示中のズーム倍率ではなく、作品のキャンバスサイズを基準に生成します
-- 背景色とストロークを含めてラスタライズします
+- 表示中のズーム倍率や選択枠は含めません
+- 作品のキャンバスサイズを基準に、背景色と全要素をラスタライズします
 
 ## native / web の違い
 
@@ -151,6 +184,7 @@ trunk build --release
   - `Load` はブラウザのファイル選択を使います
   - `Export PNG` はブラウザダウンロードとして保存します
   - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
+- 選択 / 移動 / 図形ツール / ズーム / パンの基本操作は native / web で同じです
 
 ## GitHub Pages デプロイ手順
 
@@ -165,8 +199,7 @@ trunk build --release
 1. GitHub に push する
 2. `Settings` -> `Pages` を開く
 3. `Build and deployment` の `Source` を `GitHub Actions` にする
-4. 初回だけ Pages site が未作成なら、GitHub UI または API で有効化する
-5. `master` へ push すると Pages workflow が走る
+4. `master` へ push すると Pages workflow が走る
 
 ### workflow の挙動
 
@@ -182,11 +215,12 @@ trunk build --release
 ## 今後の拡張候補
 
 - レイヤー
-- 図形ツール
-- 選択 / 移動
+- 複数選択
+- リサイズハンドル
+- 塗り、角丸矩形、図形編集
 - キャンバス回転
 - PNG 出力オプション
-- 保存形式 version migration
+- 保存形式 migration
 - ペン / タッチ入力最適化
 
 ## 開発時の確認コマンド
