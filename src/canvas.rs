@@ -11,10 +11,10 @@ pub struct ToolSettings {
     pub width: f32,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct CanvasOutput {
     pub pointer_active: bool,
-    pub stroke_committed: bool,
+    pub committed_stroke: Option<Stroke>,
 }
 
 #[derive(Debug, Default)]
@@ -26,7 +26,7 @@ impl CanvasController {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        document: &mut PaintDocument,
+        document: &PaintDocument,
         tool_settings: ToolSettings,
     ) -> CanvasOutput {
         egui::ScrollArea::both()
@@ -62,21 +62,12 @@ impl CanvasController {
             .inner
     }
 
-    pub fn can_undo(&self, document: &PaintDocument) -> bool {
-        self.active_stroke.is_some() || document.has_strokes()
+    pub fn has_active_stroke(&self) -> bool {
+        self.active_stroke.is_some()
     }
 
-    pub fn undo(&mut self, document: &mut PaintDocument) -> bool {
-        if self.active_stroke.take().is_some() {
-            true
-        } else {
-            document.undo()
-        }
-    }
-
-    pub fn clear(&mut self, document: &mut PaintDocument) {
-        self.active_stroke = None;
-        document.clear();
+    pub fn discard_active_stroke(&mut self) -> bool {
+        self.active_stroke.take().is_some()
     }
 
     fn handle_input(
@@ -84,7 +75,7 @@ impl CanvasController {
         ui: &egui::Ui,
         response: &egui::Response,
         rect: Rect,
-        document: &mut PaintDocument,
+        document: &PaintDocument,
         tool_settings: ToolSettings,
     ) -> CanvasOutput {
         let pointer = ui.input(|input| input.pointer.clone());
@@ -116,22 +107,19 @@ impl CanvasController {
         }
 
         if pointer.primary_released() {
-            output.stroke_committed = self.commit_active_stroke(document);
+            output.committed_stroke = self.commit_active_stroke();
         }
 
         output
     }
 
-    fn commit_active_stroke(&mut self, document: &mut PaintDocument) -> bool {
-        let Some(stroke) = self.active_stroke.take() else {
-            return false;
-        };
+    fn commit_active_stroke(&mut self) -> Option<Stroke> {
+        let stroke = self.active_stroke.take()?;
 
         if stroke.is_committable() {
-            document.push_stroke(stroke);
-            true
+            Some(stroke)
         } else {
-            false
+            None
         }
     }
 }
