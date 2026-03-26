@@ -17,7 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pages-unavailable:
+    if: ${{ github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why Pages deploy is skipped
+        run: |
+          echo "Skipping GitHub Pages deploy because this repository is private."
+          echo "GitHub Pages for this repository requires making it public or using a plan that supports private Pages sites."
+
   build:
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -25,8 +35,6 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Install Rust toolchain
         run: |
@@ -59,6 +67,7 @@ jobs:
           path: dist
 
   deploy:
+    if: ${{ !github.event.repository.private }}
     needs: build
     runs-on: ubuntu-latest
     environment:
