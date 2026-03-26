@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::mem;
 
 pub const DEFAULT_CANVAS_WIDTH: f32 = 1600.0;
 pub const DEFAULT_CANVAS_HEIGHT: f32 = 900.0;
+const DEFAULT_HISTORY_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolKind {
@@ -158,17 +160,119 @@ impl PaintDocument {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentHistory {
+    current: PaintDocument,
+    undo_stack: Vec<PaintDocument>,
+    redo_stack: Vec<PaintDocument>,
+    limit: usize,
+}
+
+impl Default for DocumentHistory {
+    fn default() -> Self {
+        Self::new(PaintDocument::default())
+    }
+}
+
+impl DocumentHistory {
+    pub fn new(document: PaintDocument) -> Self {
+        Self {
+            current: document,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            limit: DEFAULT_HISTORY_LIMIT,
+        }
+    }
+
+    pub fn current(&self) -> &PaintDocument {
+        &self.current
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn commit_stroke(&mut self, stroke: Stroke) -> bool {
+        if !stroke.is_committable() {
+            return false;
+        }
+
+        self.push_undo_snapshot();
+        self.current.push_stroke(stroke);
+        self.redo_stack.clear();
+        true
+    }
+
+    pub fn clear(&mut self) -> bool {
+        if !self.current.has_strokes() {
+            return false;
+        }
+
+        self.push_undo_snapshot();
+        self.current.clear();
+        self.redo_stack.clear();
+        true
+    }
+
+    pub fn replace_document(&mut self, document: PaintDocument) -> bool {
+        if self.current == document {
+            return false;
+        }
+
+        self.push_undo_snapshot();
+        self.current = document;
+        self.redo_stack.clear();
+        true
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo_stack.pop() else {
+            return false;
+        };
+
+        let current = mem::replace(&mut self.current, previous);
+        self.redo_stack.push(current);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+
+        let current = mem::replace(&mut self.current, next);
+        self.undo_stack.push(current);
+        true
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        if self.undo_stack.len() == self.limit {
+            let _ = self.undo_stack.remove(0);
+        }
+
+        self.undo_stack.push(self.current.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
+    use super::{DocumentHistory, PaintDocument, PaintPoint, RgbaColor, Stroke, ToolKind};
+
+    fn sample_stroke(point: f32) -> Stroke {
+        let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::default(), 4.0);
+        stroke.push_point(PaintPoint::new(point, point));
+        stroke.push_point(PaintPoint::new(point + 8.0, point + 8.0));
+        stroke
+    }
 
     #[test]
     fn undo_removes_last_stroke() {
         let mut document = PaintDocument::default();
-        let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::default(), 4.0);
-        stroke.push_point(PaintPoint::new(10.0, 10.0));
-        stroke.push_point(PaintPoint::new(20.0, 20.0));
-        document.push_stroke(stroke);
+        document.push_stroke(sample_stroke(10.0));
 
         assert!(document.undo());
         assert_eq!(document.stroke_count(), 0);
@@ -187,5 +291,50 @@ mod tests {
         document.clear();
 
         assert!(!document.has_strokes());
+    }
+
+    #[test]
+    fn redo_restores_undone_state() {
+        let mut history = DocumentHistory::default();
+        assert!(history.commit_stroke(sample_stroke(4.0)));
+
+        assert!(history.undo());
+        assert!(history.can_redo());
+        assert_eq!(history.current().stroke_count(), 0);
+
+        assert!(history.redo());
+        assert_eq!(history.current().stroke_count(), 1);
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn new_edit_clears_redo_stack() {
+        let mut history = DocumentHistory::default();
+        assert!(history.commit_stroke(sample_stroke(4.0)));
+        assert!(history.undo());
+        assert!(history.can_redo());
+
+        assert!(history.commit_stroke(sample_stroke(20.0)));
+        assert!(!history.can_redo());
+        assert_eq!(history.current().stroke_count(), 1);
+    }
+
+    #[test]
+    fn replace_document_participates_in_undo_redo() {
+        let mut history = DocumentHistory::default();
+        assert!(history.commit_stroke(sample_stroke(3.0)));
+
+        let mut loaded_document = PaintDocument::default();
+        loaded_document.push_stroke(sample_stroke(40.0));
+        loaded_document.push_stroke(sample_stroke(80.0));
+
+        assert!(history.replace_document(loaded_document.clone()));
+        assert_eq!(history.current().stroke_count(), 2);
+
+        assert!(history.undo());
+        assert_eq!(history.current().stroke_count(), 1);
+
+        assert!(history.redo());
+        assert_eq!(history.current(), &loaded_document);
     }
 }
