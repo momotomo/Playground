@@ -4,8 +4,11 @@ use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
-use crate::canvas::{CanvasController, ToolSettings, color32_from_rgba, rgba_from_color32};
-use crate::model::{DocumentHistory, PaintDocument, RgbaColor, Stroke, ToolKind};
+use crate::canvas::{
+    CanvasController, CanvasToolKind, MoveCommit, ToolSettings, color32_from_rgba,
+    rgba_from_color32,
+};
+use crate::model::{DocumentHistory, PaintDocument, PaintElement, RgbaColor};
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
@@ -117,7 +120,7 @@ pub struct PaintApp {
     history: DocumentHistory,
     canvas: CanvasController,
     storage: StorageFacade,
-    active_tool: ToolKind,
+    active_tool: CanvasToolKind,
     brush_color: RgbaColor,
     brush_width: f32,
     status_message: StatusMessage,
@@ -135,11 +138,11 @@ impl Default for PaintApp {
             history: DocumentHistory::new(document.clone()),
             canvas: CanvasController::default(),
             storage,
-            active_tool: ToolKind::Brush,
+            active_tool: CanvasToolKind::Brush,
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Save JSON for editing, export PNG for sharing.",
+                "Ready. Select objects, save editable JSON, or export PNG for sharing.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -172,6 +175,13 @@ impl PaintApp {
         self.status_message = StatusMessage::error(text);
     }
 
+    fn set_active_tool(&mut self, tool: CanvasToolKind, announce: bool) {
+        self.active_tool = tool;
+        if announce {
+            self.set_info(format!("Switched to {}.", tool.label()));
+        }
+    }
+
     fn tool_settings(&self) -> ToolSettings {
         ToolSettings {
             tool: self.active_tool,
@@ -188,31 +198,30 @@ impl PaintApp {
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
         ui.heading("Tools");
-        ui.label("Pick a drawing mode, then drag on the canvas.");
+        ui.label("Select to move existing elements, or pick a drawing tool and drag.");
         ui.add_space(8.0);
 
-        ui.selectable_value(
-            &mut self.active_tool,
-            ToolKind::Brush,
-            ToolKind::Brush.label(),
-        );
-        ui.selectable_value(
-            &mut self.active_tool,
-            ToolKind::Eraser,
-            ToolKind::Eraser.label(),
-        );
+        for tool in [
+            CanvasToolKind::Select,
+            CanvasToolKind::Brush,
+            CanvasToolKind::Rectangle,
+            CanvasToolKind::Ellipse,
+            CanvasToolKind::Line,
+            CanvasToolKind::Eraser,
+        ] {
+            ui.selectable_value(&mut self.active_tool, tool, tool.label());
+        }
 
         ui.add_space(12.0);
         ui.label("Color");
         let mut color = color32_from_rgba(self.brush_color);
         if ui.color_edit_button_srgba(&mut color).changed() {
             self.brush_color = rgba_from_color32(color);
-            self.active_tool = ToolKind::Brush;
-            self.set_info("Brush color updated.");
+            self.set_info("Drawing color updated.");
         }
 
         ui.add_space(12.0);
-        ui.label("Brush Size");
+        ui.label("Stroke Width");
         if ui
             .add(egui::Slider::new(
                 &mut self.brush_width,
@@ -220,9 +229,14 @@ impl PaintApp {
             ))
             .changed()
         {
-            self.set_info(format!("Brush size set to {:.1}px.", self.brush_width));
+            self.set_info(format!("Stroke width set to {:.1}px.", self.brush_width));
         }
         ui.label(format!("{:.1}px", self.brush_width));
+
+        ui.separator();
+        ui.label(RichText::new("Current Mode").strong());
+        ui.small(tool_hint(self.active_tool));
+        ui.small(self.canvas.selection_summary(self.document()));
 
         ui.separator();
         self.show_file_summary(ui);
@@ -233,18 +247,12 @@ impl PaintApp {
             self.document().canvas_size.width,
             self.document().canvas_size.height
         ));
-        ui.label(format!("Strokes: {}", self.document().stroke_count()));
+        ui.label(format!("Elements: {}", self.document().element_count()));
         ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
         ui.small("Zoom: Ctrl/Cmd + Wheel or toolbar buttons");
         ui.small("Pan: Space + Drag or Middle Drag");
+        ui.small("Move: Select, then drag the highlighted element");
         ui.small("Reset view: Ctrl/Cmd + 0");
-        ui.add_space(8.0);
-
-        if self.active_tool == ToolKind::Eraser {
-            ui.small("Eraser uses the current canvas background color.");
-        } else {
-            ui.small("Brush color is stored per stroke for editable saves.");
-        }
 
         ui.separator();
         ui.label(RichText::new("Storage").strong());
@@ -255,12 +263,12 @@ impl PaintApp {
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let has_active_stroke = self.canvas.has_active_stroke();
-        let can_undo = has_active_stroke || self.history.can_undo();
-        let can_redo = !has_active_stroke && self.history.can_redo();
-        let can_clear = has_active_stroke || self.document().has_strokes();
-        let can_file_io = !has_active_stroke && !self.has_pending_storage_task();
-        let can_adjust_view = !has_active_stroke;
+        let has_active_preview = self.canvas.has_active_stroke();
+        let can_undo = has_active_preview || self.history.can_undo();
+        let can_redo = !has_active_preview && self.history.can_redo();
+        let can_clear = has_active_preview || self.document().has_elements();
+        let can_file_io = !has_active_preview && !self.has_pending_storage_task();
+        let can_adjust_view = !has_active_preview;
 
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -339,14 +347,16 @@ impl PaintApp {
 
     fn perform_undo(&mut self) {
         if self.canvas.discard_active_stroke() {
-            self.set_info("Discarded the in-progress stroke.");
+            self.set_info("Discarded the in-progress edit.");
         } else if self.history.undo() {
+            self.canvas.clear_selection();
             self.set_info("Undid the last change.");
         }
     }
 
     fn perform_redo(&mut self) {
         if self.history.redo() {
+            self.canvas.clear_selection();
             self.set_info("Redid the last undone change.");
         }
     }
@@ -354,9 +364,10 @@ impl PaintApp {
     fn perform_clear(&mut self) {
         let discarded = self.canvas.discard_active_stroke();
         if self.history.clear() {
+            self.canvas.clear_selection();
             self.set_info("Cleared the canvas.");
         } else if discarded {
-            self.set_info("Discarded the in-progress stroke.");
+            self.set_info("Discarded the in-progress edit.");
         }
     }
 
@@ -381,9 +392,20 @@ impl PaintApp {
         self.set_info("Reset the view to fit the canvas.");
     }
 
-    fn commit_stroke(&mut self, stroke: Stroke) {
-        if self.history.commit_stroke(stroke) {
-            self.set_info("Stroke committed to the document.");
+    fn commit_element(&mut self, element: PaintElement) {
+        let label = element.kind_label().to_owned();
+        if self.history.commit_element(element) {
+            self.canvas.clear_selection();
+            self.set_info(format!("Added {label}."));
+        }
+    }
+
+    fn apply_move(&mut self, move_commit: MoveCommit) {
+        if self
+            .history
+            .translate_element(move_commit.index, move_commit.delta)
+        {
+            self.set_info("Moved the selected element.");
         }
     }
 
@@ -395,16 +417,12 @@ impl PaintApp {
 
     fn finish_load(&mut self, loaded: LoadedDocument) {
         self.canvas.discard_active_stroke();
+        self.canvas.clear_selection();
         self.canvas.request_view_reset();
-        if self.history.replace_document(loaded.document.clone()) {
-            self.document_name = loaded.file_name;
-            self.saved_snapshot = loaded.document;
-            self.set_info(format!("Loaded {}.", self.document_name));
-        } else {
-            self.document_name = loaded.file_name;
-            self.saved_snapshot = loaded.document;
-            self.set_info("Loaded the document without changes.");
-        }
+        self.history.replace_document(loaded.document.clone());
+        self.document_name = loaded.file_name;
+        self.saved_snapshot = loaded.document;
+        self.set_info(format!("Loaded {}.", self.document_name));
     }
 
     fn finish_export(&mut self, exported: ExportedImage) {
@@ -583,6 +601,24 @@ impl PaintApp {
         {
             self.reset_view();
         }
+
+        self.handle_tool_shortcuts(ctx);
+    }
+
+    fn handle_tool_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::V)) {
+            self.set_active_tool(CanvasToolKind::Select, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::B)) {
+            self.set_active_tool(CanvasToolKind::Brush, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::R)) {
+            self.set_active_tool(CanvasToolKind::Rectangle, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::O)) {
+            self.set_active_tool(CanvasToolKind::Ellipse, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::L)) {
+            self.set_active_tool(CanvasToolKind::Line, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::E)) {
+            self.set_active_tool(CanvasToolKind::Eraser, true);
+        }
     }
 
     fn has_pending_storage_task(&self) -> bool {
@@ -627,6 +663,7 @@ impl eframe::App for PaintApp {
         #[cfg(target_arch = "wasm32")]
         self.poll_web_storage_task();
 
+        self.canvas.sync_with_document(self.history.current());
         self.handle_shortcuts(ctx);
 
         egui::SidePanel::left("tools_panel")
@@ -648,10 +685,25 @@ impl eframe::App for PaintApp {
                 ctx.request_repaint();
             }
 
-            if let Some(stroke) = output.committed_stroke {
-                self.commit_stroke(stroke);
+            if let Some(move_commit) = output.move_commit {
+                self.apply_move(move_commit);
+            }
+
+            if let Some(element) = output.committed_element {
+                self.commit_element(element);
             }
         });
+    }
+}
+
+fn tool_hint(tool: CanvasToolKind) -> &'static str {
+    match tool {
+        CanvasToolKind::Select => "Click an element to select it, then drag to move it.",
+        CanvasToolKind::Brush => "Freehand drawing tool. Drag to draw a stroke.",
+        CanvasToolKind::Eraser => "Freehand eraser that paints with the canvas background.",
+        CanvasToolKind::Rectangle => "Drag from one corner to the opposite corner.",
+        CanvasToolKind::Ellipse => "Drag a bounding box to create an ellipse outline.",
+        CanvasToolKind::Line => "Drag from a start point to an end point.",
     }
 }
 
