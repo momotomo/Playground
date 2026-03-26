@@ -2,91 +2,110 @@
 
 ## なぜ `egui + eframe` にしたか
 
-- Rust だけで UI を構築でき、フロントエンド言語や別ランタイムを増やさずに済むため
-- `egui` は即時モード UI なので、ツールパネルや状態表示を MVP で素早く組み替えやすいため
+- Rust だけで UI を構築でき、別のフロントエンド言語やランタイムを増やさずに済むため
+- `egui` は即時モード UI なので、ツールバー、状態表示、キャンバス操作を段階的に育てやすいため
 - `eframe` は `egui` の公式フレームワークで、native と wasm の両方を同じアプリ本体から起動しやすいため
-- `eframe_template` 系が示す構成を参考にしつつ、今回の用途に必要な最小構成へ整理しやすいため
 
 ## web/native 両対応方針
 
-- アプリ本体は [src/app.rs](../src/app.rs) に集約
-- 描画面と入力処理は [src/canvas.rs](../src/canvas.rs) に分離
-- native 起動は [src/native.rs](../src/native.rs)
-- wasm 起動は [src/web.rs](../src/web.rs)
-- [src/main.rs](../src/main.rs) はターゲットごとに適切なエントリを呼び出すだけにして薄く保つ
+- アプリ本体は `src/app.rs`
+- キャンバス描画とビュー操作は `src/canvas.rs`
+- 作品モデルと編集履歴は `src/model.rs`
+- 保存 / 読込 / export は `src/storage.rs`
+- PNG ラスタライズは `src/render.rs`
+- native 起動は `src/native.rs`
+- wasm 起動は `src/web.rs`
+- `src/main.rs` はターゲットごとのエントリ呼び出しだけに保つ
 
 ## 主要モジュール責務
 
-- [src/app.rs](../src/app.rs)
-  - 画面レイアウト
-  - ツール選択
-  - 基本操作ボタン
+- `src/app.rs`
+  - パネル構成
+  - ツール状態
+  - ボタン操作
+  - ショートカット処理
   - ステータスメッセージ管理
-- [src/canvas.rs](../src/canvas.rs)
-  - キャンバス描画
-  - ポインタ入力の解釈
-  - 一時的な描画中ストローク管理
-  - Undo / Clear の補助
-- [src/model.rs](../src/model.rs)
-  - 作品データ
-  - ストローク
-  - 色
-  - 点列
-  - `DocumentHistory` による `Undo` / `Redo` 状態
-  - 将来の保存に耐える `serde` 対応データ
-- [src/storage.rs](../src/storage.rs)
-  - 保存形式の encode / decode
-  - native の path / dialog ベース保存
-  - web の download / upload ベース保存
-  - 将来の PNG 出力の着地点
+- `src/canvas.rs`
+  - キャンバス表示
+  - ポインタ入力
+  - ズーム / パン
+  - 画面座標と作品座標の相互変換
+  - 描画中ストロークの一時管理
+- `src/model.rs`
+  - `PaintDocument`
+  - `Stroke`
+  - 色、点列、キャンバスサイズ
+  - `DocumentHistory` による `Undo` / `Redo`
+- `src/render.rs`
+  - `PaintDocument` から PNG 用ピクセルデータを生成
+  - 表示倍率に依存しない作品基準のラスタライズ
+- `src/storage.rs`
+  - JSON encode / decode
+  - native / web の保存導線差分吸収
+  - PNG export のバイト列生成と保存
+
+## 作品状態とビュー状態の分離
+
+- 作品状態は `PaintDocument`
+  - `canvas_size`
+  - `background`
+  - `strokes`
+- ビュー状態は `CanvasController` 内の `CanvasViewState`
+  - `zoom`
+  - `pan`
+  - `viewport`
+  - `needs_reset`
+- `Undo` / `Redo` は作品状態だけに作用させる
+- ズーム / パンは履歴に積まない
+- これにより保存形式、PNG 出力、将来のレイヤーや選択機能に対して、表示都合の情報を混ぜずに済む
+
+## 座標変換の考え方
+
+- ストロークは常に作品座標で保持する
+- 画面表示時だけ `zoom` と `pan` を用いて作品座標から画面座標へ変換する
+- 入力時は逆変換して画面座標を作品座標へ戻す
+- PNG 出力では画面表示の transform を使わず、作品座標を直接ラスタライズする
+
+## Undo / Redo とビュー操作の関係
+
+- `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
+- 新規ストローク、`Clear`、`Load` は編集履歴に入る
+- `Undo` 後に新規描画や `Clear` / `Load` を行った場合、`redo_stack` は破棄する
+- ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
 ## 保存形式の責務
 
-- サーバー保存、DB、認証は入れない
-- 編集用保存形式は JSON ベースの独自 envelope
-- `storage` が `PaintDocument` と保存形式の相互変換を担当する
+- JSON 保存は「再編集用」
+- `storage` が JSON envelope の version 管理と encode / decode を担当する
 - envelope には `format.id` と `format.version` を持たせ、将来の migration を見据える
-- `document` 直下にキャンバスサイズ、背景、ストローク列を保持する
-- 将来のメタ情報追加は `metadata` 側に寄せる
-- PNG は今回未実装だが、`storage` に export 系 API を追加する想定
+- `metadata` は将来のタイトル、作成時刻、タグなどの追加先として残す
+
+## PNG 出力の責務
+
+- PNG は「共有 / 閲覧用」
+- `render` が作品データからピクセルデータを生成する
+- `storage` が PNG バイト列化と native / web 保存導線を担当する
+- これにより、将来 JPEG やサムネイル出力を追加するときも `app` を肥大化させずに済む
 
 ## native / web の保存方式の違い
 
 - native
-  - `rfd::FileDialog` により OS ダイアログで保存先 / 読込元を選ぶ
-  - 実ファイルは `storage` の path ベース関数で読み書きする
+  - `rfd::FileDialog` による OS ダイアログ
+  - JSON も PNG も実ファイルとして保存
 - web
-  - `rfd::AsyncFileDialog` によりブラウザのダウンロード / ファイル選択を使う
-  - ファイルハンドルの継続保持はせず、その場で read / write を完結させる
-  - Pages 上でも同じ制約で動くため、native と完全同一の UX にはしない
-
-## Undo / Redo の状態管理方針
-
-- `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新しいストロークのコミット、`Clear`, `Load` はすべて history に対する変更として扱う
-- `Undo` 時は `current` を `redo_stack` へ積み、`undo_stack` から復元する
-- `Redo` 時はその逆を行う
-- `Undo` 後に新規描画や `Clear` / `Load` を行った場合、`redo_stack` は破棄する
-- 描画中ストロークは `canvas` が一時管理し、確定した瞬間だけ `history` に反映する
+  - `rfd::AsyncFileDialog` によるブラウザダウンロード / ファイル選択
+  - JSON と PNG はその都度ダウンロード
+  - GitHub Pages 上でも同じブラウザ制約で動作
 
 ## 将来の拡張方針
 
-- `core` 切り出し
-  - 現在の `model` / `storage` を元に、描画データとコマンド管理を将来別 crate 化しやすいよう依存を薄くしている
 - レイヤー
-  - `PaintDocument` に layer 配列を導入し、ストローク所属を持たせる
-- 図形
-  - freehand stroke と別に `ShapeCommand` を追加
-- 出力
-  - PNG ラスタライズ
-  - 将来的には SVG 出力も候補
-- 保存形式
-  - 編集用の独自保存形式の version 増分
-  - バージョニング対応
-  - 後方互換 migration
-- PNG / SVG 出力
-  - まず `storage` に raster export API を追加し、次に UI へ公開する
-- 操作性
-  - ショートカット
-  - ズーム / パン
-  - タッチ / スタイラス最適化
+  - `PaintDocument` に layer 配列を導入し、stroke の所属を分離
+- 図形ツール
+  - freehand stroke と別に shape command を追加
+- 選択 / 移動
+  - 作品座標ベースの選択範囲と transform を導入
+- PNG / SVG 出力拡張
+  - `render` を拡張してサムネイルやベクター出力経路を増やす
+- 保存形式 version migration
+  - `format.version` ごとに decode 側で migration を入れる

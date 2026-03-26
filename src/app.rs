@@ -1,4 +1,4 @@
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
@@ -6,10 +6,62 @@ use std::rc::Rc;
 
 use crate::canvas::{CanvasController, ToolSettings, color32_from_rgba, rgba_from_color32};
 use crate::model::{DocumentHistory, PaintDocument, RgbaColor, Stroke, ToolKind};
-use crate::storage::{LoadedDocument, SavedDocument, StorageError, StorageFacade};
+use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
+
+fn shortcut_undo() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
+}
+
+fn shortcut_redo() -> KeyboardShortcut {
+    KeyboardShortcut::new(
+        Modifiers {
+            shift: true,
+            ..Modifiers::COMMAND
+        },
+        Key::Z,
+    )
+}
+
+fn shortcut_redo_alt() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Y)
+}
+
+fn shortcut_save() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::S)
+}
+
+fn shortcut_load() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::O)
+}
+
+fn shortcut_export_png() -> KeyboardShortcut {
+    KeyboardShortcut::new(
+        Modifiers {
+            shift: true,
+            ..Modifiers::COMMAND
+        },
+        Key::E,
+    )
+}
+
+fn shortcut_zoom_in() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus)
+}
+
+fn shortcut_zoom_in_alt() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals)
+}
+
+fn shortcut_zoom_out() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus)
+}
+
+fn shortcut_reset_view() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0)
+}
 
 #[derive(Clone)]
 struct StatusMessage {
@@ -58,6 +110,7 @@ struct PendingWebStorageTask {
 enum WebStorageResult {
     Saved(SavedDocument),
     Loaded(LoadedDocument),
+    Exported(ExportedImage),
 }
 
 pub struct PaintApp {
@@ -86,7 +139,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Save and Load use an editable JSON document format.",
+                "Ready. Save JSON for editing, export PNG for sharing.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -181,12 +234,16 @@ impl PaintApp {
             self.document().canvas_size.height
         ));
         ui.label(format!("Strokes: {}", self.document().stroke_count()));
+        ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
+        ui.small("Zoom: Ctrl/Cmd + Wheel or toolbar buttons");
+        ui.small("Pan: Space + Drag or Middle Drag");
+        ui.small("Reset view: Ctrl/Cmd + 0");
         ui.add_space(8.0);
 
         if self.active_tool == ToolKind::Eraser {
             ui.small("Eraser uses the current canvas background color.");
         } else {
-            ui.small("Brush color will be stored per stroke for future editable saves.");
+            ui.small("Brush color is stored per stroke for editable saves.");
         }
 
         ui.separator();
@@ -194,6 +251,7 @@ impl PaintApp {
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
+        ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG");
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -201,58 +259,126 @@ impl PaintApp {
         let can_undo = has_active_stroke || self.history.can_undo();
         let can_redo = !has_active_stroke && self.history.can_redo();
         let can_clear = has_active_stroke || self.document().has_strokes();
-        let can_save = !has_active_stroke && !self.has_pending_storage_task();
-        let can_load = !has_active_stroke && !self.has_pending_storage_task();
+        let can_file_io = !has_active_stroke && !self.has_pending_storage_task();
+        let can_adjust_view = !has_active_stroke;
 
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(can_undo, egui::Button::new("Undo"))
                 .clicked()
             {
-                if self.canvas.discard_active_stroke() {
-                    self.set_info("Discarded the in-progress stroke.");
-                } else if self.history.undo() {
-                    self.set_info("Undid the last change.");
-                }
+                self.perform_undo();
             }
 
             if ui
                 .add_enabled(can_redo, egui::Button::new("Redo"))
                 .clicked()
-                && self.history.redo()
             {
-                self.set_info("Redid the last undone change.");
+                self.perform_redo();
             }
 
             if ui
                 .add_enabled(can_clear, egui::Button::new("Clear"))
                 .clicked()
             {
-                let discarded = self.canvas.discard_active_stroke();
-                if self.history.clear() {
-                    self.set_info("Cleared the canvas.");
-                } else if discarded {
-                    self.set_info("Discarded the in-progress stroke.");
-                }
+                self.perform_clear();
             }
 
+            ui.separator();
+
             if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
+                .add_enabled(can_file_io, egui::Button::new("Save"))
                 .clicked()
             {
                 self.save_document(ctx);
             }
 
             if ui
-                .add_enabled(can_load, egui::Button::new("Load"))
+                .add_enabled(can_file_io, egui::Button::new("Load"))
                 .clicked()
             {
                 self.load_document(ctx);
             }
 
+            if ui
+                .add_enabled(can_file_io, egui::Button::new("Export PNG"))
+                .clicked()
+            {
+                self.export_png(ctx);
+            }
+
+            ui.separator();
+
+            if ui
+                .add_enabled(can_adjust_view, egui::Button::new("-"))
+                .clicked()
+            {
+                self.zoom_out();
+            }
+
+            ui.label(RichText::new(self.canvas.zoom_label()).monospace());
+
+            if ui
+                .add_enabled(can_adjust_view, egui::Button::new("+"))
+                .clicked()
+            {
+                self.zoom_in();
+            }
+
+            if ui
+                .add_enabled(can_adjust_view, egui::Button::new("Reset View"))
+                .clicked()
+            {
+                self.reset_view();
+            }
+
             ui.separator();
             ui.label(self.status_message.rich_text());
         });
+    }
+
+    fn perform_undo(&mut self) {
+        if self.canvas.discard_active_stroke() {
+            self.set_info("Discarded the in-progress stroke.");
+        } else if self.history.undo() {
+            self.set_info("Undid the last change.");
+        }
+    }
+
+    fn perform_redo(&mut self) {
+        if self.history.redo() {
+            self.set_info("Redid the last undone change.");
+        }
+    }
+
+    fn perform_clear(&mut self) {
+        let discarded = self.canvas.discard_active_stroke();
+        if self.history.clear() {
+            self.set_info("Cleared the canvas.");
+        } else if discarded {
+            self.set_info("Discarded the in-progress stroke.");
+        }
+    }
+
+    fn zoom_in(&mut self) {
+        let canvas_size = self.document().canvas_size;
+        if self.canvas.zoom_in(canvas_size) {
+            self.set_info(format!("Zoomed in to {}.", self.canvas.zoom_label()));
+        }
+    }
+
+    fn zoom_out(&mut self) {
+        let canvas_size = self.document().canvas_size;
+        if self.canvas.zoom_out(canvas_size) {
+            self.set_info(format!("Zoomed out to {}.", self.canvas.zoom_label()));
+        }
+    }
+
+    fn reset_view(&mut self) {
+        let canvas_size = self.document().canvas_size;
+        self.canvas.request_view_reset();
+        let _ = self.canvas.reset_view(canvas_size);
+        self.set_info("Reset the view to fit the canvas.");
     }
 
     fn commit_stroke(&mut self, stroke: Stroke) {
@@ -269,6 +395,7 @@ impl PaintApp {
 
     fn finish_load(&mut self, loaded: LoadedDocument) {
         self.canvas.discard_active_stroke();
+        self.canvas.request_view_reset();
         if self.history.replace_document(loaded.document.clone()) {
             self.document_name = loaded.file_name;
             self.saved_snapshot = loaded.document;
@@ -278,6 +405,10 @@ impl PaintApp {
             self.saved_snapshot = loaded.document;
             self.set_info("Loaded the document without changes.");
         }
+    }
+
+    fn finish_export(&mut self, exported: ExportedImage) {
+        self.set_info(format!("Exported {}.", exported.file_name));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -364,6 +495,96 @@ impl PaintApp {
         }
     }
 
+    fn export_png(&mut self, _ctx: &egui::Context) {
+        let suggested_name = self.storage.suggested_png_file_name(&self.document_name);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let result = self
+                .storage
+                .export_png_via_dialog(self.document(), &suggested_name)
+                .map(|exported| self.finish_export(exported));
+            self.report_storage_result("export", result);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let slot = Rc::new(RefCell::new(None));
+            let task_slot = slot.clone();
+            let storage = self.storage;
+            let document = self.document().clone();
+            let ctx = _ctx.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = storage
+                    .export_png_via_dialog(&document, &suggested_name)
+                    .await
+                    .map(WebStorageResult::Exported);
+                *task_slot.borrow_mut() = Some(result);
+                ctx.request_repaint();
+            });
+
+            self.pending_web_task = Some(PendingWebStorageTask {
+                label: "export",
+                slot,
+            });
+            self.set_info("Preparing the PNG download...");
+        }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let redo_pressed = ctx.input_mut(|input| input.consume_shortcut(&shortcut_redo()))
+            || ctx.input_mut(|input| input.consume_shortcut(&shortcut_redo_alt()));
+        if redo_pressed && !self.canvas.has_active_stroke() && self.history.can_redo() {
+            self.perform_redo();
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_undo()))
+            && (self.canvas.has_active_stroke() || self.history.can_undo())
+        {
+            self.perform_undo();
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_save()))
+            && !self.canvas.has_active_stroke()
+            && !self.has_pending_storage_task()
+        {
+            self.save_document(ctx);
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_load()))
+            && !self.canvas.has_active_stroke()
+            && !self.has_pending_storage_task()
+        {
+            self.load_document(ctx);
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_export_png()))
+            && !self.canvas.has_active_stroke()
+            && !self.has_pending_storage_task()
+        {
+            self.export_png(ctx);
+        }
+
+        let zoom_in_pressed = ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_in()))
+            || ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_in_alt()));
+        if zoom_in_pressed && !self.canvas.has_active_stroke() {
+            self.zoom_in();
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_out()))
+            && !self.canvas.has_active_stroke()
+        {
+            self.zoom_out();
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_reset_view()))
+            && !self.canvas.has_active_stroke()
+        {
+            self.reset_view();
+        }
+    }
+
     fn has_pending_storage_task(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
@@ -387,6 +608,7 @@ impl PaintApp {
             match result {
                 Ok(WebStorageResult::Saved(saved)) => self.finish_save(saved),
                 Ok(WebStorageResult::Loaded(loaded)) => self.finish_load(loaded),
+                Ok(WebStorageResult::Exported(exported)) => self.finish_export(exported),
                 Err(StorageError::Cancelled) => {
                     self.set_info(format!("{} cancelled.", capitalize(task.label)));
                 }
@@ -405,6 +627,8 @@ impl eframe::App for PaintApp {
         #[cfg(target_arch = "wasm32")]
         self.poll_web_storage_task();
 
+        self.handle_shortcuts(ctx);
+
         egui::SidePanel::left("tools_panel")
             .resizable(false)
             .default_width(220.0)
@@ -418,10 +642,9 @@ impl eframe::App for PaintApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
             let tool_settings = self.tool_settings();
-            let document = self.history.current();
-            let output = self.canvas.show(ui, document, tool_settings);
+            let output = self.canvas.show(ui, self.history.current(), tool_settings);
 
-            if output.pointer_active {
+            if output.needs_repaint {
                 ctx.request_repaint();
             }
 

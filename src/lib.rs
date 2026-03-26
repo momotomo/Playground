@@ -3,6 +3,7 @@
 pub mod app;
 pub mod canvas;
 pub mod model;
+pub mod render;
 pub mod storage;
 
 #[cfg(not(target_arch = "wasm32"))]
