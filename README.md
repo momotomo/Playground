@@ -1,42 +1,42 @@
 # Rust Paint Foundation
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
-同じコードベースから native 実行と WebAssembly 実行を行い、GitHub Pages へ静的配信できるお絵かきツール基盤です。  
-今回のフェーズでは、再編集可能な JSON 保存形式、`Save` / `Load`、`Redo` を追加しています。
+同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
+このフェーズでは、再編集用 JSON 保存に加えて、`PNG 出力`、`ズーム / パン`、主要ショートカットを追加しています。
 
 ## プロジェクト概要
 
 - Rust だけで UI とアプリケーション本体を構築
-- `egui` で分かりやすい即時モード UI を実装
-- `eframe` で native / web の両ターゲットを共通化
+- `egui` による即時モード UI
+- `eframe` による native / web 共通アプリ基盤
 - 線描画、色変更、線幅変更、消しゴム、`Undo`、`Redo`、`Clear`
-- 編集用 JSON 形式での保存 / 読込
-- native の実ファイル保存 / 読込
-- web のダウンロード保存 / ファイル選択読込
-- 将来の PNG 出力、レイヤー、図形追加に進みやすいデータ構造
+- 編集用 JSON 形式での `Save` / `Load`
+- 共有用 `Export PNG`
+- キャンバスのズーム、パン、表示リセット
+- native / web の保存導線差分吸収
 
 ## 技術選定理由
 
 - `egui`
-  - Rust だけで UI を完結でき、即時モードなのでツール類の試作と拡張が速い
+  - Rust だけで UI を完結でき、ツールパネルや状態表示を素早く試作しやすい
 - `eframe`
-  - `egui` 公式フレームワークであり、native と wasm の両対応を同一コードベースで進めやすい
+  - `egui` 公式フレームワークで、native と wasm を同じアプリ本体で扱いやすい
 - `serde`
-  - 作品データと保存形式を堅実にシリアライズするために導入
+  - 作品データを堅実にシリアライズするため
 - `serde_json`
-  - 再編集可能な独自保存形式を、読みやすく壊れにくい JSON envelope で扱うために導入
+  - 再編集用の独自保存形式を読みやすい JSON envelope で持たせるため
 - `rfd`
-  - native のファイルダイアログと web のダウンロード / アップロード導線を Rust だけで扱うために導入
+  - native のファイルダイアログと web のダウンロード / ファイル選択を Rust だけで扱うため
+- `tiny-skia`
+  - 作品データから表示倍率に依存しない PNG をラスタライズするため
 - `Trunk`
-  - `eframe_template` 系でも使われる定番構成で、wasm ビルドとローカル確認を簡潔にできる
-  - このリポジトリでは `0.21.14` で検証
+  - wasm ビルドとローカル確認を簡潔に行うため
 
 ## Rust バージョン要件
 
-- このリポジトリは `rust-toolchain.toml` で `1.94.0` に固定しています
+- `rust-toolchain.toml` で `1.94.0` に固定しています
 - `Cargo.toml` 上の最小要件は `rust-version = 1.88`
-- `eframe` / `egui` は breaking changes が比較的入りやすいため、現時点では `0.33.3` に固定しています
-- 将来更新する場合は 1 バージョンずつ上げて、`egui` / `eframe` の changelog を確認してください
+- `egui` / `eframe` は breaking changes が入りやすいため、現時点では `0.33.3` に固定しています
 
 ## セットアップ手順
 
@@ -49,7 +49,7 @@ rustup component add rustfmt clippy
 rustup target add wasm32-unknown-unknown
 ```
 
-### 2. Web ビルド用の Trunk を入れる
+### 2. Trunk を入れる
 
 ```bash
 cargo install --locked trunk --version 0.21.14
@@ -66,15 +66,6 @@ cargo fetch
 ```bash
 cargo run
 ```
-
-### Save / Load / Redo の使い方
-
-- `Undo`: 直前の変更を戻します
-- `Redo`: `Undo` した変更を戻します
-- 新しく線を描くと、既存の `Redo` 履歴は破棄されます
-- `Clear` と `Load` も履歴に乗るので、必要なら `Undo` / `Redo` で往復できます
-- `Save`: 現在の作品を再編集可能な JSON ファイルとして保存します
-- `Load`: 保存済み JSON ファイルを読み込んで再編集状態を復元します
 
 ## web 起動手順
 
@@ -96,11 +87,44 @@ trunk build --release
 - 出力は `dist/`
 - GitHub Pages へ載せる静的成果物になります
 
+## 操作方法
+
+### 編集
+
+- `Undo`: 直前の編集を戻します
+- `Redo`: `Undo` した編集を戻します
+- `Clear`: 作品全体を消去します
+- `Save`: 再編集用 JSON を保存します
+- `Load`: JSON から再編集状態を復元します
+- `Export PNG`: 背景とストロークを含む共有用 PNG を書き出します
+
+### ズーム / パン
+
+- `+` / `-` ボタンでズーム
+- `Reset View` でキャンバス全体が入る表示に戻す
+- `Ctrl/Cmd + マウスホイール` でズーム
+- `Space + Drag` または `中ボタンドラッグ` でパン
+- 現在のズーム倍率は上部ツールバーと左パネルに表示
+
+### ショートカット一覧
+
+- `Ctrl/Cmd + Z`: Undo
+- `Ctrl/Cmd + Shift + Z`: Redo
+- `Ctrl/Cmd + Y`: Redo の代替
+- `Ctrl/Cmd + S`: Save
+- `Ctrl/Cmd + O`: Load
+- `Ctrl/Cmd + Shift + E`: Export PNG
+- `Ctrl/Cmd + +` または `Ctrl/Cmd + =`: Zoom in
+- `Ctrl/Cmd + -`: Zoom out
+- `Ctrl/Cmd + 0`: Reset View
+
 ## 保存形式
 
-- 形式は JSON ベースの独自 envelope です
+### JSON 保存
+
+- 用途は「再編集用」
 - 既定ファイル名は `untitled.paint.json`
-- 主な保持項目
+- JSON envelope に次の情報を保持します
   - `format.id`
   - `format.version`
   - `metadata`
@@ -109,52 +133,61 @@ trunk build --release
   - `document.strokes[]`
   - 各 stroke の `tool` / `color` / `width` / `points`
 - 現在の format version は `1`
-- 壊れた JSON や別形式ファイルを読み込んだ場合は、エラーメッセージを UI に表示します
 
-## native / web の Save / Load の違い
+### PNG 出力
+
+- 用途は「共有 / 閲覧用」
+- 既定ファイル名は `untitled.png`
+- 表示中のズーム倍率ではなく、作品のキャンバスサイズを基準に生成します
+- 背景色とストロークを含めてラスタライズします
+
+## native / web の違い
 
 - native
-  - `Save` は OS の保存ダイアログで任意の場所へ保存
-  - `Load` は OS のファイル選択ダイアログで読込
+  - `Save` / `Load` は OS のファイルダイアログを使います
+  - `Export PNG` は OS ダイアログから `.png` を保存します
 - web
-  - `Save` はブラウザのダウンロードとして保存
-  - `Load` はブラウザのファイル選択で読込
-  - GitHub Pages 上ではブラウザ制約のため、native のような任意パス保存や継続的ファイルハンドル保持はしません
+  - `Save` はブラウザダウンロードとして JSON を保存します
+  - `Load` はブラウザのファイル選択を使います
+  - `Export PNG` はブラウザダウンロードとして保存します
+  - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
 
 ## GitHub Pages デプロイ手順
 
 ### 前提
 
-- GitHub Free で公開する場合は、リポジトリを `public` にしておくのが安全です
-- このリポジトリには [`.github/workflows/pages.yml`](.github/workflows/pages.yml) を追加済みです
+- GitHub Free で使う場合は、リポジトリを `public` にするのが基本です
+- private repo では、プラン次第で GitHub Pages が使えないことがあります
+- このリポジトリには `.github/workflows/pages.yml` を追加済みです
 
 ### GitHub 側設定
 
 1. GitHub に push する
-2. リポジトリの `Settings` -> `Pages` を開く
+2. `Settings` -> `Pages` を開く
 3. `Build and deployment` の `Source` を `GitHub Actions` にする
-4. `main` または `master` へ push すると workflow が走る
+4. 初回だけ Pages site が未作成なら、GitHub UI または API で有効化する
+5. `master` へ push すると Pages workflow が走る
 
-### 公開 URL の扱い
+### workflow の挙動
 
-- プロジェクト Pages (`https://<user>.github.io/<repo>/`) は workflow が自動で `public-url` を `/<repo>/` に設定します
-- ユーザー/組織 Pages (`<user>.github.io`) 形式のリポジトリでは `public-url` を `/` に切り替えるよう workflow 内で分岐しています
+- public repo では web build と Pages deploy を実行します
+- private repo では Pages 非対応プランでも CI が分かりやすく終わるよう、deploy job を skip して理由を表示します
 
 ## ドキュメント
 
-- [README.md](README.md)
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/MVP_SCOPE.md](docs/MVP_SCOPE.md)
+- `README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/MVP_SCOPE.md`
 
 ## 今後の拡張候補
 
-- PNG 出力
 - レイヤー
 - 図形ツール
-- 選択ツール
-- パレット管理
-- ショートカットキー
-- タッチ / ペン入力の最適化
+- 選択 / 移動
+- キャンバス回転
+- PNG 出力オプション
+- 保存形式 version migration
+- ペン / タッチ入力最適化
 
 ## 開発時の確認コマンド
 
@@ -173,7 +206,7 @@ trunk build --release
 - web 版の `Load` はユーザーが毎回ファイルを選択する形です
 - サーバー保存、認証、DB は使っていません
 
-### Trunk の色設定エラーを避けるメモ
+## Trunk の色設定エラーを避けるメモ
 
 - 環境変数 `NO_COLOR=1` が入っているシェルでは、`trunk 0.21.14` が `invalid value '1' for '--no-color'` で失敗することがあります
 - その場合は次のように上書きしてください
