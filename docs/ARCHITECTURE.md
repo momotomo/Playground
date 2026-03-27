@@ -30,7 +30,7 @@
   - ポインタ入力
   - ズーム / パン
   - 画面座標と作品座標の相互変換
-  - 選択状態
+  - 単一 / 複数選択状態
   - 編集中セッション
   - ハンドル判定と preview 表示
 - `src/model.rs`
@@ -84,12 +84,27 @@
   - `viewport`
   - `needs_reset`
 - 選択状態は `SelectionState`
-  - `selected_index`
+  - `selected indices`
 - 編集中一時状態は `SelectionSession`
   - `Move`
   - `Resize`
   - `Rotate`
 - `SelectionSession` は preview 用だけに使い、確定時にだけ履歴へ流す
+- 単一選択時は既存のハンドル編集を使い、複数選択時は move / align / reorder に限定する
+
+## 選択モデルの拡張内容
+
+- 選択は `Vec<usize>` ベースで保持し、作品データには保存しない
+- 選択の追加 / 解除は `Shift + Click`
+- 単一選択
+  - 要素固有の再編集に使う
+  - shape なら move / resize / rotate
+  - stroke なら move
+- 複数選択
+  - 一括移動
+  - 整列
+  - 重なり順変更
+- リサイズ / 回転ハンドルは単一選択 shape のみ表示し、複数選択 UI とは明確に分離する
 
 ## リサイズ / 回転操作の設計
 
@@ -117,12 +132,38 @@
   - bounds は回転後の四隅から軸平行 bbox を計算する
 - line
   - 線分距離で判定する
+- 複数選択
+  - 各要素の個別 bounds をハイライト表示する
+  - 選択全体の union bounds をグループ bbox として表示する
+- クリック優先順位は次の通り
+  - 単一選択 shape のハンドル
+  - 選択済み要素本体
+  - 未選択要素本体
+  - 背景
 - 選択枠、ハンドル、回転リンクは UI 表示専用で、保存や PNG 出力には含めない
+
+## 整列アルゴリズムの考え方
+
+- 整列は複数選択中のみ有効
+- 基準は選択要素全体の union bounds
+- 各要素は自分自身の bounds を使って位置差分だけ計算する
+- 変えるのは位置だけで、rotation や shape の意味は維持する
+- 実装上は `PaintDocument` から整列後の新しい `document` を生成し、履歴へ 1 回だけ流す
+
+## 重なり順変更のモデル
+
+- 重なり順は `PaintDocument.elements` の配列順で表現する
+- `Bring to Front` / `Send to Back`
+  - 選択要素を配列の末尾 / 先頭へまとまって移動する
+- `Bring Forward` / `Send Backward`
+  - 1 ステップだけ前後へ移動する
+- 複数選択時は、選択要素どうしの相対順を保ったまま移動する
 
 ## 履歴コミットの考え方
 
 - 新規 stroke / 図形作成は `commit_element`
-- Move / Resize / Rotate は `replace_element`
+- 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
+- 複数要素の Move / Align / Reorder も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -130,7 +171,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、リサイズ、回転、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、リサイズ、回転、複数移動、整列、重なり順変更、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -141,6 +182,7 @@
 - 現在の保存は `format.version = 2` を維持する
 - 旧 `version = 1` の stroke-only 形式は decode 側で `PaintElement::Stroke` へ変換して読む
 - 旧 `version = 2` の shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
+- 重なり順は `document.elements[]` の配列順としてそのまま保存する
 
 ## PNG 出力の責務
 
@@ -148,17 +190,20 @@
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
+- 整列や重なり順変更も作品データどおりに反映する
 - 選択枠やハンドルは出力に含めない
 
 ## 将来の拡張方針
 
-- 複数選択
-  - `selected_index` を集合へ拡張し、一括移動や整列を扱う
 - レイヤー
   - `PaintDocument` に layer 配列を導入し、各 layer が `PaintElement` 配列を持つ形へ拡張
+- 複数選択強化
+  - ドラッグ矩形選択
+  - 複数要素の一括リサイズ / 回転
+  - グループ化
 - ストローク変形
   - bbox ベースの簡易スケールや回転を追加
 - 図形編集強化
-  - 塗り、角丸矩形、矢印、スナップ、整列などを追加
+  - 塗り、角丸矩形、矢印、スナップ、等間隔配置などを追加
 - 保存形式 migration
   - 将来の大きな形状拡張時に `format.version` を上げて decode 側で migration を入れる
