@@ -15,11 +15,13 @@
 - グリッドスナップ
 - 水平 / 垂直ガイドの追加 / 削除 / 表示切替 / ドラッグ移動
 - ガイドスナップ
+- スマートガイド表示と move 時の近接スナップ
+- ルーラー UI の表示切替
 - レイヤー順と同一レイヤー内の重なり順の分離
 - `format.version = 4` の JSON 保存
 - `v3 / v2 / v1` の読込互換を維持した migration
-- レイヤー変更と grid / guides 設定変更を含む Undo / Redo
-- layer round-trip、hidden / locked、layer add/delete、layer transfer、grid / guides のテスト
+- レイヤー変更と grid / guides / smart guide / ruler 設定変更を含む Undo / Redo
+- layer round-trip、hidden / locked、layer add/delete、layer transfer、grid / guides / smart guide のテスト
 
 ## 今回あえて入れなかった範囲
 
@@ -29,7 +31,7 @@
 - 単一選択ストロークの専用リサイズ / 回転ハンドル
 - 塗り
 - 角丸矩形
-- スマートガイド
+- スマートガイドの高度化
 - group 内だけを直接選ぶ isolate 編集
 - 出力解像度指定
 - JPEG / SVG 出力
@@ -43,6 +45,6 @@
 - group 内部編集とネスト可視化
 - 単一選択ストロークの専用変形 UI
 - 塗り、角丸矩形、矢印付き線
-- ruler UI とスマートガイド
+- ruler UI とスマートガイドの高度化
 - タッチ / ペン入力調整
 - 保存形式 migration の強化
