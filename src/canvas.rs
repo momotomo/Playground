@@ -55,6 +55,7 @@ struct RulerPaintStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
     Select,
+    Pan,
     Brush,
     Eraser,
     Rectangle,
@@ -66,6 +67,7 @@ impl CanvasToolKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Select => "選択",
+            Self::Pan => "手のひら",
             Self::Brush => "ブラシ",
             Self::Eraser => "消しゴム",
             Self::Rectangle => "四角形",
@@ -89,6 +91,7 @@ pub struct ToolSettings {
     pub tool: CanvasToolKind,
     pub color: RgbaColor,
     pub width: f32,
+    pub multi_select_mode: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -144,8 +147,9 @@ enum InteractionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PanMode {
-    SpaceDrag,
-    MiddleDrag,
+    Space,
+    Middle,
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -873,7 +877,8 @@ impl CanvasController {
         let hover_pos = pointer.hover_pos();
         let hovered = response.contains_pointer();
         let space_pan = ui.input(|input| input.key_down(egui::Key::Space));
-        let shift_selection = ui.input(|input| input.modifiers.shift);
+        let extend_selection =
+            ui.input(|input| input.modifiers.shift) || tool_settings.multi_select_mode;
         let mut output = CanvasOutput::default();
 
         if self.active_preview.is_none() && self.selection_session.is_none() && hovered {
@@ -891,13 +896,20 @@ impl CanvasController {
         match self.interaction_mode {
             InteractionMode::Idle => {
                 if hovered && pointer.button_pressed(PointerButton::Middle) {
-                    self.interaction_mode = InteractionMode::Panning(PanMode::MiddleDrag);
+                    self.interaction_mode = InteractionMode::Panning(PanMode::Middle);
                     output.needs_repaint = true;
                     return output;
                 }
 
                 if hovered && space_pan && pointer.primary_pressed() {
-                    self.interaction_mode = InteractionMode::Panning(PanMode::SpaceDrag);
+                    self.interaction_mode = InteractionMode::Panning(PanMode::Space);
+                    output.needs_repaint = true;
+                    return output;
+                }
+
+                if hovered && tool_settings.tool == CanvasToolKind::Pan && pointer.primary_pressed()
+                {
+                    self.interaction_mode = InteractionMode::Panning(PanMode::Tool);
                     output.needs_repaint = true;
                     return output;
                 }
@@ -922,8 +934,12 @@ impl CanvasController {
                                 self.view.zoom,
                                 position,
                                 world,
-                                shift_selection,
+                                extend_selection,
                             );
+                            output.needs_repaint = true;
+                        }
+                        CanvasToolKind::Pan => {
+                            self.interaction_mode = InteractionMode::Panning(PanMode::Tool);
                             output.needs_repaint = true;
                         }
                         CanvasToolKind::Brush | CanvasToolKind::Eraser => {
@@ -963,8 +979,9 @@ impl CanvasController {
             InteractionMode::Panning(mode) => {
                 output.needs_repaint |= self.view.pan_by(pointer.delta());
                 let still_active = match mode {
-                    PanMode::SpaceDrag => pointer.primary_down() && space_pan,
-                    PanMode::MiddleDrag => pointer.middle_down(),
+                    PanMode::Space => pointer.primary_down() && space_pan,
+                    PanMode::Middle => pointer.middle_down(),
+                    PanMode::Tool => pointer.primary_down(),
                 };
 
                 if !still_active {
@@ -1651,7 +1668,8 @@ impl CanvasController {
                 },
                 SelectionSession::Move { .. } => egui::CursorIcon::Grabbing,
             }
-        } else if ui.input(|input| input.key_down(egui::Key::Space)) {
+        } else if tool == CanvasToolKind::Pan || ui.input(|input| input.key_down(egui::Key::Space))
+        {
             egui::CursorIcon::Grab
         } else if tool == CanvasToolKind::Select {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
@@ -2327,7 +2345,7 @@ fn paint_empty_state(painter: &Painter, rect: Rect) {
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 62.0),
         Align2::CENTER_CENTER,
-        "選択ツールで編集できます。Shift+Click で複数選択、Space+Drag でパンします。",
+        "選択ツールと複数選択モードで編集できます。手のひらツールならドラッグでパンできます。",
         FontId::proportional(16.0),
         Color32::from_gray(96),
     );
