@@ -311,10 +311,26 @@ impl PaintApp {
     }
 
     fn show_layers(&mut self, ui: &mut egui::Ui) {
+        #[derive(Clone, Copy)]
+        enum LayerAction {
+            Add,
+            DeleteActive,
+            RenameActive,
+            SetActive(LayerId),
+            ToggleVisibility(LayerId),
+            ToggleLocked(LayerId),
+            MoveUp(LayerId),
+            MoveDown(LayerId),
+            MoveSelectionTo(LayerId),
+            DuplicateSelectionTo(LayerId),
+        }
+
         self.sync_layer_name_draft();
 
         let layer_count = self.document().layer_count();
         let active_layer_id = self.document().active_layer_id();
+        let selection_count = self.canvas.selection_count();
+        let has_canvas_interaction = self.canvas.has_active_interaction();
         let layers: Vec<_> = self
             .document()
             .layers()
@@ -335,62 +351,125 @@ impl PaintApp {
             .document()
             .active_layer()
             .map(|layer| (layer.id, layer.name.clone(), layer.visible, layer.locked));
+        let mut pending_action = None;
 
         ui.heading("Layers");
         ui.small("Selection and drawing target the active visible, unlocked layer.");
+        ui.small("Move / Duplicate sends the current active-layer selection to a visible, unlocked destination.");
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
             if ui.button("Add Layer").clicked() {
-                self.add_layer();
+                pending_action = Some(LayerAction::Add);
             }
 
             if ui
                 .add_enabled(layer_count > 1, egui::Button::new("Delete Layer"))
                 .clicked()
             {
-                self.delete_active_layer();
+                pending_action = Some(LayerAction::DeleteActive);
             }
         });
 
+        if selection_count > 0 {
+            ui.small(format!(
+                "{selection_count} selected on the active layer. Use Move Here / Duplicate Here on a destination layer."
+            ));
+        } else {
+            ui.small(
+                "Select elements on the active layer to move or duplicate them into another layer.",
+            );
+        }
+
         ui.separator();
 
+        let total_layers = layers.len();
         for (index, layer_id, name, visible, locked, element_count) in layers.into_iter().rev() {
-            ui.group(|ui| {
+            let is_active = layer_id == active_layer_id;
+            let can_receive_selection =
+                selection_count > 0 && !has_canvas_interaction && layer_id != active_layer_id;
+            let active_fill = ui.visuals().selection.bg_fill.linear_multiply(0.14);
+            let frame = egui::Frame::group(ui.style())
+                .fill(if is_active {
+                    active_fill
+                } else {
+                    ui.visuals().faint_bg_color
+                })
+                .stroke(if is_active {
+                    ui.visuals().selection.stroke
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke
+                });
+
+            frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(layer_id == active_layer_id, name.as_str())
+                        .selectable_label(
+                            is_active,
+                            RichText::new(name.as_str()).strong().size(if is_active {
+                                15.0
+                            } else {
+                                14.0
+                            }),
+                        )
                         .clicked()
                     {
-                        self.set_active_layer(layer_id);
+                        pending_action = Some(LayerAction::SetActive(layer_id));
                     }
 
                     if ui
                         .small_button(if visible { "Hide" } else { "Show" })
                         .clicked()
                     {
-                        self.toggle_layer_visibility(layer_id);
+                        pending_action = Some(LayerAction::ToggleVisibility(layer_id));
                     }
 
                     if ui
                         .small_button(if locked { "Unlock" } else { "Lock" })
                         .clicked()
                     {
-                        self.toggle_layer_locked(layer_id);
+                        pending_action = Some(LayerAction::ToggleLocked(layer_id));
                     }
                 });
 
                 ui.horizontal(|ui| {
+                    if is_active {
+                        ui.label(RichText::new("ACTIVE").small().strong());
+                    }
+                    if !visible {
+                        ui.label(RichText::new("HIDDEN").small());
+                    }
+                    if locked {
+                        ui.label(RichText::new("LOCKED").small());
+                    }
                     ui.small(format!("{element_count} elements"));
                     if ui.small_button("Up").clicked() {
-                        self.move_layer_up(layer_id);
+                        pending_action = Some(LayerAction::MoveUp(layer_id));
                     }
                     if ui.small_button("Down").clicked() {
-                        self.move_layer_down(layer_id);
+                        pending_action = Some(LayerAction::MoveDown(layer_id));
                     }
                 });
 
-                if index + 1 == self.document().layer_count() {
+                if can_receive_selection {
+                    ui.horizontal_wrapped(|ui| {
+                        let can_drop_here = visible && !locked;
+                        if ui
+                            .add_enabled(can_drop_here, egui::Button::new("Move Here"))
+                            .clicked()
+                        {
+                            pending_action = Some(LayerAction::MoveSelectionTo(layer_id));
+                        }
+                        if ui
+                            .add_enabled(can_drop_here, egui::Button::new("Duplicate Here"))
+                            .clicked()
+                        {
+                            pending_action = Some(LayerAction::DuplicateSelectionTo(layer_id));
+                        }
+                    });
+                }
+
+                if index + 1 == total_layers {
                     ui.small("Topmost");
                 } else if index == 0 {
                     ui.small("Bottom");
@@ -405,7 +484,7 @@ impl PaintApp {
         let rename_on_enter =
             rename_response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
         if ui.button("Rename Layer").clicked() || rename_on_enter {
-            self.rename_active_layer();
+            pending_action = Some(LayerAction::RenameActive);
         }
 
         if let Some((_, active_name, visible, locked)) = active_layer_state {
@@ -417,6 +496,23 @@ impl PaintApp {
                 ui.small(format!(
                     "{active_name} is locked. It renders but cannot be selected or edited."
                 ));
+            }
+        }
+
+        if let Some(action) = pending_action {
+            match action {
+                LayerAction::Add => self.add_layer(),
+                LayerAction::DeleteActive => self.delete_active_layer(),
+                LayerAction::RenameActive => self.rename_active_layer(),
+                LayerAction::SetActive(layer_id) => self.set_active_layer(layer_id),
+                LayerAction::ToggleVisibility(layer_id) => self.toggle_layer_visibility(layer_id),
+                LayerAction::ToggleLocked(layer_id) => self.toggle_layer_locked(layer_id),
+                LayerAction::MoveUp(layer_id) => self.move_layer_up(layer_id),
+                LayerAction::MoveDown(layer_id) => self.move_layer_down(layer_id),
+                LayerAction::MoveSelectionTo(layer_id) => self.move_selection_to_layer(layer_id),
+                LayerAction::DuplicateSelectionTo(layer_id) => {
+                    self.duplicate_selection_to_layer(layer_id);
+                }
             }
         }
     }
@@ -732,6 +828,22 @@ impl PaintApp {
         }
     }
 
+    fn apply_layer_selection_document_change(
+        &mut self,
+        document: PaintDocument,
+        selection_layer_id: LayerId,
+        selection_indices: Vec<usize>,
+        message: impl Into<String>,
+    ) {
+        if self.history.replace_document(document) {
+            self.canvas.discard_active_interaction();
+            self.canvas
+                .set_selection_indices(selection_layer_id, selection_indices);
+            self.sync_layer_name_draft();
+            self.set_info(message);
+        }
+    }
+
     fn set_active_layer(&mut self, layer_id: LayerId) {
         if self.history.set_active_layer(layer_id) {
             self.canvas.discard_active_interaction();
@@ -814,6 +926,82 @@ impl PaintApp {
         let document = self.document().clone();
         if let Some(next) = document.moved_layer_down_document(layer_id) {
             self.apply_layer_document_change(next, "Moved the layer down.");
+        }
+    }
+
+    fn move_selection_to_layer(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if self.canvas.selection_layer_id() != Some(document.active_layer_id()) {
+            return;
+        }
+        let selection_indices = self.canvas.selection_indices().to_vec();
+        if selection_indices.is_empty() {
+            return;
+        }
+
+        let Some(destination) = document.layer(layer_id) else {
+            return;
+        };
+        if !destination.is_editable() {
+            self.set_error(format!(
+                "{} must be visible and unlocked before it can receive moved elements.",
+                destination.name
+            ));
+            return;
+        }
+
+        if let Some((next, next_selection)) =
+            document.moved_selection_to_layer_document(&selection_indices, layer_id)
+        {
+            let moved_count = next_selection.len();
+            let destination_name = next
+                .layer(layer_id)
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| "destination layer".to_owned());
+            let message = if moved_count == 1 {
+                format!("Moved the selected element to {destination_name}.")
+            } else {
+                format!("Moved {moved_count} selected elements to {destination_name}.")
+            };
+            self.apply_layer_selection_document_change(next, layer_id, next_selection, message);
+        }
+    }
+
+    fn duplicate_selection_to_layer(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if self.canvas.selection_layer_id() != Some(document.active_layer_id()) {
+            return;
+        }
+        let selection_indices = self.canvas.selection_indices().to_vec();
+        if selection_indices.is_empty() {
+            return;
+        }
+
+        let Some(destination) = document.layer(layer_id) else {
+            return;
+        };
+        if !destination.is_editable() {
+            self.set_error(format!(
+                "{} must be visible and unlocked before it can receive duplicated elements.",
+                destination.name
+            ));
+            return;
+        }
+
+        if let Some((next, next_selection)) =
+            document.duplicated_selection_to_layer_document(&selection_indices, layer_id)
+        {
+            let duplicated_count = next_selection.len();
+            let destination_name = next
+                .layer(layer_id)
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| "destination layer".to_owned());
+            let message = if duplicated_count == 1 {
+                format!("Duplicated the selected element into {destination_name}.")
+            } else {
+                format!("Duplicated {duplicated_count} selected elements into {destination_name}.")
+            };
+            self.apply_layer_selection_document_change(next, layer_id, next_selection, message);
         }
     }
 
