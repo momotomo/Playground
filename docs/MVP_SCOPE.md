@@ -10,11 +10,15 @@
 - 選択要素のレイヤー間移動
 - 選択要素のレイヤー間複製
 - active layer 強調、状態表示、要素数表示を含むレイヤー UI 改善
+- グリッド表示
+- グリッドスナップ
+- 水平 / 垂直ガイドの追加 / 削除 / 表示切替
+- ガイドスナップ
 - レイヤー順と同一レイヤー内の重なり順の分離
 - `format.version = 4` の JSON 保存
 - `v3 / v2 / v1` の読込互換を維持した migration
-- レイヤー変更を含む Undo / Redo
-- layer round-trip、hidden / locked、layer add/delete、layer transfer のテスト
+- レイヤー変更と grid / guides 設定変更を含む Undo / Redo
+- layer round-trip、hidden / locked、layer add/delete、layer transfer、grid / guides のテスト
 
 ## 今回あえて入れなかった範囲
 
@@ -24,7 +28,7 @@
 - 単一選択ストロークの専用リサイズ / 回転ハンドル
 - 塗り
 - 角丸矩形
-- スナップ、グリッド
+- スマートガイド
 - group 内だけを直接選ぶ isolate 編集
 - 出力解像度指定
 - JPEG / SVG 出力
@@ -38,6 +42,6 @@
 - group 内部編集とネスト可視化
 - 単一選択ストロークの専用変形 UI
 - 塗り、角丸矩形、矢印付き線
-- スナップ、ガイド
+- ガイドのドラッグ編集と ruler UI
 - タッチ / ペン入力調整
 - 保存形式 migration の強化

@@ -199,8 +199,8 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{render_document_pixmap, render_document_png};
     use crate::model::{
-        CanvasSize, GroupElement, PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement,
-        ShapeKind, Stroke, ToolKind,
+        CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
+        ShapeElement, ShapeKind, Stroke, ToolKind,
     };
     use tiny_skia::Pixmap;
 
@@ -368,5 +368,25 @@ mod tests {
             .demultiply();
 
         assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (220, 64, 64));
+    }
+
+    #[test]
+    fn grid_and_guides_do_not_render_into_png() {
+        let document = PaintDocument::default()
+            .add_guide_document(GuideAxis::Horizontal, 24.0)
+            .expect("add guide");
+        let pixmap = render_document_pixmap(&document).expect("document should render");
+
+        let has_non_background = (0..pixmap.width()).any(|x| {
+            (0..pixmap.height()).any(|y| {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist").demultiply();
+                (pixel.red(), pixel.green(), pixel.blue()) != (255, 255, 255)
+            })
+        });
+
+        assert!(
+            !has_non_background,
+            "grid and guides should stay out of PNG output"
+        );
     }
 }

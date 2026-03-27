@@ -447,8 +447,8 @@ fn normalize_file_name(file_name: String, fallback: &str) -> String {
 mod tests {
     use super::{StorageError, StorageFacade};
     use crate::model::{
-        CanvasSize, GroupElement, PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement,
-        ShapeKind, Stroke, ToolKind,
+        CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
+        ShapeElement, ShapeKind, Stroke, ToolKind,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -584,6 +584,25 @@ mod tests {
             decoded.layer(destination_layer_id).unwrap().elements.len(),
             2
         );
+    }
+
+    #[test]
+    fn grid_and_guides_round_trip_preserve_canvas_aids() {
+        let storage = StorageFacade::new();
+        let document = sample_document()
+            .toggled_grid_snap_document()
+            .expect("toggle grid snap")
+            .add_guide_document(GuideAxis::Horizontal, 24.0)
+            .expect("add guide")
+            .toggled_guides_visibility_document()
+            .expect("toggle guide visibility");
+        let encoded = storage.encode_document(&document).expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, document);
+        assert_eq!(decoded.guides().lines.len(), 1);
+        assert!(decoded.grid().snap_enabled);
+        assert!(!decoded.guides().visible);
     }
 
     #[test]
