@@ -1296,6 +1296,13 @@ impl CanvasController {
             }
         }
 
+        if !extend_selection
+            && self.hit_selection_move_bounds(document, pointer_world, touch_active)
+        {
+            self.begin_move_session(document, pointer_world);
+            return;
+        }
+
         let tolerance = hit_tolerance_world(
             self.view.zoom,
             touch_active,
@@ -1802,6 +1809,25 @@ impl CanvasController {
         } else {
             selection_bounds_from_elements(&self.selected_visual_elements(document))
         }
+    }
+
+    fn hit_selection_move_bounds(
+        &self,
+        document: &PaintDocument,
+        pointer_world: PaintPoint,
+        touch_active: bool,
+    ) -> bool {
+        let Some(bounds) = self.selection_control_bounds(document) else {
+            return false;
+        };
+
+        let padding = hit_tolerance_world(
+            self.view.zoom,
+            touch_active,
+            HIT_TOLERANCE_SCREEN,
+            TOUCH_HIT_TOLERANCE_SCREEN,
+        );
+        expand_bounds(bounds, padding).contains(pointer_world)
     }
 
     fn hit_selection_control(
@@ -2656,6 +2682,13 @@ fn selection_bounds_from_elements(
     Some(bounds.fold(first, ElementBounds::union))
 }
 
+fn expand_bounds(bounds: ElementBounds, padding: f32) -> ElementBounds {
+    ElementBounds {
+        min: PaintPoint::new(bounds.min.x - padding, bounds.min.y - padding),
+        max: PaintPoint::new(bounds.max.x + padding, bounds.max.y + padding),
+    }
+}
+
 fn ellipse_outline_points(shape: &ShapeElement, rect: Rect, zoom: f32) -> Vec<Pos2> {
     let center = shape.center();
     let half = shape.half_extents();
@@ -3199,9 +3232,10 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasViewState, SelectionState, TouchContactKind, bounds_from_points, canvas_rect,
-        effective_screen_hit_tolerance, group_resize_transform, hit_tolerance_world,
-        marquee_rect_is_visible, normalize_selection_indices, ruler_step_world, screen_to_canvas,
+        CanvasController, CanvasViewState, SelectionSession, SelectionState, TouchContactKind,
+        bounds_from_points, canvas_rect, canvas_to_screen, effective_screen_hit_tolerance,
+        group_resize_transform, hit_tolerance_world, marquee_rect_is_visible,
+        normalize_selection_indices, ruler_step_world, screen_to_canvas,
         shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
         snap_point_for_document, touch_contact_kind_from_events,
     };
@@ -3210,6 +3244,13 @@ mod tests {
         RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
     };
     use eframe::egui::{Event, Pos2, Rect, TouchDeviceId, TouchId, TouchPhase, Vec2};
+
+    fn test_document() -> PaintDocument {
+        PaintDocument {
+            canvas_size: CanvasSize::new(100.0, 100.0),
+            ..PaintDocument::default()
+        }
+    }
 
     #[test]
     fn selection_single_returns_none_for_empty_selection() {
@@ -3230,6 +3271,171 @@ mod tests {
         let mut selection = SelectionState::default();
         selection.set_indices(layer_id, vec![2, 5]);
         assert_eq!(selection.single(), None);
+    }
+
+    #[test]
+    fn single_selection_can_start_move_from_inside_selection_bounds() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(80.0, 80.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller.selection.set_only(document.active_layer_id(), 0);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(50.0, 50.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::Move { .. })
+        ));
+    }
+
+    #[test]
+    fn multi_selection_can_start_move_from_group_bounds_gap() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(35.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(65.0, 20.0),
+            PaintPoint::new(80.0, 40.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller
+            .selection
+            .set_indices(document.active_layer_id(), vec![0, 1]);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(50.0, 30.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::Move { .. })
+        ));
+    }
+
+    #[test]
+    fn selection_handle_hit_still_wins_over_move_from_bounds() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(80.0, 80.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller.selection.set_only(document.active_layer_id(), 0);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(20.0, 20.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::SingleResize { .. })
+        ));
+    }
+
+    #[test]
+    fn background_drag_outside_selection_bounds_still_starts_marquee() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller.selection.set_only(document.active_layer_id(), 0);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(90.0, 90.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::Marquee { .. })
+        ));
     }
 
     #[test]
