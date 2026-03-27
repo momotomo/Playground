@@ -144,7 +144,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Shift+Click to multi-select, then move, align, or reorder elements.",
+                "Ready. Shift+Click or drag a marquee to multi-select, then transform or arrange elements.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -251,9 +251,9 @@ impl PaintApp {
         ui.label(format!("Elements: {}", self.document().element_count()));
         ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
         ui.small("Shapes: corner handles resize, round handle rotates");
-        ui.small("Strokes: move only in this phase");
-        ui.small("Multi-select: Shift + Click adds or removes elements");
-        ui.small("Multi-edit: move together, align, and change stack order");
+        ui.small("Strokes: single and multi transforms use simple move / scale / rotate");
+        ui.small("Multi-select: Shift + Click or drag a marquee");
+        ui.small("Multi-edit: move, group resize / rotate, align, and change stack order");
         ui.small("Pan: Space + Drag or Middle Drag");
         ui.small("Reset view: Ctrl/Cmd + 0");
 
@@ -451,8 +451,20 @@ impl PaintApp {
                         "Moved the selected element."
                     }
                 }
-                DocumentEditMode::Resize => "Resized the selected shape.",
-                DocumentEditMode::Rotate => "Rotated the selected shape.",
+                DocumentEditMode::Resize => {
+                    if self.canvas.selection_count() > 1 {
+                        "Resized the selected elements."
+                    } else {
+                        "Resized the selected shape."
+                    }
+                }
+                DocumentEditMode::Rotate => {
+                    if self.canvas.selection_count() > 1 {
+                        "Rotated the selected elements."
+                    } else {
+                        "Rotated the selected shape."
+                    }
+                }
                 DocumentEditMode::Align(alignment) => match alignment {
                     AlignmentKind::Left => "Aligned the selection to the left edge.",
                     AlignmentKind::HorizontalCenter => {
@@ -790,7 +802,7 @@ impl eframe::App for PaintApp {
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => {
-            "Click to select. Shift+Click adds or removes. Single shapes resize/rotate; multi-select moves, aligns, and reorders."
+            "Click to select. Shift+Click adds or removes. Drag empty space for marquee select. Single shapes resize/rotate; multi-select can move, group-resize, rotate, align, and reorder."
         }
         CanvasToolKind::Brush => "Freehand drawing tool. Drag to draw a stroke.",
         CanvasToolKind::Eraser => "Freehand eraser that paints with the canvas background.",
