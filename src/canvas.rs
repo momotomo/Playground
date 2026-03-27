@@ -293,7 +293,10 @@ impl SelectionState {
     }
 
     fn single(&self) -> Option<usize> {
-        (self.indices.len() == 1).then_some(self.indices[0])
+        match self.indices.as_slice() {
+            [index] => Some(*index),
+            _ => None,
+        }
     }
 
     fn indices(&self) -> &[usize] {
@@ -3196,17 +3199,38 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasViewState, TouchContactKind, bounds_from_points, canvas_rect,
+        CanvasViewState, SelectionState, TouchContactKind, bounds_from_points, canvas_rect,
         effective_screen_hit_tolerance, group_resize_transform, hit_tolerance_world,
         marquee_rect_is_visible, normalize_selection_indices, ruler_step_world, screen_to_canvas,
         shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
         snap_point_for_document, touch_contact_kind_from_events,
     };
     use crate::model::{
-        CanvasSize, ElementBounds, GuideAxis, PaintDocument, PaintPoint, PaintVector, RgbaColor,
-        ShapeElement, ShapeHandle, ShapeKind,
+        CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintPoint, PaintVector,
+        RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
     };
     use eframe::egui::{Event, Pos2, Rect, TouchDeviceId, TouchId, TouchPhase, Vec2};
+
+    #[test]
+    fn selection_single_returns_none_for_empty_selection() {
+        let selection = SelectionState::default();
+        assert_eq!(selection.single(), None);
+    }
+
+    #[test]
+    fn selection_single_returns_index_for_single_selection() {
+        let mut selection = SelectionState::default();
+        selection.set_only(1 as LayerId, 4);
+        assert_eq!(selection.single(), Some(4));
+    }
+
+    #[test]
+    fn selection_single_returns_none_for_multi_selection() {
+        let layer_id = 1 as LayerId;
+        let mut selection = SelectionState::default();
+        selection.set_indices(layer_id, vec![2, 5]);
+        assert_eq!(selection.single(), None);
+    }
 
     #[test]
     fn reset_view_fits_canvas_inside_viewport() {
