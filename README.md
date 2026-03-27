@@ -2,18 +2,18 @@
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
 同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
-このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン` に加えて、`選択 / 移動` と基本 `図形ツール` を追加しています。
+このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`選択 / 移動` に加えて、`リサイズ / 回転ハンドル` と `図形再編集` を追加しています。
 
 ## プロジェクト概要
 
 - Rust だけで UI とアプリケーション本体を構築
 - `egui` による即時モード UI
 - `eframe` による native / web 共通アプリ基盤
-- 線描画、色変更、線幅変更、消しゴム、`Undo`、`Redo`、`Clear`
+- フリーハンド描画、消しゴム、`Undo`、`Redo`、`Clear`
 - 編集用 JSON 形式での `Save` / `Load`
 - 共有用 `Export PNG`
 - キャンバスのズーム、パン、表示リセット
-- 単一選択、ドラッグ移動
+- 単一選択、移動、リサイズ、回転
 - 矩形、楕円、直線ツール
 - native / web の保存導線差分吸収
 
@@ -94,7 +94,7 @@ trunk build --release
 ### ツール
 
 - `Select`
-  - 要素をクリックして選択し、そのままドラッグで移動します
+  - 要素をクリックして選択します
 - `Brush`
   - フリーハンドの線を描きます
 - `Eraser`
@@ -106,6 +106,21 @@ trunk build --release
 - `Line`
   - ドラッグ開始点から終了点まで直線を描きます
 
+### 選択 / 再編集
+
+- `Select` ツールでストロークと図形のどちらも選択できます
+- 選択中の図形にはハイライト付きアウトライン、角ハンドル、回転ハンドルを表示します
+- 図形は次の再編集に対応します
+  - 移動
+  - リサイズ
+  - 回転
+- ストロークはこのフェーズでは `移動のみ` 対応です
+- 角ハンドルをドラッグするとリサイズします
+- 回転ハンドルをドラッグすると中心回りに回転します
+- ドラッグ中はプレビューし、リリース時に履歴へコミットします
+- `Esc` で進行中の編集プレビューをキャンセルできます
+- 選択状態そのものは `Undo / Redo` に含めません
+
 ### 編集
 
 - `Undo`: 直前の編集を戻します
@@ -114,13 +129,6 @@ trunk build --release
 - `Save`: 再編集用 JSON を保存します
 - `Load`: JSON から再編集状態を復元します
 - `Export PNG`: 背景と全要素を含む共有用 PNG を書き出します
-
-### 選択 / 移動
-
-- `Select` ツールでストロークと図形のどちらも選択できます
-- 選択中の要素にはハイライト付きバウンディングボックスを表示します
-- ドラッグ中はプレビュー表示し、ドロップ時に履歴へコミットします
-- 選択状態そのものは `Undo` / `Redo` に含めません
 
 ### ズーム / パン
 
@@ -141,6 +149,7 @@ trunk build --release
 - `Ctrl/Cmd + +` または `Ctrl/Cmd + =`: Zoom in
 - `Ctrl/Cmd + -`: Zoom out
 - `Ctrl/Cmd + 0`: Reset View
+- `Esc`: 進行中の編集プレビューをキャンセル
 - `V`: Select
 - `B`: Brush
 - `R`: Rectangle
@@ -154,25 +163,38 @@ trunk build --release
 
 - 用途は「再編集用」
 - 既定ファイル名は `untitled.paint.json`
-- JSON envelope に次の情報を保持します
-  - `format.id`
-  - `format.version`
-  - `metadata`
-  - `document.canvas_size`
-  - `document.background`
-  - `document.elements[]`
-  - 各 element の `element_type`
-  - stroke の `tool` / `color` / `width` / `points`
-  - shape の `kind` / `color` / `width` / `start` / `end`
-- 現在の format version は `2`
+- 現在の format version は `2` のままです
 - 旧 `version = 1` の stroke-only JSON も読込互換を残しています
+- `document.elements[]` に stroke / shape を保存します
+- shape では次の情報を保持します
+  - `kind`
+  - `color`
+  - `width`
+  - `start`
+  - `end`
+  - `rotation_radians`
+- 旧 shape JSON に `rotation_radians` がない場合は `0` として読み込みます
 
 ### PNG 出力
 
 - 用途は「共有 / 閲覧用」
 - 既定ファイル名は `untitled.png`
-- 表示中のズーム倍率や選択枠は含めません
+- 表示中のズーム倍率や選択枠、ハンドルは含めません
 - 作品のキャンバスサイズを基準に、背景色と全要素をラスタライズします
+- 回転やリサイズ後の図形も、そのまま出力へ反映されます
+
+## 対応している要素と未対応要素
+
+- 対応済み
+  - ストロークの移動
+  - 矩形の移動 / リサイズ / 回転
+  - 楕円の移動 / リサイズ / 回転
+  - 直線の移動 / endpoint リサイズ / 回転
+- 未対応
+  - ストロークのリサイズ / 回転
+  - 複数選択
+  - リサイズ中のスナップ
+  - 塗り
 
 ## native / web の違い
 
@@ -184,7 +206,7 @@ trunk build --release
   - `Load` はブラウザのファイル選択を使います
   - `Export PNG` はブラウザダウンロードとして保存します
   - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
-- 選択 / 移動 / 図形ツール / ズーム / パンの基本操作は native / web で同じです
+- 選択 / リサイズ / 回転 / 図形再編集 / ズーム / パンの基本操作は native / web で同じです
 
 ## GitHub Pages デプロイ手順
 
@@ -201,11 +223,6 @@ trunk build --release
 3. `Build and deployment` の `Source` を `GitHub Actions` にする
 4. `master` へ push すると Pages workflow が走る
 
-### workflow の挙動
-
-- public repo では web build と Pages deploy を実行します
-- private repo では Pages 非対応プランでも CI が分かりやすく終わるよう、deploy job を skip して理由を表示します
-
 ## ドキュメント
 
 - `README.md`
@@ -214,12 +231,11 @@ trunk build --release
 
 ## 今後の拡張候補
 
-- レイヤー
 - 複数選択
-- リサイズハンドル
-- 塗り、角丸矩形、図形編集
-- キャンバス回転
-- PNG 出力オプション
+- レイヤー
+- ストロークの簡易スケール / 回転
+- 塗り、角丸矩形、矢印付き線
+- スナップ、グリッド、整列
 - 保存形式 migration
 - ペン / タッチ入力最適化
 
