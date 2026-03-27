@@ -65,12 +65,12 @@ pub enum CanvasToolKind {
 impl CanvasToolKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Select => "Select",
-            Self::Brush => "Brush",
-            Self::Eraser => "Eraser",
-            Self::Rectangle => "Rectangle",
-            Self::Ellipse => "Ellipse",
-            Self::Line => "Line",
+            Self::Select => "選択",
+            Self::Brush => "ブラシ",
+            Self::Eraser => "消しゴム",
+            Self::Rectangle => "四角形",
+            Self::Ellipse => "楕円",
+            Self::Line => "直線",
         }
     }
 
@@ -121,15 +121,15 @@ pub enum DocumentEditMode {
 impl DocumentEditMode {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Move => "moving",
-            Self::Resize => "resizing",
-            Self::Rotate => "rotating",
-            Self::Guide => "moving guide",
-            Self::Group => "grouping",
-            Self::Ungroup => "ungrouping",
-            Self::Align(_) => "aligning",
-            Self::Distribute(_) => "distributing",
-            Self::Reorder(_) => "reordering",
+            Self::Move => "移動中",
+            Self::Resize => "サイズ変更中",
+            Self::Rotate => "回転中",
+            Self::Guide => "ガイド移動中",
+            Self::Group => "グループ化中",
+            Self::Ungroup => "グループ解除中",
+            Self::Align(_) => "整列中",
+            Self::Distribute(_) => "等間隔配置中",
+            Self::Reorder(_) => "重なり順変更中",
         }
     }
 }
@@ -390,7 +390,7 @@ impl SelectionSession {
                 DocumentEditMode::Rotate.label()
             }
             Self::GuideMove { .. } => DocumentEditMode::Guide.label(),
-            Self::Marquee { .. } => "selecting",
+            Self::Marquee { .. } => "選択中",
         }
     }
 
@@ -685,19 +685,19 @@ impl CanvasController {
 
     pub fn selection_summary(&self, document: &PaintDocument) -> String {
         let Some(active_layer) = document.active_layer() else {
-            return "Selection: None".to_owned();
+            return "選択: なし".to_owned();
         };
 
         if !active_layer.visible {
-            return format!("Selection: None ({} is hidden)", active_layer.name);
+            return format!("選択: なし（{} は非表示）", active_layer.name);
         }
 
         if active_layer.locked {
-            return format!("Selection: None ({} is locked)", active_layer.name);
+            return format!("選択: なし（{} はロック中）", active_layer.name);
         }
 
         if self.selection.is_empty() {
-            return format!("Selection: None ({})", active_layer.name);
+            return format!("選択: なし（{}）", active_layer.name);
         }
 
         if let Some(session) = &self.selection_session {
@@ -706,7 +706,7 @@ impl CanvasController {
                 && let Some(element) = document.element(index)
             {
                 return format!(
-                    "Selection: {} #{} ({})",
+                    "選択: {} #{}（{}）",
                     element.kind_label(),
                     index + 1,
                     session.mode_label()
@@ -714,7 +714,7 @@ impl CanvasController {
             }
 
             return format!(
-                "Selection: {} elements ({})",
+                "選択: {}個（{}）",
                 self.selection.len(),
                 session.mode_label()
             );
@@ -724,19 +724,19 @@ impl CanvasController {
             && let Some(element) = document.element(index)
         {
             let capability = match element {
-                PaintElement::Stroke(_) => "move / scale / rotate",
-                PaintElement::Shape(_) => "move / resize / rotate",
-                PaintElement::Group(_) => "move / resize / rotate / ungroup",
+                PaintElement::Stroke(_) => "移動 / 拡大縮小 / 回転",
+                PaintElement::Shape(_) => "移動 / サイズ変更 / 回転",
+                PaintElement::Group(_) => "移動 / サイズ変更 / 回転 / グループ解除",
             };
             return format!(
-                "Selection: {} #{} ({capability})",
+                "選択: {} #{}（{capability}）",
                 element.kind_label(),
                 index + 1
             );
         }
 
         format!(
-            "Selection: {} elements (move / resize / rotate / group / align / distribute / order)",
+            "選択: {}個（移動 / サイズ変更 / 回転 / グループ化 / 整列 / 等間隔 / 重なり順）",
             self.selection.len()
         )
     }
@@ -2320,21 +2320,21 @@ fn paint_empty_state(painter: &Painter, rect: Rect) {
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 30.0),
         Align2::CENTER_CENTER,
-        "Start by dragging with Brush, Rectangle, Ellipse, or Line.",
+        "ブラシ、四角形、楕円、直線のどれかを選んでドラッグしてください。",
         FontId::proportional(22.0),
         Color32::from_gray(72),
     );
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 62.0),
         Align2::CENTER_CENTER,
-        "Use Select to edit. Shift+Click multi-selects. Space+Drag pans.",
+        "選択ツールで編集できます。Shift+Click で複数選択、Space+Drag でパンします。",
         FontId::proportional(16.0),
         Color32::from_gray(96),
     );
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 90.0),
         Align2::CENTER_CENTER,
-        "Save JSON keeps editing state, Export PNG shares the result. Help explains the basics.",
+        "JSON保存は再編集用、PNG書き出しは共有用です。迷ったらヘルプを開いてください。",
         FontId::proportional(15.0),
         Color32::from_gray(110),
     );

@@ -26,8 +26,8 @@ pub enum StorageFeature {
 impl StorageFeature {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::WorkingDocument => "editable local document format",
-            Self::PngExport => "PNG export",
+            Self::WorkingDocument => "再編集用のローカル保存形式",
+            Self::PngExport => "PNG書き出し",
         }
     }
 }
@@ -140,15 +140,15 @@ impl StorageFacade {
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
-        "Editable JSON envelope v4 (.paint.json)"
+        "再編集用 JSON 形式 v4 (.paint.json)"
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
-        "PNG raster export (.png)"
+        "PNG書き出し (.png)"
     }
 
     pub const fn storage_strategy_summary(&self) -> &'static str {
-        "Native uses file dialogs. Web uses browser download/upload."
+        "native はファイルダイアログ、web はブラウザの保存 / 読込を使います。"
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -203,9 +203,9 @@ impl StorageFacade {
         suggested_name: &str,
     ) -> Result<SavedDocument, StorageError> {
         let path = rfd::FileDialog::new()
-            .set_title("Save drawing")
+            .set_title("JSONを保存")
             .set_file_name(suggested_name)
-            .add_filter("Rust Paint Document", &[JSON_EXTENSION])
+            .add_filter("Rust Paint ドキュメント", &[JSON_EXTENSION])
             .save_file()
             .ok_or(StorageError::Cancelled)?;
 
@@ -219,9 +219,9 @@ impl StorageFacade {
         suggested_name: &str,
     ) -> Result<ExportedImage, StorageError> {
         let path = rfd::FileDialog::new()
-            .set_title("Export PNG")
+            .set_title("PNGを書き出し")
             .set_file_name(suggested_name)
-            .add_filter("PNG image", &[PNG_EXTENSION])
+            .add_filter("PNG画像", &[PNG_EXTENSION])
             .save_file()
             .ok_or(StorageError::Cancelled)?;
 
@@ -231,8 +231,8 @@ impl StorageFacade {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_document_via_dialog(&self) -> Result<LoadedDocument, StorageError> {
         let path = rfd::FileDialog::new()
-            .set_title("Load drawing")
-            .add_filter("Rust Paint Document", &[JSON_EXTENSION])
+            .set_title("JSONを開く")
+            .add_filter("Rust Paint ドキュメント", &[JSON_EXTENSION])
             .pick_file()
             .ok_or(StorageError::Cancelled)?;
 
@@ -247,9 +247,9 @@ impl StorageFacade {
     ) -> Result<SavedDocument, StorageError> {
         let bytes = self.encode_document(document)?;
         let file = rfd::AsyncFileDialog::new()
-            .set_title("Save drawing")
+            .set_title("JSONを保存")
             .set_file_name(suggested_name)
-            .add_filter("Rust Paint Document", &[JSON_EXTENSION])
+            .add_filter("Rust Paint ドキュメント", &[JSON_EXTENSION])
             .save_file()
             .await
             .ok_or(StorageError::Cancelled)?;
@@ -271,9 +271,9 @@ impl StorageFacade {
     ) -> Result<ExportedImage, StorageError> {
         let bytes = self.export_png_bytes(document)?;
         let file = rfd::AsyncFileDialog::new()
-            .set_title("Export PNG")
+            .set_title("PNGを書き出し")
             .set_file_name(suggested_name)
-            .add_filter("PNG image", &[PNG_EXTENSION])
+            .add_filter("PNG画像", &[PNG_EXTENSION])
             .save_file()
             .await
             .ok_or(StorageError::Cancelled)?;
@@ -290,8 +290,8 @@ impl StorageFacade {
     #[cfg(target_arch = "wasm32")]
     pub async fn load_document_via_dialog(&self) -> Result<LoadedDocument, StorageError> {
         let file = rfd::AsyncFileDialog::new()
-            .set_title("Load drawing")
-            .add_filter("Rust Paint Document", &[JSON_EXTENSION])
+            .set_title("JSONを開く")
+            .add_filter("Rust Paint ドキュメント", &[JSON_EXTENSION])
             .pick_file()
             .await
             .ok_or(StorageError::Cancelled)?;
