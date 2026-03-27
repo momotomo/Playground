@@ -18,7 +18,9 @@ pub fn start() {
             remove_loading_screen();
         } else if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             if let Some(loading) = document.get_element_by_id("loading") {
-                loading.set_inner_html("Failed to start the app. Check the browser console.");
+                loading.set_inner_html(
+                    "アプリを起動できませんでした。ブラウザのコンソールを確認してください。",
+                );
             }
         }
 
