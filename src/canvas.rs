@@ -613,13 +613,7 @@ impl CanvasController {
         }
 
         if !document.has_elements() && self.active_preview.is_none() {
-            painter.text(
-                canvas_rect.center(),
-                Align2::CENTER_CENTER,
-                "Select, Shift+Click, or drag a marquee to edit multiple elements.",
-                FontId::proportional(22.0),
-                Color32::from_gray(120),
-            );
+            paint_empty_state(&painter, canvas_rect);
         }
 
         paint_rulers(&painter, viewport, canvas_rect, self.view.zoom, document);
@@ -2307,6 +2301,42 @@ fn paint_marquee_overlay(painter: &Painter, rect: Rect, zoom: f32, bounds: Eleme
         4.0,
         EguiStroke::new(1.5, stroke),
         egui::StrokeKind::Outside,
+    );
+}
+
+fn paint_empty_state(painter: &Painter, rect: Rect) {
+    let panel = Rect::from_center_size(rect.center(), Vec2::new(520.0, 132.0));
+    painter.rect_filled(
+        panel,
+        12.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+    );
+    painter.rect_stroke(
+        panel,
+        12.0,
+        EguiStroke::new(1.0, Color32::from_rgba_unmultiplied(120, 132, 150, 80)),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        Pos2::new(panel.center().x, panel.top() + 30.0),
+        Align2::CENTER_CENTER,
+        "Start by dragging with Brush, Rectangle, Ellipse, or Line.",
+        FontId::proportional(22.0),
+        Color32::from_gray(72),
+    );
+    painter.text(
+        Pos2::new(panel.center().x, panel.top() + 62.0),
+        Align2::CENTER_CENTER,
+        "Use Select to edit. Shift+Click multi-selects. Space+Drag pans.",
+        FontId::proportional(16.0),
+        Color32::from_gray(96),
+    );
+    painter.text(
+        Pos2::new(panel.center().x, panel.top() + 90.0),
+        Align2::CENTER_CENTER,
+        "Save JSON keeps editing state, Export PNG shares the result. Help explains the basics.",
+        FontId::proportional(15.0),
+        Color32::from_gray(110),
     );
 }
 
