@@ -4,9 +4,9 @@ use eframe::egui::{
 };
 
 use crate::model::{
-    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, LayerId, PaintDocument,
-    PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
-    StackOrderCommand, Stroke, ToolKind,
+    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, GuideLine, LayerId,
+    PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
+    ShapeKind, StackOrderCommand, Stroke, ToolKind,
 };
 
 const MIN_ZOOM: f32 = 0.1;
@@ -20,6 +20,7 @@ const MIN_SELECTION_TRANSFORM_EXTENT: f32 = 4.0;
 const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
 const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
 const MIN_GRID_VISIBLE_SPACING_SCREEN: f32 = 12.0;
+const GUIDE_HIT_TOLERANCE_SCREEN: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
@@ -79,6 +80,7 @@ pub enum DocumentEditMode {
     Move,
     Resize,
     Rotate,
+    Guide,
     Group,
     Ungroup,
     Align(AlignmentKind),
@@ -92,6 +94,7 @@ impl DocumentEditMode {
             Self::Move => "moving",
             Self::Resize => "resizing",
             Self::Rotate => "rotating",
+            Self::Guide => "moving guide",
             Self::Group => "grouping",
             Self::Ungroup => "ungrouping",
             Self::Align(_) => "aligning",
@@ -331,6 +334,12 @@ enum SelectionSession {
         start_pointer_angle: f32,
         preview_elements: Vec<(usize, PaintElement)>,
     },
+    GuideMove {
+        index: usize,
+        axis: GuideAxis,
+        start_position: f32,
+        preview_position: f32,
+    },
     Marquee {
         start_world: PaintPoint,
         current_world: PaintPoint,
@@ -349,6 +358,7 @@ impl SelectionSession {
             Self::SingleRotate { .. } | Self::MultiRotate { .. } => {
                 DocumentEditMode::Rotate.label()
             }
+            Self::GuideMove { .. } => DocumentEditMode::Guide.label(),
             Self::Marquee { .. } => "selecting",
         }
     }
@@ -359,7 +369,7 @@ impl SelectionSession {
             Self::SingleRotate { .. } => Some(ControlTarget::SingleRotate),
             Self::MultiResize { handle, .. } => Some(ControlTarget::GroupResize(*handle)),
             Self::MultiRotate { .. } => Some(ControlTarget::GroupRotate),
-            Self::Move { .. } | Self::Marquee { .. } => None,
+            Self::Move { .. } | Self::GuideMove { .. } | Self::Marquee { .. } => None,
         }
     }
 
@@ -389,6 +399,7 @@ impl SelectionSession {
             | Self::MultiRotate {
                 preview_elements, ..
             } => preview_elements.clone(),
+            Self::GuideMove { .. } => Vec::new(),
             Self::Marquee { .. } => Vec::new(),
         }
     }
@@ -403,6 +414,7 @@ impl SelectionSession {
             Self::SingleResize { index, .. } | Self::SingleRotate { index, .. } => {
                 matches!(document.element(*index), Some(PaintElement::Shape(_)))
             }
+            Self::GuideMove { index, .. } => *index < document.guides().lines.len(),
             Self::Marquee { .. } => true,
         }
     }
@@ -414,6 +426,18 @@ impl SelectionSession {
                 current_world,
                 ..
             } => Some(bounds_from_points(*start_world, *current_world)),
+            _ => None,
+        }
+    }
+
+    fn preview_guide(&self) -> Option<(usize, GuideLine)> {
+        match self {
+            Self::GuideMove {
+                index,
+                axis,
+                preview_position,
+                ..
+            } => Some((*index, GuideLine::new(*axis, *preview_position))),
             _ => None,
         }
     }
@@ -468,25 +492,46 @@ impl CanvasController {
 
         let preview_overlays = self.preview_overlay_elements();
         let selected_visual = self.selected_visual_elements(document);
+        let hover_pos = ui.input(|input| input.pointer.hover_pos());
+        let hovered_guide =
+            if tool_settings.tool == CanvasToolKind::Select && self.selection_session.is_none() {
+                hover_pos.and_then(|pointer| {
+                    self.hit_guide(document, canvas_rect, self.view.zoom, pointer)
+                        .map(|(index, _)| index)
+                })
+            } else {
+                None
+            };
+        let preview_guide = self
+            .selection_session
+            .as_ref()
+            .and_then(SelectionSession::preview_guide);
         let active_control = self
             .selection_session
             .as_ref()
             .and_then(SelectionSession::control_target);
         let show_handles = !matches!(
             self.selection_session,
-            Some(SelectionSession::Marquee { .. })
+            Some(SelectionSession::Marquee { .. } | SelectionSession::GuideMove { .. })
         );
 
         paint_workspace(&painter, viewport);
         paint_background(&painter, canvas_rect, document.background);
         paint_grid(&painter, canvas_rect, self.view.zoom, document);
-        paint_guides(&painter, canvas_rect, self.view.zoom, document);
         paint_document(
             &painter,
             canvas_rect,
             self.view.zoom,
             document,
             &preview_overlays,
+        );
+        paint_guides(
+            &painter,
+            canvas_rect,
+            self.view.zoom,
+            document,
+            hovered_guide,
+            preview_guide,
         );
 
         if let Some(preview) = &self.active_preview {
@@ -992,6 +1037,11 @@ impl CanvasController {
                 self.selection.set_only(document.active_layer_id(), index);
             }
             self.begin_move_session(document, pointer_world);
+        } else if !extend_selection
+            && let Some((guide_index, guide)) =
+                self.hit_guide(document, canvas_rect, zoom, pointer_screen)
+        {
+            self.begin_guide_move(guide_index, guide);
         } else {
             self.begin_marquee_selection(pointer_world, extend_selection);
         }
@@ -1027,6 +1077,16 @@ impl CanvasController {
             current_world: start_world,
             additive,
             base_selection: self.selection.indices().to_vec(),
+        });
+        self.interaction_mode = InteractionMode::EditingSelection;
+    }
+
+    fn begin_guide_move(&mut self, index: usize, guide: GuideLine) {
+        self.selection_session = Some(SelectionSession::GuideMove {
+            index,
+            axis: guide.axis,
+            start_position: guide.position,
+            preview_position: guide.position,
         });
         self.interaction_mode = InteractionMode::EditingSelection;
     }
@@ -1188,6 +1248,17 @@ impl CanvasController {
                     element.rotated_around(*group_center, delta)
                 });
             }
+            Some(SelectionSession::GuideMove {
+                axis,
+                preview_position,
+                ..
+            }) => {
+                let axis_value = match axis {
+                    GuideAxis::Horizontal => pointer_world.y,
+                    GuideAxis::Vertical => pointer_world.x,
+                };
+                *preview_position = clamp_guide_position_for_document(document, *axis, axis_value);
+            }
             Some(SelectionSession::Marquee { current_world, .. }) => {
                 *current_world = pointer_world;
             }
@@ -1347,6 +1418,24 @@ impl CanvasController {
                 }
                 edit
             }
+            SelectionSession::GuideMove {
+                index,
+                axis: _,
+                start_position,
+                preview_position,
+            } => {
+                if (preview_position - start_position).abs() < 0.1 {
+                    return None;
+                }
+
+                document
+                    .moved_guide_document(index, preview_position)
+                    .map(|next| CommittedDocumentEdit {
+                        document: next,
+                        selection_indices: self.selection.indices().to_vec(),
+                        mode: DocumentEditMode::Guide,
+                    })
+            }
         }
     }
 
@@ -1458,6 +1547,31 @@ impl CanvasController {
             .then_some(ControlTarget::SingleRotate)
     }
 
+    fn hit_guide(
+        &self,
+        document: &PaintDocument,
+        canvas_rect: Rect,
+        zoom: f32,
+        pointer_screen: Pos2,
+    ) -> Option<(usize, GuideLine)> {
+        if !document.guides().visible {
+            return None;
+        }
+
+        document
+            .guides()
+            .lines
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, guide)| {
+                let distance = guide_screen_distance(canvas_rect, zoom, guide, pointer_screen);
+                (distance <= GUIDE_HIT_TOLERANCE_SCREEN).then_some((index, guide, distance))
+            })
+            .min_by(|left, right| left.2.total_cmp(&right.2))
+            .map(|(index, guide, _)| (index, guide))
+    }
+
     fn cursor_icon(
         &self,
         ui: &egui::Ui,
@@ -1475,6 +1589,10 @@ impl CanvasController {
                 SelectionSession::SingleRotate { .. }
                 | SelectionSession::MultiRotate { .. }
                 | SelectionSession::Marquee { .. } => egui::CursorIcon::Crosshair,
+                SelectionSession::GuideMove { axis, .. } => match axis {
+                    GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
+                    GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
+                },
                 SelectionSession::Move { .. } => egui::CursorIcon::Grabbing,
             }
         } else if ui.input(|input| input.key_down(egui::Key::Space)) {
@@ -1488,7 +1606,13 @@ impl CanvasController {
                     Some(ControlTarget::SingleRotate) | Some(ControlTarget::GroupRotate) => {
                         egui::CursorIcon::Crosshair
                     }
-                    None => egui::CursorIcon::PointingHand,
+                    None => match self.hit_guide(document, canvas_rect, self.view.zoom, pointer) {
+                        Some((_, guide)) => match guide.axis {
+                            GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
+                            GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
+                        },
+                        None => egui::CursorIcon::PointingHand,
+                    },
                 }
             } else {
                 egui::CursorIcon::PointingHand
@@ -1550,23 +1674,43 @@ fn paint_grid(painter: &Painter, rect: Rect, zoom: f32, document: &PaintDocument
     }
 }
 
-fn paint_guides(painter: &Painter, rect: Rect, zoom: f32, document: &PaintDocument) {
+fn paint_guides(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    document: &PaintDocument,
+    hovered_guide: Option<usize>,
+    preview_guide: Option<(usize, GuideLine)>,
+) {
     if !document.guides().visible {
         return;
     }
 
-    let stroke = EguiStroke::new(1.5, Color32::from_rgba_unmultiplied(200, 96, 32, 180));
-    for guide in &document.guides().lines {
+    for (index, base_guide) in document.guides().lines.iter().copied().enumerate() {
+        let guide = preview_guide
+            .filter(|(preview_index, _)| *preview_index == index)
+            .map(|(_, guide)| guide)
+            .unwrap_or(base_guide);
+        let is_preview = preview_guide.is_some_and(|(preview_index, _)| preview_index == index);
+        let is_hovered = hovered_guide == Some(index);
+        let stroke = if is_preview {
+            EguiStroke::new(2.5, Color32::from_rgba_unmultiplied(200, 96, 32, 240))
+        } else if is_hovered {
+            EguiStroke::new(2.0, Color32::from_rgba_unmultiplied(200, 96, 32, 220))
+        } else {
+            EguiStroke::new(1.5, Color32::from_rgba_unmultiplied(200, 96, 32, 180))
+        };
+
         match guide.axis {
             GuideAxis::Horizontal => {
-                let y = rect.top() + guide.position * zoom;
+                let y = guide_screen_position(rect, zoom, guide);
                 painter.line_segment(
                     [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
                     stroke,
                 );
             }
             GuideAxis::Vertical => {
-                let x = rect.left() + guide.position * zoom;
+                let x = guide_screen_position(rect, zoom, guide);
                 painter.line_segment(
                     [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
                     stroke,
@@ -2166,6 +2310,31 @@ fn canvas_to_screen(rect: Rect, zoom: f32, point: PaintPoint) -> Pos2 {
     Pos2::new(rect.min.x + point.x * zoom, rect.min.y + point.y * zoom)
 }
 
+fn guide_screen_position(rect: Rect, zoom: f32, guide: GuideLine) -> f32 {
+    match guide.axis {
+        GuideAxis::Horizontal => rect.top() + guide.position * zoom,
+        GuideAxis::Vertical => rect.left() + guide.position * zoom,
+    }
+}
+
+fn guide_screen_distance(rect: Rect, zoom: f32, guide: GuideLine, pointer: Pos2) -> f32 {
+    match guide.axis {
+        GuideAxis::Horizontal => (pointer.y - guide_screen_position(rect, zoom, guide)).abs(),
+        GuideAxis::Vertical => (pointer.x - guide_screen_position(rect, zoom, guide)).abs(),
+    }
+}
+
+fn clamp_guide_position_for_document(
+    document: &PaintDocument,
+    axis: GuideAxis,
+    position: f32,
+) -> f32 {
+    match axis {
+        GuideAxis::Horizontal => position.clamp(0.0, document.canvas_size.height),
+        GuideAxis::Vertical => position.clamp(0.0, document.canvas_size.width),
+    }
+}
+
 fn snap_tolerance_world(zoom: f32) -> f32 {
     SNAP_TOLERANCE_SCREEN / zoom.max(MIN_ZOOM)
 }
@@ -2427,6 +2596,18 @@ mod tests {
 
         let snapped = snap_axis_value_for_document(&document, 1.0, GuideAxis::Vertical, 51.0);
         assert_eq!(snapped, 48.0);
+    }
+
+    #[test]
+    fn snap_axis_value_respects_updated_grid_spacing() {
+        let document = PaintDocument::default()
+            .set_grid_spacing_document(32.0)
+            .expect("set grid spacing")
+            .toggled_grid_snap_document()
+            .expect("enable grid snap");
+
+        let snapped = snap_axis_value_for_document(&document, 1.0, GuideAxis::Vertical, 33.5);
+        assert_eq!(snapped, 32.0);
     }
 
     #[test]

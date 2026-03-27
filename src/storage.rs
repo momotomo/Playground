@@ -590,6 +590,8 @@ mod tests {
     fn grid_and_guides_round_trip_preserve_canvas_aids() {
         let storage = StorageFacade::new();
         let document = sample_document()
+            .set_grid_spacing_document(32.0)
+            .expect("set grid spacing")
             .toggled_grid_snap_document()
             .expect("toggle grid snap")
             .add_guide_document(GuideAxis::Horizontal, 24.0)
@@ -602,6 +604,7 @@ mod tests {
         assert_eq!(decoded, document);
         assert_eq!(decoded.guides().lines.len(), 1);
         assert!(decoded.grid().snap_enabled);
+        assert_eq!(decoded.grid().spacing, 32.0);
         assert!(!decoded.guides().visible);
     }
 

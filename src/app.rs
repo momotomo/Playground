@@ -16,6 +16,8 @@ use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError,
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
+const GRID_SPACING_PRESETS: [f32; 6] = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
+const GRID_SPACING_STEP: f32 = 8.0;
 
 fn shortcut_undo() -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
@@ -318,6 +320,7 @@ impl PaintApp {
         enum AidAction {
             ToggleGridVisible,
             ToggleGridSnap,
+            SetGridSpacing(f32),
             ToggleGuidesVisible,
             ToggleGuidesSnap,
             AddGuide(GuideAxis),
@@ -339,31 +342,70 @@ impl PaintApp {
         let mut pending_action = None;
 
         ui.label(RichText::new("Grid & Guides").strong());
-        ui.small("Snap supports move, shape creation, and single / multi resize.");
+        ui.small(format!(
+            "Grid {:.0}px · {} guide{} · snap supports move, shape creation, and single / multi resize.",
+            grid.spacing,
+            guides.len(),
+            if guides.len() == 1 { "" } else { "s" }
+        ));
+        ui.small("Drag visible guide lines on the canvas to reposition them.");
 
         ui.add_enabled_ui(!has_canvas_interaction, |ui| {
-            let mut show_grid = grid.visible;
-            if ui.checkbox(&mut show_grid, "Show Grid").changed() {
-                pending_action = Some(AidAction::ToggleGridVisible);
-            }
+            ui.horizontal_wrapped(|ui| {
+                let mut show_grid = grid.visible;
+                if ui.checkbox(&mut show_grid, "Show Grid").changed() {
+                    pending_action = Some(AidAction::ToggleGridVisible);
+                }
 
-            let mut snap_grid = grid.snap_enabled;
-            if ui.checkbox(&mut snap_grid, "Snap to Grid").changed() {
-                pending_action = Some(AidAction::ToggleGridSnap);
-            }
+                let mut snap_grid = grid.snap_enabled;
+                if ui.checkbox(&mut snap_grid, "Snap to Grid").changed() {
+                    pending_action = Some(AidAction::ToggleGridSnap);
+                }
 
-            ui.small(format!("Grid spacing: {:.0}px", grid.spacing));
+                ui.label(RichText::new(format!("{:.0}px", grid.spacing)).monospace());
+                if ui.small_button("-").clicked() {
+                    pending_action = Some(AidAction::SetGridSpacing(
+                        (grid.spacing - GRID_SPACING_STEP).max(GRID_SPACING_STEP),
+                    ));
+                }
+                if ui.small_button("+").clicked() {
+                    pending_action =
+                        Some(AidAction::SetGridSpacing(grid.spacing + GRID_SPACING_STEP));
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.small("Spacing presets:");
+                for preset in GRID_SPACING_PRESETS {
+                    let is_current = (grid.spacing - preset).abs() < 0.1;
+                    if ui
+                        .selectable_label(is_current, format!("{preset:.0}px"))
+                        .clicked()
+                    {
+                        pending_action = Some(AidAction::SetGridSpacing(preset));
+                    }
+                }
+            });
+
             ui.add_space(6.0);
 
-            let mut show_guides = guides_visible;
-            if ui.checkbox(&mut show_guides, "Show Guides").changed() {
-                pending_action = Some(AidAction::ToggleGuidesVisible);
-            }
+            ui.horizontal_wrapped(|ui| {
+                let mut show_guides = guides_visible;
+                if ui.checkbox(&mut show_guides, "Show Guides").changed() {
+                    pending_action = Some(AidAction::ToggleGuidesVisible);
+                }
 
-            let mut snap_guides = guides_snap;
-            if ui.checkbox(&mut snap_guides, "Snap to Guides").changed() {
-                pending_action = Some(AidAction::ToggleGuidesSnap);
-            }
+                let mut snap_guides = guides_snap;
+                if ui.checkbox(&mut snap_guides, "Snap to Guides").changed() {
+                    pending_action = Some(AidAction::ToggleGuidesSnap);
+                }
+
+                ui.small(format!(
+                    "{} guide{}",
+                    guides.len(),
+                    if guides.len() == 1 { "" } else { "s" }
+                ));
+            });
 
             ui.horizontal(|ui| {
                 if ui.button("Add H Guide").clicked() {
@@ -406,6 +448,7 @@ impl PaintApp {
             match action {
                 AidAction::ToggleGridVisible => self.toggle_grid_visibility(),
                 AidAction::ToggleGridSnap => self.toggle_grid_snap(),
+                AidAction::SetGridSpacing(spacing) => self.set_grid_spacing(spacing),
                 AidAction::ToggleGuidesVisible => self.toggle_guides_visibility(),
                 AidAction::ToggleGuidesSnap => self.toggle_guides_snap(),
                 AidAction::AddGuide(axis) => self.add_guide(axis),
@@ -854,6 +897,7 @@ impl PaintApp {
                         "Rotated the selected shape."
                     }
                 }
+                DocumentEditMode::Guide => "Moved the guide.",
                 DocumentEditMode::Group => "Grouped the selected elements.",
                 DocumentEditMode::Ungroup => "Ungrouped the selected elements.",
                 DocumentEditMode::Align(alignment) => match alignment {
@@ -1066,6 +1110,17 @@ impl PaintApp {
                 "disabled"
             };
             self.apply_document_configuration_change(next, format!("Grid snap {state}."));
+        }
+    }
+
+    fn set_grid_spacing(&mut self, spacing: f32) {
+        let document = self.document().clone();
+        if let Some(next) = document.set_grid_spacing_document(spacing) {
+            let applied_spacing = next.grid().spacing;
+            self.apply_document_configuration_change(
+                next,
+                format!("Set grid spacing to {:.0}px.", applied_spacing),
+            );
         }
     }
 
