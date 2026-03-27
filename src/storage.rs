@@ -597,7 +597,11 @@ mod tests {
             .add_guide_document(GuideAxis::Horizontal, 24.0)
             .expect("add guide")
             .toggled_guides_visibility_document()
-            .expect("toggle guide visibility");
+            .expect("toggle guide visibility")
+            .toggled_rulers_visibility_document()
+            .expect("toggle rulers")
+            .toggled_smart_guides_visibility_document()
+            .expect("toggle smart guides");
         let encoded = storage.encode_document(&document).expect("must encode");
         let decoded = storage.decode_document(&encoded).expect("must decode");
 
@@ -606,6 +610,8 @@ mod tests {
         assert!(decoded.grid().snap_enabled);
         assert_eq!(decoded.grid().spacing, 32.0);
         assert!(!decoded.guides().visible);
+        assert!(!decoded.rulers().visible);
+        assert!(!decoded.smart_guides().visible);
     }
 
     #[test]

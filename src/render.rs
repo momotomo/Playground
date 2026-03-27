@@ -374,7 +374,11 @@ mod tests {
     fn grid_and_guides_do_not_render_into_png() {
         let document = PaintDocument::default()
             .add_guide_document(GuideAxis::Horizontal, 24.0)
-            .expect("add guide");
+            .expect("add guide")
+            .toggled_rulers_visibility_document()
+            .expect("toggle rulers")
+            .toggled_smart_guides_visibility_document()
+            .expect("toggle smart guides");
         let pixmap = render_document_pixmap(&document).expect("document should render");
 
         let has_non_background = (0..pixmap.width()).any(|x| {

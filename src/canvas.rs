@@ -21,6 +21,36 @@ const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
 const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
 const MIN_GRID_VISIBLE_SPACING_SCREEN: f32 = 12.0;
 const GUIDE_HIT_TOLERANCE_SCREEN: f32 = 8.0;
+const SMART_GUIDE_TOLERANCE_SCREEN: f32 = 10.0;
+const RULER_THICKNESS: f32 = 20.0;
+const RULER_LABEL_MIN_SPACING_SCREEN: f32 = 56.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SmartGuideOverlay {
+    vertical: Option<f32>,
+    horizontal: Option<f32>,
+}
+
+impl SmartGuideOverlay {
+    const fn empty() -> Self {
+        Self {
+            vertical: None,
+            horizontal: None,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.vertical.is_none() && self.horizontal.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RulerPaintStyle {
+    tick_color: Color32,
+    label_color: Color32,
+    step: f32,
+    label_step: f32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
@@ -307,6 +337,7 @@ enum SelectionSession {
         base_elements: Vec<(usize, PaintElement)>,
         drag_origin: PaintPoint,
         preview_delta: PaintVector,
+        smart_guides: SmartGuideOverlay,
     },
     SingleResize {
         index: usize,
@@ -441,6 +472,18 @@ impl SelectionSession {
             _ => None,
         }
     }
+
+    fn smart_guides(&self) -> SmartGuideOverlay {
+        match self {
+            Self::Move { smart_guides, .. } => *smart_guides,
+            Self::SingleResize { .. }
+            | Self::SingleRotate { .. }
+            | Self::MultiResize { .. }
+            | Self::MultiRotate { .. }
+            | Self::GuideMove { .. }
+            | Self::Marquee { .. } => SmartGuideOverlay::empty(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -506,6 +549,11 @@ impl CanvasController {
             .selection_session
             .as_ref()
             .and_then(SelectionSession::preview_guide);
+        let smart_guide_overlay = self
+            .selection_session
+            .as_ref()
+            .map(SelectionSession::smart_guides)
+            .unwrap_or_else(SmartGuideOverlay::empty);
         let active_control = self
             .selection_session
             .as_ref()
@@ -533,6 +581,7 @@ impl CanvasController {
             hovered_guide,
             preview_guide,
         );
+        paint_smart_guides(&painter, canvas_rect, self.view.zoom, smart_guide_overlay);
 
         if let Some(preview) = &self.active_preview {
             paint_preview(
@@ -572,6 +621,8 @@ impl CanvasController {
                 Color32::from_gray(120),
             );
         }
+
+        paint_rulers(&painter, viewport, canvas_rect, self.view.zoom, document);
 
         if matches!(
             self.interaction_mode,
@@ -1067,6 +1118,7 @@ impl CanvasController {
             base_elements,
             drag_origin: pointer_world,
             preview_delta: PaintVector::default(),
+            smart_guides: SmartGuideOverlay::empty(),
         });
         self.interaction_mode = InteractionMode::EditingSelection;
     }
@@ -1181,17 +1233,27 @@ impl CanvasController {
 
         match self.selection_session.as_mut() {
             Some(SelectionSession::Move {
+                indices,
                 base_elements,
                 drag_origin,
                 preview_delta,
+                smart_guides,
                 ..
             }) => {
                 let raw_delta = PaintVector::new(
                     pointer_world.x - drag_origin.x,
                     pointer_world.y - drag_origin.y,
                 );
-                *preview_delta =
-                    snap_move_delta_for_document(document, zoom, base_elements, raw_delta);
+                let preview = snap_move_preview_for_document(
+                    document,
+                    zoom,
+                    document.active_layer_id(),
+                    indices,
+                    base_elements,
+                    raw_delta,
+                );
+                *preview_delta = preview.delta;
+                *smart_guides = preview.smart_guides;
             }
             Some(SelectionSession::SingleResize {
                 base_shape,
@@ -1717,6 +1779,193 @@ fn paint_guides(
                 );
             }
         }
+    }
+}
+
+fn paint_smart_guides(painter: &Painter, rect: Rect, zoom: f32, smart_guides: SmartGuideOverlay) {
+    if smart_guides.is_empty() {
+        return;
+    }
+
+    let stroke = EguiStroke::new(1.5, Color32::from_rgba_unmultiplied(26, 115, 232, 220));
+    if let Some(x) = smart_guides.vertical {
+        let screen_x = rect.left() + x * zoom;
+        painter.line_segment(
+            [
+                Pos2::new(screen_x, rect.top()),
+                Pos2::new(screen_x, rect.bottom()),
+            ],
+            stroke,
+        );
+    }
+
+    if let Some(y) = smart_guides.horizontal {
+        let screen_y = rect.top() + y * zoom;
+        painter.line_segment(
+            [
+                Pos2::new(rect.left(), screen_y),
+                Pos2::new(rect.right(), screen_y),
+            ],
+            stroke,
+        );
+    }
+}
+
+fn paint_rulers(
+    painter: &Painter,
+    viewport: Rect,
+    canvas_rect: Rect,
+    zoom: f32,
+    document: &PaintDocument,
+) {
+    if !document.rulers().visible {
+        return;
+    }
+
+    let top_ruler = Rect::from_min_max(
+        viewport.min,
+        Pos2::new(
+            viewport.max.x,
+            (viewport.min.y + RULER_THICKNESS).min(viewport.max.y),
+        ),
+    );
+    let left_ruler = Rect::from_min_max(
+        viewport.min,
+        Pos2::new(
+            (viewport.min.x + RULER_THICKNESS).min(viewport.max.x),
+            viewport.max.y,
+        ),
+    );
+    let corner = Rect::from_min_max(top_ruler.min, Pos2::new(left_ruler.max.x, top_ruler.max.y));
+    let background = Color32::from_rgba_unmultiplied(244, 246, 250, 245);
+    let border = EguiStroke::new(1.0, Color32::from_gray(170));
+    let style = RulerPaintStyle {
+        tick_color: Color32::from_gray(115),
+        label_color: Color32::from_gray(78),
+        step: ruler_step_world(zoom, 20.0),
+        label_step: ruler_step_world(zoom, RULER_LABEL_MIN_SPACING_SCREEN),
+    };
+
+    painter.rect_filled(top_ruler, 0.0, background);
+    painter.rect_filled(left_ruler, 0.0, background);
+    painter.rect_filled(
+        corner,
+        0.0,
+        Color32::from_rgba_unmultiplied(234, 238, 244, 250),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(top_ruler.left(), top_ruler.bottom()),
+            Pos2::new(top_ruler.right(), top_ruler.bottom()),
+        ],
+        border,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(left_ruler.right(), left_ruler.top()),
+            Pos2::new(left_ruler.right(), left_ruler.bottom()),
+        ],
+        border,
+    );
+
+    let visible_x = visible_canvas_range(
+        canvas_rect.left(),
+        canvas_rect.right(),
+        viewport.left(),
+        viewport.right(),
+        zoom,
+        document.canvas_size.width,
+    );
+    let visible_y = visible_canvas_range(
+        canvas_rect.top(),
+        canvas_rect.bottom(),
+        viewport.top(),
+        viewport.bottom(),
+        zoom,
+        document.canvas_size.height,
+    );
+
+    paint_horizontal_ruler_ticks(
+        painter,
+        top_ruler,
+        canvas_rect.left(),
+        zoom,
+        visible_x,
+        style,
+    );
+    paint_vertical_ruler_ticks(
+        painter,
+        left_ruler,
+        canvas_rect.top(),
+        zoom,
+        visible_y,
+        style,
+    );
+}
+
+fn paint_horizontal_ruler_ticks(
+    painter: &Painter,
+    ruler_rect: Rect,
+    canvas_screen_start: f32,
+    zoom: f32,
+    visible_range: (f32, f32),
+    style: RulerPaintStyle,
+) {
+    let mut value = (visible_range.0 / style.step).floor() * style.step;
+    while value <= visible_range.1 {
+        let x = canvas_screen_start + value * zoom;
+        let is_labeled = is_ruler_label_tick(value, style.label_step);
+        let tick_height = if is_labeled { 12.0 } else { 7.0 };
+        painter.line_segment(
+            [
+                Pos2::new(x, ruler_rect.bottom()),
+                Pos2::new(x, ruler_rect.bottom() - tick_height),
+            ],
+            EguiStroke::new(1.0, style.tick_color),
+        );
+        if is_labeled {
+            painter.text(
+                Pos2::new(x + 2.0, ruler_rect.bottom() - 2.0),
+                Align2::LEFT_BOTTOM,
+                format_ruler_value(value),
+                FontId::monospace(9.0),
+                style.label_color,
+            );
+        }
+        value += style.step;
+    }
+}
+
+fn paint_vertical_ruler_ticks(
+    painter: &Painter,
+    ruler_rect: Rect,
+    canvas_screen_start: f32,
+    zoom: f32,
+    visible_range: (f32, f32),
+    style: RulerPaintStyle,
+) {
+    let mut value = (visible_range.0 / style.step).floor() * style.step;
+    while value <= visible_range.1 {
+        let y = canvas_screen_start + value * zoom;
+        let is_labeled = is_ruler_label_tick(value, style.label_step);
+        let tick_width = if is_labeled { 12.0 } else { 7.0 };
+        painter.line_segment(
+            [
+                Pos2::new(ruler_rect.right(), y),
+                Pos2::new(ruler_rect.right() - tick_width, y),
+            ],
+            EguiStroke::new(1.0, style.tick_color),
+        );
+        if is_labeled {
+            painter.text(
+                Pos2::new(ruler_rect.right() - 2.0, y - 1.0),
+                Align2::RIGHT_BOTTOM,
+                format_ruler_value(value),
+                FontId::monospace(9.0),
+                style.label_color,
+            );
+        }
+        value += style.step;
     }
 }
 
@@ -2310,6 +2559,55 @@ fn canvas_to_screen(rect: Rect, zoom: f32, point: PaintPoint) -> Pos2 {
     Pos2::new(rect.min.x + point.x * zoom, rect.min.y + point.y * zoom)
 }
 
+fn visible_canvas_range(
+    canvas_screen_min: f32,
+    canvas_screen_max: f32,
+    viewport_min: f32,
+    viewport_max: f32,
+    zoom: f32,
+    canvas_limit: f32,
+) -> (f32, f32) {
+    let intersect_min = canvas_screen_min.max(viewport_min);
+    let intersect_max = canvas_screen_max.min(viewport_max);
+    if intersect_min >= intersect_max {
+        return (0.0, -1.0);
+    }
+
+    (
+        ((intersect_min - canvas_screen_min) / zoom)
+            .floor()
+            .clamp(0.0, canvas_limit),
+        ((intersect_max - canvas_screen_min) / zoom)
+            .ceil()
+            .clamp(0.0, canvas_limit),
+    )
+}
+
+fn ruler_step_world(zoom: f32, min_screen_spacing: f32) -> f32 {
+    let target_world = (min_screen_spacing / zoom.max(MIN_ZOOM)).max(0.1);
+    let base = 10_f32.powf(target_world.log10().floor());
+    for factor in [1.0, 2.0, 5.0, 10.0] {
+        let step = base * factor;
+        if step >= target_world {
+            return step;
+        }
+    }
+    base * 10.0
+}
+
+fn is_ruler_label_tick(value: f32, label_step: f32) -> bool {
+    let snapped = (value / label_step).round() * label_step;
+    (snapped - value).abs() <= 0.01
+}
+
+fn format_ruler_value(value: f32) -> String {
+    if (value.round() - value).abs() < 0.01 {
+        format!("{:.0}", value)
+    } else {
+        format!("{value:.1}")
+    }
+}
+
 fn guide_screen_position(rect: Rect, zoom: f32, guide: GuideLine) -> f32 {
     match guide.axis {
         GuideAxis::Horizontal => rect.top() + guide.position * zoom,
@@ -2346,24 +2644,140 @@ fn snap_point_for_document(document: &PaintDocument, zoom: f32, point: PaintPoin
     )
 }
 
-fn snap_move_delta_for_document(
+#[derive(Debug, Clone, Copy)]
+struct MoveSnapPreview {
+    delta: PaintVector,
+    smart_guides: SmartGuideOverlay,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SmartGuideAxisMatch {
+    target: f32,
+    delta: f32,
+}
+
+fn snap_move_preview_for_document(
     document: &PaintDocument,
     zoom: f32,
+    selection_layer_id: LayerId,
+    selection_indices: &[usize],
     base_elements: &[(usize, PaintElement)],
     raw_delta: PaintVector,
-) -> PaintVector {
+) -> MoveSnapPreview {
     if raw_delta.is_zero() {
-        return raw_delta;
+        return MoveSnapPreview {
+            delta: raw_delta,
+            smart_guides: SmartGuideOverlay::empty(),
+        };
     }
 
     let transformed =
         transformed_preview_elements(base_elements, |element| element.translated(raw_delta));
     let Some(bounds) = selection_bounds_from_elements(&transformed) else {
-        return raw_delta;
+        return MoveSnapPreview {
+            delta: raw_delta,
+            smart_guides: SmartGuideOverlay::empty(),
+        };
     };
 
     let snap_delta = snap_delta_for_bounds(document, zoom, bounds);
-    PaintVector::new(raw_delta.dx + snap_delta.dx, raw_delta.dy + snap_delta.dy)
+    let mut delta = PaintVector::new(raw_delta.dx + snap_delta.dx, raw_delta.dy + snap_delta.dy);
+    let mut smart_guides = SmartGuideOverlay::empty();
+
+    if document.smart_guides().visible {
+        let transformed =
+            transformed_preview_elements(base_elements, |element| element.translated(delta));
+        if let Some(bounds) = selection_bounds_from_elements(&transformed) {
+            let mut smart_bounds = bounds;
+            if let Some(matched) = smart_guide_axis_match(
+                document,
+                selection_layer_id,
+                selection_indices,
+                zoom,
+                GuideAxis::Vertical,
+                smart_bounds,
+            ) {
+                delta.dx += matched.delta;
+                smart_guides.vertical = Some(matched.target);
+                smart_bounds = smart_bounds.translate(PaintVector::new(matched.delta, 0.0));
+            }
+
+            if let Some(matched) = smart_guide_axis_match(
+                document,
+                selection_layer_id,
+                selection_indices,
+                zoom,
+                GuideAxis::Horizontal,
+                smart_bounds,
+            ) {
+                delta.dy += matched.delta;
+                smart_guides.horizontal = Some(matched.target);
+            }
+        }
+    }
+
+    MoveSnapPreview {
+        delta,
+        smart_guides,
+    }
+}
+
+fn smart_guide_axis_match(
+    document: &PaintDocument,
+    selection_layer_id: LayerId,
+    selection_indices: &[usize],
+    zoom: f32,
+    axis: GuideAxis,
+    moving_bounds: ElementBounds,
+) -> Option<SmartGuideAxisMatch> {
+    let moving_positions = match axis {
+        GuideAxis::Horizontal => [
+            moving_bounds.min.y,
+            moving_bounds.center().y,
+            moving_bounds.max.y,
+        ],
+        GuideAxis::Vertical => [
+            moving_bounds.min.x,
+            moving_bounds.center().x,
+            moving_bounds.max.x,
+        ],
+    };
+    let tolerance = SMART_GUIDE_TOLERANCE_SCREEN / zoom.max(MIN_ZOOM);
+    let mut best_match: Option<SmartGuideAxisMatch> = None;
+
+    for layer in document.visible_layers() {
+        if layer.locked {
+            continue;
+        }
+
+        for (index, element) in layer.elements.iter().enumerate() {
+            if layer.id == selection_layer_id && selection_indices.contains(&index) {
+                continue;
+            }
+
+            let Some(bounds) = element.bounds() else {
+                continue;
+            };
+
+            let target_positions = match axis {
+                GuideAxis::Horizontal => [bounds.min.y, bounds.center().y, bounds.max.y],
+                GuideAxis::Vertical => [bounds.min.x, bounds.center().x, bounds.max.x],
+            };
+
+            for moving_position in moving_positions {
+                for target in target_positions {
+                    let delta = target - moving_position;
+                    if delta.abs() <= tolerance
+                        && best_match.is_none_or(|best| delta.abs() < best.delta.abs())
+                    {
+                        best_match = Some(SmartGuideAxisMatch { target, delta });
+                    }
+                }
+            }
+        }
+    }
+
+    best_match
 }
 
 fn snap_delta_for_bounds(
@@ -2462,12 +2876,13 @@ fn normalize_selection_indices(indices: &mut Vec<usize>) {
 mod tests {
     use super::{
         CanvasViewState, bounds_from_points, canvas_rect, group_resize_transform,
-        marquee_rect_is_visible, normalize_selection_indices, screen_to_canvas,
-        shape_rotation_handle_screen, snap_axis_value_for_document, snap_point_for_document,
+        marquee_rect_is_visible, normalize_selection_indices, ruler_step_world, screen_to_canvas,
+        shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
+        snap_point_for_document,
     };
     use crate::model::{
-        CanvasSize, ElementBounds, GuideAxis, PaintDocument, PaintPoint, RgbaColor, ShapeElement,
-        ShapeHandle, ShapeKind,
+        CanvasSize, ElementBounds, GuideAxis, PaintDocument, PaintPoint, PaintVector, RgbaColor,
+        ShapeElement, ShapeHandle, ShapeKind,
     };
     use eframe::egui::{Pos2, Rect, Vec2};
 
@@ -2623,5 +3038,50 @@ mod tests {
 
         let snapped = snap_point_for_document(&document, 1.0, PaintPoint::new(126.0, 32.0));
         assert_eq!(snapped.x, 120.0);
+    }
+
+    #[test]
+    fn smart_guide_match_aligns_to_other_element_center() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(100.0, 20.0),
+            PaintPoint::new(140.0, 60.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(30.0, 60.0),
+        ));
+
+        let moving_bounds = document
+            .element(1)
+            .and_then(|element| element.bounds())
+            .expect("bounds");
+        let moved_bounds = moving_bounds.translate(PaintVector::new(94.0, 0.0));
+        let matched = smart_guide_axis_match(
+            &document,
+            document.active_layer_id(),
+            &[1],
+            1.0,
+            GuideAxis::Vertical,
+            moved_bounds,
+        )
+        .expect("smart guide should match");
+
+        assert!((matched.target - 120.0).abs() < 0.01);
+        assert!((matched.delta - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn ruler_step_world_grows_when_zoomed_out() {
+        let close = ruler_step_world(2.0, 20.0);
+        let far = ruler_step_world(0.25, 20.0);
+
+        assert!(far > close);
     }
 }

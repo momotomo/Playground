@@ -97,6 +97,30 @@ impl Default for GuideSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SmartGuideSettings {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+impl Default for SmartGuideSettings {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RulerSettings {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+impl Default for RulerSettings {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSize {
     pub width: f32,
     pub height: f32,
@@ -970,6 +994,10 @@ pub struct PaintDocument {
     pub grid: GridSettings,
     #[serde(default)]
     pub guides: GuideSettings,
+    #[serde(default)]
+    pub smart_guides: SmartGuideSettings,
+    #[serde(default)]
+    pub rulers: RulerSettings,
     #[serde(default = "PaintDocument::default_layers")]
     pub layers: Vec<PaintLayer>,
     #[serde(default = "default_active_layer_id")]
@@ -985,6 +1013,8 @@ impl Default for PaintDocument {
             background: RgbaColor::white(),
             grid: GridSettings::default(),
             guides: GuideSettings::default(),
+            smart_guides: SmartGuideSettings::default(),
+            rulers: RulerSettings::default(),
             layers: Self::default_layers(),
             active_layer_id: default_active_layer_id(),
             next_layer_id: default_next_layer_id(),
@@ -1007,6 +1037,8 @@ impl PaintDocument {
             background,
             grid: GridSettings::default(),
             guides: GuideSettings::default(),
+            smart_guides: SmartGuideSettings::default(),
+            rulers: RulerSettings::default(),
             layers: vec![PaintLayer {
                 id: DEFAULT_LAYER_ID,
                 name: "Layer 1".to_owned(),
@@ -1081,6 +1113,14 @@ impl PaintDocument {
 
     pub fn guides(&self) -> &GuideSettings {
         &self.guides
+    }
+
+    pub fn smart_guides(&self) -> SmartGuideSettings {
+        self.smart_guides
+    }
+
+    pub fn rulers(&self) -> RulerSettings {
+        self.rulers
     }
 
     pub fn element_count(&self) -> usize {
@@ -1268,6 +1308,18 @@ impl PaintDocument {
         let mut next = self.clone();
         next.guides.snap_enabled = !next.guides.snap_enabled;
         (next.guides.snap_enabled != self.guides.snap_enabled).then_some(next)
+    }
+
+    pub fn toggled_smart_guides_visibility_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.smart_guides.visible = !next.smart_guides.visible;
+        (next.smart_guides.visible != self.smart_guides.visible).then_some(next)
+    }
+
+    pub fn toggled_rulers_visibility_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.rulers.visible = !next.rulers.visible;
+        (next.rulers.visible != self.rulers.visible).then_some(next)
     }
 
     pub fn add_guide_document(&self, axis: GuideAxis, position: f32) -> Option<Self> {
@@ -2850,5 +2902,23 @@ mod tests {
         assert_eq!(history.current().guides.lines[0].position, 128.0);
         assert!(history.redo());
         assert_eq!(history.current().guides.lines[0].position, 196.0);
+
+        let rulers_hidden = history
+            .current()
+            .toggled_rulers_visibility_document()
+            .expect("toggle rulers");
+        assert!(history.replace_document(rulers_hidden.clone()));
+        assert!(!history.current().rulers.visible);
+        assert!(history.undo());
+        assert!(history.current().rulers.visible);
+
+        let smart_guides_hidden = history
+            .current()
+            .toggled_smart_guides_visibility_document()
+            .expect("toggle smart guides");
+        assert!(history.replace_document(smart_guides_hidden.clone()));
+        assert!(!history.current().smart_guides.visible);
+        assert!(history.undo());
+        assert!(history.current().smart_guides.visible);
     }
 }
