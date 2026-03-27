@@ -1247,6 +1247,17 @@ impl PaintDocument {
         (next.grid.snap_enabled != self.grid.snap_enabled).then_some(next)
     }
 
+    pub fn set_grid_spacing_document(&self, spacing: f32) -> Option<Self> {
+        if !spacing.is_finite() {
+            return None;
+        }
+
+        let mut next = self.clone();
+        next.grid.spacing = spacing.max(MIN_GRID_SPACING);
+        next.sanitize_in_place();
+        ((next.grid.spacing - self.grid.spacing).abs() >= 0.1).then_some(next)
+    }
+
     pub fn toggled_guides_visibility_document(&self) -> Option<Self> {
         let mut next = self.clone();
         next.guides.visible = !next.guides.visible;
@@ -1283,6 +1294,34 @@ impl PaintDocument {
 
         let mut next = self.clone();
         next.guides.lines.remove(index);
+        Some(next)
+    }
+
+    pub fn moved_guide_document(&self, index: usize, position: f32) -> Option<Self> {
+        let guide = self.guides.lines.get(index).copied()?;
+        let position = clamp_guide_position(self.canvas_size, GuideLine::new(guide.axis, position));
+
+        if (guide.position - position).abs() < 0.1 {
+            return None;
+        }
+
+        if self
+            .guides
+            .lines
+            .iter()
+            .enumerate()
+            .any(|(candidate_index, candidate)| {
+                candidate_index != index
+                    && candidate.axis == guide.axis
+                    && (candidate.position - position).abs() < 0.1
+            })
+        {
+            return None;
+        }
+
+        let mut next = self.clone();
+        next.guides.lines[index].position = position;
+        next.sanitize_in_place();
         Some(next)
     }
 
@@ -2789,5 +2828,27 @@ mod tests {
         assert!(history.current().guides.lines.is_empty());
         assert!(history.redo());
         assert_eq!(history.current().guides.lines.len(), 1);
+
+        let spaced = history
+            .current()
+            .set_grid_spacing_document(32.0)
+            .expect("update grid spacing");
+        assert!(history.replace_document(spaced.clone()));
+        assert_eq!(history.current().grid.spacing, 32.0);
+        assert!(history.undo());
+        assert_eq!(history.current().grid.spacing, super::DEFAULT_GRID_SPACING);
+        assert!(history.redo());
+        assert_eq!(history.current().grid.spacing, 32.0);
+
+        let moved = history
+            .current()
+            .moved_guide_document(0, 196.0)
+            .expect("move guide");
+        assert!(history.replace_document(moved.clone()));
+        assert_eq!(history.current().guides.lines[0].position, 196.0);
+        assert!(history.undo());
+        assert_eq!(history.current().guides.lines[0].position, 128.0);
+        assert!(history.redo());
+        assert_eq!(history.current().guides.lines[0].position, 196.0);
     }
 }
