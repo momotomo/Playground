@@ -38,9 +38,11 @@
   - `PaintElement`
   - `Stroke`
   - `ShapeElement`
+  - `GroupElement`
   - 色、点列、キャンバスサイズ
   - バウンディング / ヒットテスト
   - 図形のリサイズ / 回転ロジック
+  - group 化 / group 解除 / 等間隔配置
   - `DocumentHistory` による `Undo` / `Redo`
 - `src/render.rs`
   - `PaintDocument` から PNG 用ピクセルデータを生成
@@ -58,6 +60,10 @@
 - `PaintElement` は次の enum
   - `Stroke`
   - `Shape`
+  - `Group`
+- `GroupElement`
+  - `elements: Vec<PaintElement>` を持つ
+  - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う
 - `ShapeElement` は次の情報を保持する
   - `kind`
   - `color`
@@ -71,6 +77,10 @@
 - 直線
   - `start` と `end` を endpoint として扱う
   - 回転は endpoint を中心回りに回した結果で表現する
+- group
+  - top-level 要素として `document.elements[]` に入る
+  - 移動 / スケール / 回転は子要素へ再帰的に適用する
+  - PNG render や Save / Load でも同じ構造をそのまま使う
 
 ## 作品状態 / ビュー状態 / 選択状態 / 編集中一時状態の分離
 
@@ -94,6 +104,7 @@
   - `Marquee`
 - `SelectionSession` は preview 用だけに使い、確定時にだけ履歴へ流す
 - 単一選択時は既存のハンドル編集を使い、複数選択時は group bbox ハンドルへ切り替える
+- `Group / Ungroup / Distribute` は preview を持たず、完成した `document` を 1 回だけ履歴へ流す
 
 ## 選択モデルの拡張内容
 
@@ -104,14 +115,19 @@
 - 単一選択
   - 要素固有の再編集に使う
   - shape なら move / resize / rotate
-  - stroke なら move
+  - stroke なら group bbox ベースの move / scale / rotate
+  - group なら group bbox ベースの move / resize / rotate
 - 複数選択
   - 一括移動
   - 一括リサイズ
   - 一括回転
+  - group 化
   - 整列
+  - 等間隔配置
   - 重なり順変更
-- 単一選択では shape ハンドル、複数選択では group bbox ハンドルを表示する
+- 単一選択では shape は専用ハンドル、stroke / group は group bbox ハンドルを表示する
+- 複数選択では group bbox ハンドルを表示する
+- group 化した後は top-level では 1 要素扱いに戻るため、既存の単一選択フローを再利用できる
 
 ## リサイズ / 回転操作の設計
 
@@ -127,8 +143,7 @@
   - endpoint ハンドルで長さと向きを編集する
   - 回転ハンドルは線分中心を回転中心にする
 - ストローク
-  - 単一選択では移動のみ
-  - 複数選択の group transform では簡易スケール / 回転対象に含める
+  - 単一 / 複数選択の group bbox transform では簡易スケール / 回転対象に含める
 
 ## 複数選択変形の考え方
 
@@ -156,6 +171,9 @@
 - 複数選択
   - 各要素の個別 bounds をハイライト表示する
   - 選択全体の union bounds をグループ bbox として表示する
+- group
+  - 子要素ごとの hit test を逆順でたどる
+  - bounds は子要素 bounds の union
 - 矩形選択
   - 要素 bounds と marquee rect の交差で選択する
 - クリック優先順位は次の通り
@@ -174,6 +192,13 @@
 - 変えるのは位置だけで、rotation や shape の意味は維持する
 - 実装上は `PaintDocument` から整列後の新しい `document` を生成し、履歴へ 1 回だけ流す
 
+## 等間隔配置の考え方
+
+- `Distribute Horizontally` / `Distribute Vertically` は 3 要素以上で有効
+- 各要素の bounds を軸方向で並べ替え、先頭と末尾は固定する
+- 中間要素だけを translation で動かし、gap が均等になるように配置する
+- rotation や group 内部構造は壊さず、位置だけを調整する
+
 ## 重なり順変更のモデル
 
 - 重なり順は `PaintDocument.elements` の配列順で表現する
@@ -182,12 +207,13 @@
 - `Bring Forward` / `Send Backward`
   - 1 ステップだけ前後へ移動する
 - 複数選択時は、選択要素どうしの相対順を保ったまま移動する
+- group の内部順序は `GroupElement.elements[]` の順序で保持し、Ungroup 時もその順を維持して top-level へ戻す
 
 ## 履歴コミットの考え方
 
 - 新規 stroke / 図形作成は `commit_element`
 - 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
-- 複数要素の Move / Resize / Rotate / Align / Reorder も `replace_document` を 1 回だけ積む
+- 複数要素の Move / Resize / Rotate / Group / Ungroup / Align / Distribute / Reorder も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -195,7 +221,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、整列、重なり順変更、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -203,9 +229,11 @@
 
 - JSON 保存は「再編集用」
 - `storage` が JSON envelope の version 管理と encode / decode を担当する
-- 現在の保存は `format.version = 2` を維持する
+- 現在の保存は `format.version = 3`
 - 旧 `version = 1` の stroke-only 形式は decode 側で `PaintElement::Stroke` へ変換して読む
+- 旧 `version = 2` の stroke / shape 形式は decode 側でそのまま読める
 - 旧 `version = 2` の shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
+- group は `PaintElement::Group` として再帰的に保存する
 - 重なり順は `document.elements[]` の配列順としてそのまま保存する
 
 ## PNG 出力の責務
@@ -214,7 +242,7 @@
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
-- 整列、group transform、重なり順変更も作品データどおりに反映する
+- group、整列、等間隔配置、group transform、重なり順変更も作品データどおりに反映する
 - 選択枠やハンドルは出力に含めない
 
 ## 将来の拡張方針
@@ -222,10 +250,11 @@
 - レイヤー
   - `PaintDocument` に layer 配列を導入し、各 layer が `PaintElement` 配列を持つ形へ拡張
 - 複数選択強化
-  - グループ化
+  - group 内だけを直接編集する isolate モード
+  - group のネスト可視化
 - ストローク変形
   - 単一選択でも扱える専用ハンドルや変形 UI を追加
 - 図形編集強化
-  - 塗り、角丸矩形、矢印、スナップ、等間隔配置などを追加
+  - 塗り、角丸矩形、矢印、スナップなどを追加
 - 保存形式 migration
   - 将来の大きな形状拡張時に `format.version` を上げて decode 側で migration を入れる

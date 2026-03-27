@@ -2,7 +2,7 @@
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
 同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
-このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集` に加えて、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`整列`、`重なり順操作` を追加しています。
+このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集` に加えて、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`Group / Ungroup`、`整列 / 等間隔配置`、`重なり順操作` を追加しています。
 
 ## プロジェクト概要
 
@@ -15,7 +15,7 @@
 - キャンバスのズーム、パン、表示リセット
 - 単一選択と複数選択
 - 単一選択での移動、リサイズ、回転
-- 複数選択での一括移動、グループリサイズ、グループ回転、整列、重なり順変更
+- 複数選択での一括移動、グループリサイズ、グループ回転、Group / Ungroup、整列、等間隔配置、重なり順変更
 - 矩形、楕円、直線ツール
 - native / web の保存導線差分吸収
 
@@ -124,8 +124,14 @@ trunk build --release
   - 一括移動
   - 一括リサイズ
   - 一括回転
+  - Group
+  - Horizontal / Vertical Distribute
   - 左 / 横中央 / 右 / 上 / 縦中央 / 下揃え
   - 前面 / 背面 / 前へ / 後ろへ の重なり順変更
+- `Group` は複数選択を 1 つの top-level 要素にまとめます
+- group 化した要素は 1 つのまとまりとして選択、移動、リサイズ、回転、整列、重なり順変更できます
+- `Ungroup` は選択中の group を 1 階層だけ展開します
+- group の内部要素順は保持され、描画順と保存順にもそのまま反映されます
 - 複数選択のリサイズはグループ bbox を基準に、要素同士の相対位置を保ちながら行います
 - 複数選択の回転はグループ中心回りで行います
 - ストロークもこのフェーズでは簡易的な一括スケール / 回転対象に含めています
@@ -140,6 +146,8 @@ trunk build --release
 - `Align` メニューは複数選択時のみ有効です
 - 整列基準は選択要素全体の bounding box です
 - 整列では rotation は保ち、位置だけを調整します
+- `Distribute` メニューは 3 要素以上の複数選択時のみ有効です
+- `Distribute Horizontally` / `Distribute Vertically` は、先頭と末尾の要素を基準に中間要素の間隔を均等化します
 - `Order` メニューは単一選択でも複数選択でも使えます
 - 複数選択の重なり順変更では、選択要素どうしの相対順を保ったまま前後へ移動します
 
@@ -168,6 +176,8 @@ trunk build --release
 - `Ctrl/Cmd + S`: Save
 - `Ctrl/Cmd + O`: Load
 - `Ctrl/Cmd + Shift + E`: Export PNG
+- `Ctrl/Cmd + G`: Group
+- `Ctrl/Cmd + Shift + G`: Ungroup
 - `Ctrl/Cmd + +` または `Ctrl/Cmd + =`: Zoom in
 - `Ctrl/Cmd + -`: Zoom out
 - `Ctrl/Cmd + 0`: Reset View
@@ -185,9 +195,11 @@ trunk build --release
 
 - 用途は「再編集用」
 - 既定ファイル名は `untitled.paint.json`
-- 現在の format version は `2` のままです
+- 現在の format version は `3` です
 - 旧 `version = 1` の stroke-only JSON も読込互換を残しています
-- `document.elements[]` に stroke / shape を保存します
+- 旧 `version = 2` の stroke / shape JSON も読込互換を残しています
+- `document.elements[]` に stroke / shape / group を保存します
+- group は `elements[]` を再帰的に保持します
 - shape では次の情報を保持します
   - `kind`
   - `color`
@@ -205,7 +217,7 @@ trunk build --release
 - 表示中のズーム倍率や選択枠、ハンドルは含めません
 - 作品のキャンバスサイズを基準に、背景色と全要素をラスタライズします
 - 回転やリサイズ後の図形も、そのまま出力へ反映されます
-- 複数選択による整列結果、グループ変形、重なり順変更も、そのまま出力へ反映されます
+- 複数選択による整列結果、等間隔配置、グループ変形、重なり順変更、group 化結果も、そのまま出力へ反映されます
 
 ## 対応している要素と未対応要素
 
@@ -220,13 +232,15 @@ trunk build --release
 - ドラッグ矩形選択
 - 複数要素の一括移動
 - 複数要素の一括リサイズ / 回転
+- Group / Ungroup
 - 左 / 横中央 / 右 / 上 / 縦中央 / 下揃え
+- 水平方向 / 垂直方向の等間隔配置
 - Bring to Front / Send to Back / Bring Forward / Send Backward
 
 未対応:
 - リサイズ中のスナップ
-- グループ化
 - 塗り
+- グループ内だけを直接選択する isolate モード
 
 ## native / web の違い
 
@@ -238,7 +252,7 @@ trunk build --release
   - `Load` はブラウザのファイル選択を使います
   - `Export PNG` はブラウザダウンロードとして保存します
   - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
-- 選択 / 矩形選択 / 一括リサイズ / 一括回転 / 整列 / 重なり順変更 / 図形再編集 / ズーム / パンの基本操作は native / web で同じです
+- 選択 / 矩形選択 / Group / Ungroup / 一括リサイズ / 一括回転 / 整列 / 等間隔配置 / 重なり順変更 / 図形再編集 / ズーム / パンの基本操作は native / web で同じです
 
 ## GitHub Pages デプロイ手順
 
@@ -265,8 +279,8 @@ trunk build --release
 
 - レイヤー
 - 塗り、角丸矩形、矢印付き線
-- スナップ、グリッド、等間隔配置
-- グループ化
+- スナップ、グリッド
+- group 内だけを直接編集する isolate モード
 - ストロークの専用変形ハンドル
 - 保存形式 migration
 - ペン / タッチ入力最適化
