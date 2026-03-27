@@ -270,6 +270,21 @@ impl StackOrderCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistributionKind {
+    Horizontal,
+    Vertical,
+}
+
+impl DistributionKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Distribute Horizontally",
+            Self::Vertical => "Distribute Vertically",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeHandle {
     TopLeft,
     TopRight,
@@ -698,10 +713,68 @@ impl ShapeElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupElement {
+    #[serde(default)]
+    pub elements: Vec<PaintElement>,
+}
+
+impl GroupElement {
+    pub fn bounds(&self) -> Option<ElementBounds> {
+        let mut bounds = self.elements.iter().filter_map(PaintElement::bounds);
+        let first = bounds.next()?;
+        Some(bounds.fold(first, ElementBounds::union))
+    }
+
+    pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> bool {
+        self.elements
+            .iter()
+            .rev()
+            .any(|element| element.hit_test(point, tolerance))
+    }
+
+    pub fn translated(&self, delta: PaintVector) -> Self {
+        Self {
+            elements: self
+                .elements
+                .iter()
+                .map(|element| element.translated(delta))
+                .collect(),
+        }
+    }
+
+    pub fn scaled_from(&self, anchor: PaintPoint, scale_x: f32, scale_y: f32) -> Self {
+        Self {
+            elements: self
+                .elements
+                .iter()
+                .map(|element| element.scaled_from(anchor, scale_x, scale_y))
+                .collect(),
+        }
+    }
+
+    pub fn rotated_around(&self, pivot: PaintPoint, angle_radians: f32) -> Self {
+        Self {
+            elements: self
+                .elements
+                .iter()
+                .map(|element| element.rotated_around(pivot, angle_radians))
+                .collect(),
+        }
+    }
+
+    pub fn is_transform_editable(&self) -> bool {
+        self.elements
+            .iter()
+            .any(PaintElement::is_transform_editable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "element_type", rename_all = "snake_case")]
 pub enum PaintElement {
     Stroke(Stroke),
     Shape(ShapeElement),
+    Group(GroupElement),
 }
 
 impl PaintElement {
@@ -709,6 +782,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.tool.label(),
             Self::Shape(shape) => shape.kind.label(),
+            Self::Group(_) => "Group",
         }
     }
 
@@ -716,6 +790,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.bounds(),
             Self::Shape(shape) => Some(shape.bounds()),
+            Self::Group(group) => group.bounds(),
         }
     }
 
@@ -723,6 +798,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.hit_test(point, tolerance),
             Self::Shape(shape) => shape.hit_test(point, tolerance),
+            Self::Group(group) => group.hit_test(point, tolerance),
         }
     }
 
@@ -730,6 +806,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.translated(delta)),
             Self::Shape(shape) => Self::Shape(shape.translated(delta)),
+            Self::Group(group) => Self::Group(group.translated(delta)),
         }
     }
 
@@ -737,6 +814,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.scaled_from(anchor, scale_x, scale_y)),
             Self::Shape(shape) => Self::Shape(shape.scaled_from(anchor, scale_x, scale_y)),
+            Self::Group(group) => Self::Group(group.scaled_from(anchor, scale_x, scale_y)),
         }
     }
 
@@ -744,6 +822,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.rotated_around(pivot, angle_radians)),
             Self::Shape(shape) => Self::Shape(shape.rotated_around(pivot, angle_radians)),
+            Self::Group(group) => Self::Group(group.rotated_around(pivot, angle_radians)),
         }
     }
 
@@ -751,7 +830,12 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => !stroke.points.is_empty(),
             Self::Shape(shape) => shape.is_transform_editable(),
+            Self::Group(group) => group.is_transform_editable(),
         }
+    }
+
+    pub fn is_group(&self) -> bool {
+        matches!(self, Self::Group(_))
     }
 }
 
@@ -884,6 +968,86 @@ impl PaintDocument {
         }
 
         true
+    }
+
+    pub fn selection_contains_group(&self, indices: &[usize]) -> bool {
+        normalize_indices(indices, self.elements.len())
+            .into_iter()
+            .any(|index| self.elements[index].is_group())
+    }
+
+    pub fn grouped_document(&self, indices: &[usize]) -> Option<(Self, Vec<usize>)> {
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.len() < 2 {
+            return None;
+        }
+
+        let insert_index = indices[0];
+        let selected_flags = selection_flags(self.elements.len(), &indices);
+        let grouped_elements: Vec<PaintElement> = indices
+            .iter()
+            .map(|index| self.elements[*index].clone())
+            .collect();
+
+        let mut next_elements = Vec::with_capacity(self.elements.len() - indices.len() + 1);
+        for (index, element) in self.elements.iter().enumerate() {
+            if index == insert_index {
+                next_elements.push(PaintElement::Group(GroupElement {
+                    elements: grouped_elements.clone(),
+                }));
+            }
+
+            if !selected_flags[index] {
+                next_elements.push(element.clone());
+            }
+        }
+
+        Some((
+            Self {
+                canvas_size: self.canvas_size,
+                background: self.background,
+                elements: next_elements,
+            },
+            vec![insert_index],
+        ))
+    }
+
+    pub fn ungrouped_document(&self, indices: &[usize]) -> Option<(Self, Vec<usize>)> {
+        let selected_indices = normalize_indices(indices, self.elements.len());
+        if selected_indices.is_empty() {
+            return None;
+        }
+
+        let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+        let mut next_elements = Vec::new();
+        let mut next_selection = Vec::new();
+        let mut changed = false;
+
+        for (index, element) in self.elements.iter().enumerate() {
+            match (selected_flags[index], element) {
+                (true, PaintElement::Group(group)) => {
+                    changed = true;
+                    for child in &group.elements {
+                        next_selection.push(next_elements.len());
+                        next_elements.push(child.clone());
+                    }
+                }
+                (true, _) => {
+                    next_selection.push(next_elements.len());
+                    next_elements.push(element.clone());
+                }
+                (false, _) => next_elements.push(element.clone()),
+            }
+        }
+
+        changed.then_some((
+            Self {
+                canvas_size: self.canvas_size,
+                background: self.background,
+                elements: next_elements,
+            },
+            next_selection,
+        ))
     }
 
     pub fn aligned_document(&self, indices: &[usize], alignment: AlignmentKind) -> Option<Self> {
@@ -1068,6 +1232,77 @@ impl PaintDocument {
 
         let mut next = self.clone();
         next.replace_elements(&replacements).then_some(next)
+    }
+
+    pub fn distributed_document(
+        &self,
+        indices: &[usize],
+        distribution: DistributionKind,
+    ) -> Option<Self> {
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.len() < 3 {
+            return None;
+        }
+
+        let mut ordered: Vec<_> = indices
+            .iter()
+            .filter_map(|index| {
+                self.element(*index)
+                    .and_then(PaintElement::bounds)
+                    .map(|bounds| (*index, bounds))
+            })
+            .collect();
+        if ordered.len() < 3 {
+            return None;
+        }
+
+        match distribution {
+            DistributionKind::Horizontal => {
+                ordered.sort_by(|left, right| left.1.min.x.total_cmp(&right.1.min.x))
+            }
+            DistributionKind::Vertical => {
+                ordered.sort_by(|left, right| left.1.min.y.total_cmp(&right.1.min.y))
+            }
+        }
+
+        let total_size: f32 = ordered
+            .iter()
+            .map(|(_, bounds)| match distribution {
+                DistributionKind::Horizontal => bounds.width(),
+                DistributionKind::Vertical => bounds.height(),
+            })
+            .sum();
+
+        let span = match distribution {
+            DistributionKind::Horizontal => ordered.last()?.1.max.x - ordered.first()?.1.min.x,
+            DistributionKind::Vertical => ordered.last()?.1.max.y - ordered.first()?.1.min.y,
+        };
+        let gap = (span - total_size) / (ordered.len().saturating_sub(1) as f32);
+        let mut next = self.clone();
+        let mut changed = false;
+
+        let mut cursor = match distribution {
+            DistributionKind::Horizontal => ordered.first()?.1.max.x + gap,
+            DistributionKind::Vertical => ordered.first()?.1.max.y + gap,
+        };
+
+        for (index, bounds) in ordered.iter().skip(1).take(ordered.len().saturating_sub(2)) {
+            let delta = match distribution {
+                DistributionKind::Horizontal => PaintVector::new(cursor - bounds.min.x, 0.0),
+                DistributionKind::Vertical => PaintVector::new(0.0, cursor - bounds.min.y),
+            };
+
+            if !delta.is_zero() && next.translate_element(*index, delta) {
+                changed = true;
+            }
+
+            cursor += match distribution {
+                DistributionKind::Horizontal => bounds.width() + gap,
+                DistributionKind::Vertical => bounds.height() + gap,
+            };
+        }
+
+        changed.then_some(next)
     }
 }
 
@@ -1358,9 +1593,9 @@ fn alignment_delta(
 #[cfg(test)]
 mod tests {
     use super::{
-        AlignmentKind, CanvasSize, DocumentHistory, ElementBounds, PaintDocument, PaintElement,
-        PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
-        StackOrderCommand, Stroke, ToolKind,
+        AlignmentKind, CanvasSize, DistributionKind, DocumentHistory, ElementBounds, GroupElement,
+        PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
+        ShapeKind, StackOrderCommand, Stroke, ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -1607,6 +1842,7 @@ mod tests {
             .map(|element| match element {
                 PaintElement::Shape(shape) => shape.color,
                 PaintElement::Stroke(_) => RgbaColor::white(),
+                PaintElement::Group(_) => RgbaColor::new(1, 1, 1, 255),
             })
             .collect();
         assert_eq!(
@@ -1713,5 +1949,124 @@ mod tests {
         assert!(history.undo());
         assert!(history.redo());
         assert_eq!(history.current(), &resized);
+    }
+
+    #[test]
+    fn grouped_and_ungrouped_documents_preserve_internal_order() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(255, 0, 0, 255),
+            2.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(30.0, 30.0),
+        ));
+        document.push_stroke(sample_stroke());
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Ellipse,
+            RgbaColor::new(0, 0, 255, 255),
+            2.0,
+            PaintPoint::new(40.0, 12.0),
+            PaintPoint::new(70.0, 32.0),
+        ));
+
+        let (grouped, selection) = document
+            .grouped_document(&[0, 2])
+            .expect("grouping should succeed");
+        assert_eq!(selection, vec![0]);
+
+        let Some(PaintElement::Group(group)) = grouped.element(0) else {
+            panic!("first element should become a group");
+        };
+        assert_eq!(group.elements.len(), 2);
+        assert!(matches!(group.elements[0], PaintElement::Shape(_)));
+        assert!(matches!(group.elements[1], PaintElement::Shape(_)));
+
+        let (ungrouped, selection) = grouped
+            .ungrouped_document(&[0])
+            .expect("ungrouping should succeed");
+        assert_eq!(selection, vec![0, 1]);
+        assert_eq!(ungrouped.element_count(), 3);
+        assert_eq!(ungrouped.element(0), document.element(0));
+        assert_eq!(ungrouped.element(1), document.element(2));
+        assert_eq!(ungrouped.element(2), document.element(1));
+    }
+
+    #[test]
+    fn selection_contains_group_detects_group_elements() {
+        let document = PaintDocument {
+            canvas_size: CanvasSize::default(),
+            background: RgbaColor::white(),
+            elements: vec![PaintElement::Group(GroupElement {
+                elements: vec![PaintElement::Stroke(sample_stroke())],
+            })],
+        };
+
+        assert!(document.selection_contains_group(&[0]));
+        assert!(!document.selection_contains_group(&[1]));
+    }
+
+    #[test]
+    fn distribute_horizontal_evens_out_middle_positions() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(0.0, 0.0),
+            PaintPoint::new(10.0, 10.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(30.0, 0.0),
+            PaintPoint::new(40.0, 10.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(90.0, 0.0),
+            PaintPoint::new(100.0, 10.0),
+        ));
+
+        let distributed = document
+            .distributed_document(&[0, 1, 2], DistributionKind::Horizontal)
+            .expect("distribution should succeed");
+
+        let first = distributed
+            .element(0)
+            .and_then(PaintElement::bounds)
+            .unwrap();
+        let second = distributed
+            .element(1)
+            .and_then(PaintElement::bounds)
+            .unwrap();
+        let third = distributed
+            .element(2)
+            .and_then(PaintElement::bounds)
+            .unwrap();
+
+        let gap_a = second.min.x - first.max.x;
+        let gap_b = third.min.x - second.max.x;
+        assert!((gap_a - gap_b).abs() < 0.001);
+    }
+
+    #[test]
+    fn history_replace_document_tracks_group_undo_redo() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+        history.commit_shape(sample_shape());
+        history.commit_stroke(sample_stroke());
+
+        let grouped = history
+            .current()
+            .grouped_document(&[0, 1])
+            .expect("group should succeed")
+            .0;
+        assert!(history.replace_document(grouped.clone()));
+        assert!(history.undo());
+        assert!(history.redo());
+        assert_eq!(history.current(), &grouped);
     }
 }

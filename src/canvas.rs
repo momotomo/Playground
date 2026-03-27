@@ -4,8 +4,9 @@ use eframe::egui::{
 };
 
 use crate::model::{
-    AlignmentKind, CanvasSize, ElementBounds, PaintDocument, PaintElement, PaintPoint, PaintVector,
-    RgbaColor, ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand, Stroke, ToolKind,
+    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, PaintDocument, PaintElement,
+    PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand,
+    Stroke, ToolKind,
 };
 
 const MIN_ZOOM: f32 = 0.1;
@@ -76,7 +77,10 @@ pub enum DocumentEditMode {
     Move,
     Resize,
     Rotate,
+    Group,
+    Ungroup,
     Align(AlignmentKind),
+    Distribute(DistributionKind),
     Reorder(StackOrderCommand),
 }
 
@@ -86,7 +90,10 @@ impl DocumentEditMode {
             Self::Move => "moving",
             Self::Resize => "resizing",
             Self::Rotate => "rotating",
+            Self::Group => "grouping",
+            Self::Ungroup => "ungrouping",
             Self::Align(_) => "aligning",
+            Self::Distribute(_) => "distributing",
             Self::Reorder(_) => "reordering",
         }
     }
@@ -535,6 +542,10 @@ impl CanvasController {
         self.selection.len()
     }
 
+    pub fn selection_contains_group(&self, document: &PaintDocument) -> bool {
+        document.selection_contains_group(self.selection.indices())
+    }
+
     pub fn sync_with_document(&mut self, document: &PaintDocument) {
         self.selection.retain_valid(document);
         if self
@@ -580,6 +591,7 @@ impl CanvasController {
             let capability = match element {
                 PaintElement::Stroke(_) => "move / scale / rotate",
                 PaintElement::Shape(_) => "move / resize / rotate",
+                PaintElement::Group(_) => "move / resize / rotate / ungroup",
             };
             return format!(
                 "Selection: {} #{} ({capability})",
@@ -589,7 +601,7 @@ impl CanvasController {
         }
 
         format!(
-            "Selection: {} elements (move / resize / rotate / align / order)",
+            "Selection: {} elements (move / resize / rotate / group / align / distribute / order)",
             self.selection.len()
         )
     }
@@ -634,6 +646,51 @@ impl CanvasController {
             document: next,
             selection_indices: self.selection.indices().to_vec(),
             mode: DocumentEditMode::Align(alignment),
+        })
+    }
+
+    pub fn apply_group(&mut self, document: &PaintDocument) -> Option<CommittedDocumentEdit> {
+        if self.has_active_interaction() || self.selection.len() < 2 {
+            return None;
+        }
+
+        let (next, selection_indices) = document.grouped_document(self.selection.indices())?;
+        self.selection.set_indices(selection_indices.clone());
+        Some(CommittedDocumentEdit {
+            document: next,
+            selection_indices,
+            mode: DocumentEditMode::Group,
+        })
+    }
+
+    pub fn apply_ungroup(&mut self, document: &PaintDocument) -> Option<CommittedDocumentEdit> {
+        if self.has_active_interaction() || self.selection.is_empty() {
+            return None;
+        }
+
+        let (next, selection_indices) = document.ungrouped_document(self.selection.indices())?;
+        self.selection.set_indices(selection_indices.clone());
+        Some(CommittedDocumentEdit {
+            document: next,
+            selection_indices,
+            mode: DocumentEditMode::Ungroup,
+        })
+    }
+
+    pub fn apply_distribution(
+        &mut self,
+        document: &PaintDocument,
+        distribution: DistributionKind,
+    ) -> Option<CommittedDocumentEdit> {
+        if self.has_active_interaction() || self.selection.len() < 3 {
+            return None;
+        }
+
+        let next = document.distributed_document(self.selection.indices(), distribution)?;
+        Some(CommittedDocumentEdit {
+            document: next,
+            selection_indices: self.selection.indices().to_vec(),
+            mode: DocumentEditMode::Distribute(distribution),
         })
     }
 
@@ -815,10 +872,7 @@ impl CanvasController {
         {
             match control {
                 ControlTarget::SingleResize(handle) => {
-                    if let Some(index) = self.selection.single()
-                        && let Some(PaintElement::Shape(shape)) =
-                            self.single_selected_element_owned(document)
-                    {
+                    if let Some((index, shape)) = self.single_selected_shape_owned(document) {
                         self.selection_session = Some(SelectionSession::SingleResize {
                             index,
                             base_shape: shape,
@@ -830,10 +884,7 @@ impl CanvasController {
                     }
                 }
                 ControlTarget::SingleRotate => {
-                    if let Some(index) = self.selection.single()
-                        && let Some(PaintElement::Shape(shape)) =
-                            self.single_selected_element_owned(document)
-                    {
+                    if let Some((index, shape)) = self.single_selected_shape_owned(document) {
                         self.selection_session = Some(SelectionSession::SingleRotate {
                             index,
                             base_shape: shape,
@@ -850,7 +901,7 @@ impl CanvasController {
                     }
                 }
                 ControlTarget::GroupResize(handle) => {
-                    if let Some(base_bounds) = document.selection_bounds(self.selection.indices()) {
+                    if let Some(base_bounds) = self.selection_control_bounds(document) {
                         let base_elements = self.selected_visual_elements(document);
                         self.selection_session = Some(SelectionSession::MultiResize {
                             indices: self.selection.indices().to_vec(),
@@ -864,7 +915,7 @@ impl CanvasController {
                     }
                 }
                 ControlTarget::GroupRotate => {
-                    if let Some(base_bounds) = document.selection_bounds(self.selection.indices()) {
+                    if let Some(base_bounds) = self.selection_control_bounds(document) {
                         let base_elements = self.selected_visual_elements(document);
                         self.selection_session = Some(SelectionSession::MultiRotate {
                             indices: self.selection.indices().to_vec(),
@@ -1270,6 +1321,36 @@ impl CanvasController {
         document.element(index).cloned()
     }
 
+    fn single_selected_shape_owned(
+        &self,
+        document: &PaintDocument,
+    ) -> Option<(usize, ShapeElement)> {
+        let index = self.selection.single()?;
+        match self.single_selected_element_owned(document)? {
+            PaintElement::Shape(shape) => Some((index, shape)),
+            PaintElement::Stroke(_) | PaintElement::Group(_) => None,
+        }
+    }
+
+    fn selection_uses_group_controls(&self, document: &PaintDocument) -> bool {
+        if self.selection.len() > 1 {
+            return true;
+        }
+
+        matches!(
+            self.single_selected_element_owned(document),
+            Some(PaintElement::Stroke(_) | PaintElement::Group(_))
+        )
+    }
+
+    fn selection_control_bounds(&self, document: &PaintDocument) -> Option<ElementBounds> {
+        if self.selection.is_empty() {
+            None
+        } else {
+            selection_bounds_from_elements(&self.selected_visual_elements(document))
+        }
+    }
+
     fn hit_selection_control(
         &self,
         document: &PaintDocument,
@@ -1277,8 +1358,8 @@ impl CanvasController {
         zoom: f32,
         pointer_screen: Pos2,
     ) -> Option<ControlTarget> {
-        if self.selection.len() > 1 {
-            let bounds = document.selection_bounds(self.selection.indices())?;
+        if self.selection_uses_group_controls(document) {
+            let bounds = self.selection_control_bounds(document)?;
             for (handle, handle_screen) in bounds_control_handles_screen(bounds, canvas_rect, zoom)
             {
                 if handle_screen.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
@@ -1293,9 +1374,7 @@ impl CanvasController {
             return None;
         }
 
-        let Some(PaintElement::Shape(shape)) = self.single_selected_element_owned(document) else {
-            return None;
-        };
+        let (_, shape) = self.single_selected_shape_owned(document)?;
 
         for (handle, handle_screen) in shape_control_handles_screen(shape, canvas_rect, zoom) {
             if handle_screen.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
@@ -1429,6 +1508,11 @@ fn paint_element(
     match element {
         PaintElement::Stroke(stroke) => paint_stroke(painter, rect, zoom, stroke, background),
         PaintElement::Shape(shape) => paint_shape(painter, rect, zoom, shape),
+        PaintElement::Group(group) => {
+            for child in &group.elements {
+                paint_element(painter, rect, zoom, child, background);
+            }
+        }
     }
 }
 
@@ -1499,7 +1583,7 @@ fn paint_selection_overlay(
     active_control: Option<ControlTarget>,
     show_handles: bool,
 ) {
-    if selected_elements.len() == 1 {
+    if selected_elements.len() == 1 && matches!(&selected_elements[0].1, PaintElement::Shape(_)) {
         paint_single_selection_overlay(
             painter,
             rect,
@@ -1627,6 +1711,7 @@ fn paint_single_selection_overlay(
                 }
             }
         },
+        PaintElement::Group(_) => {}
     }
 }
 
