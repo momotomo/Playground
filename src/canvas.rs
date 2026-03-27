@@ -27,6 +27,8 @@ const TOUCH_GUIDE_HIT_TOLERANCE_SCREEN: f32 = 16.0;
 const SMART_GUIDE_TOLERANCE_SCREEN: f32 = 10.0;
 const RULER_THICKNESS: f32 = 20.0;
 const RULER_LABEL_MIN_SPACING_SCREEN: f32 = 56.0;
+const TOUCH_LONG_PRESS_DURATION_SECONDS: f64 = 0.30;
+const TOUCH_LONG_PRESS_MOVE_TOLERANCE_SCREEN: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SmartGuideOverlay {
@@ -79,6 +81,13 @@ impl CanvasToolKind {
         }
     }
 
+    const fn is_drawing_tool(self) -> bool {
+        matches!(
+            self,
+            Self::Brush | Self::Eraser | Self::Rectangle | Self::Ellipse | Self::Line
+        )
+    }
+
     fn shape_kind(self) -> Option<ShapeKind> {
         match self {
             Self::Rectangle => Some(ShapeKind::Rectangle),
@@ -95,12 +104,14 @@ pub struct ToolSettings {
     pub color: RgbaColor,
     pub width: f32,
     pub multi_select_mode: bool,
+    pub finger_draw_enabled: bool,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct CanvasOutput {
     pub committed_element: Option<PaintElement>,
     pub committed_edit: Option<CommittedDocumentEdit>,
+    pub requested_tool: Option<CanvasToolKind>,
     pub needs_repaint: bool,
 }
 
@@ -153,6 +164,21 @@ enum PanMode {
     Space,
     Middle,
     Tool,
+    Touch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TouchContactKind {
+    Finger,
+    PenLike,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingLongPress {
+    start_screen: Pos2,
+    start_world: PaintPoint,
+    start_time: f64,
+    extend_selection: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -500,6 +526,8 @@ pub struct CanvasController {
     interaction_mode: InteractionMode,
     view: CanvasViewState,
     selection: SelectionState,
+    touch_contact_kind: Option<TouchContactKind>,
+    pending_long_press: Option<PendingLongPress>,
 }
 
 impl Default for CanvasController {
@@ -510,6 +538,8 @@ impl Default for CanvasController {
             interaction_mode: InteractionMode::Idle,
             view: CanvasViewState::default(),
             selection: SelectionState::default(),
+            touch_contact_kind: None,
+            pending_long_press: None,
         }
     }
 }
@@ -643,8 +673,9 @@ impl CanvasController {
     }
 
     pub fn discard_active_interaction(&mut self) -> bool {
-        let discarded =
-            self.active_preview.take().is_some() || self.selection_session.take().is_some();
+        let discarded = self.active_preview.take().is_some()
+            || self.selection_session.take().is_some()
+            || self.pending_long_press.take().is_some();
         self.interaction_mode = InteractionMode::Idle;
         discarded
     }
@@ -652,6 +683,7 @@ impl CanvasController {
     pub fn clear_selection(&mut self) {
         self.selection.clear();
         self.selection_session = None;
+        self.pending_long_press = None;
         if matches!(self.interaction_mode, InteractionMode::EditingSelection) {
             self.interaction_mode = InteractionMode::Idle;
         }
@@ -688,6 +720,9 @@ impl CanvasController {
             if matches!(self.interaction_mode, InteractionMode::EditingSelection) {
                 self.interaction_mode = InteractionMode::Idle;
             }
+        }
+        if !document.active_layer_is_editable() {
+            self.pending_long_press = None;
         }
     }
 
@@ -868,6 +903,112 @@ impl CanvasController {
             .zoom_around(factor, viewport.center(), canvas_size)
     }
 
+    fn sync_touch_contact_kind(
+        &mut self,
+        ui: &egui::Ui,
+        touch_active: bool,
+        multi_touch_active: bool,
+        primary_pressed: bool,
+    ) -> bool {
+        if !touch_active {
+            self.touch_contact_kind = None;
+            self.pending_long_press = None;
+            return false;
+        }
+
+        if multi_touch_active {
+            self.touch_contact_kind = Some(TouchContactKind::Finger);
+            self.pending_long_press = None;
+            return true;
+        }
+
+        if primary_pressed
+            && let Some(kind) = ui.input(|input| touch_contact_kind_from_events(&input.events))
+        {
+            self.touch_contact_kind = Some(kind);
+        }
+
+        matches!(self.touch_contact_kind, Some(TouchContactKind::Finger))
+    }
+
+    fn handle_pending_long_press(
+        &mut self,
+        ui: &egui::Ui,
+        pointer: &egui::PointerState,
+        document: &PaintDocument,
+        viewport: Rect,
+        canvas_rect: Rect,
+    ) -> Option<CanvasOutput> {
+        let pending = self.pending_long_press?;
+        let touch_active = ui.input(|input| input.any_touches());
+        if !touch_active || !pointer.primary_down() {
+            self.pending_long_press = None;
+            return None;
+        }
+
+        let pointer_screen = pointer.interact_pos()?;
+        if pending.start_screen.distance(pointer_screen) > TOUCH_LONG_PRESS_MOVE_TOLERANCE_SCREEN {
+            self.pending_long_press = None;
+            self.interaction_mode = InteractionMode::Panning(PanMode::Touch);
+            return Some(CanvasOutput {
+                needs_repaint: true,
+                ..Default::default()
+            });
+        }
+
+        let elapsed = ui.input(|input| input.time) - pending.start_time;
+        if elapsed < TOUCH_LONG_PRESS_DURATION_SECONDS {
+            return Some(CanvasOutput {
+                needs_repaint: true,
+                ..Default::default()
+            });
+        }
+
+        self.pending_long_press = None;
+        let pointer_world = screen_to_canvas(
+            viewport,
+            self.view.pan,
+            self.view.zoom,
+            document.canvas_size,
+            pointer_screen,
+        );
+        let tolerance = hit_tolerance_world(
+            self.view.zoom,
+            true,
+            HIT_TOLERANCE_SCREEN,
+            TOUCH_HIT_TOLERANCE_SCREEN,
+        );
+
+        if let Some(index) = document.hit_test(pointer_world, tolerance) {
+            if pending.extend_selection {
+                self.selection.toggle(document.active_layer_id(), index);
+                return Some(CanvasOutput {
+                    requested_tool: Some(CanvasToolKind::Select),
+                    needs_repaint: true,
+                    ..Default::default()
+                });
+            }
+
+            if !self.selection.contains(index) {
+                self.selection.set_only(document.active_layer_id(), index);
+            }
+            self.begin_move_session(document, pointer_world);
+            return Some(CanvasOutput {
+                requested_tool: Some(CanvasToolKind::Select),
+                needs_repaint: true,
+                ..Default::default()
+            });
+        }
+
+        self.begin_marquee_selection(pending.start_world, pending.extend_selection);
+        self.update_selection_session(viewport, document, canvas_rect, pointer_screen);
+        Some(CanvasOutput {
+            requested_tool: Some(CanvasToolKind::Select),
+            needs_repaint: true,
+            ..Default::default()
+        })
+    }
+
     fn handle_input(
         &mut self,
         ui: &egui::Ui,
@@ -879,6 +1020,13 @@ impl CanvasController {
         let pointer = ui.input(|input| input.pointer.clone());
         let multi_touch = ui.input(|input| input.multi_touch());
         let touch_active = ui.input(|input| input.any_touches());
+        let multi_touch_active = multi_touch.is_some_and(|gesture| gesture.num_touches >= 2);
+        let finger_touch_active = self.sync_touch_contact_kind(
+            ui,
+            touch_active,
+            multi_touch_active,
+            pointer.primary_pressed(),
+        );
         let viewport = response.rect;
         let hover_pos = pointer.hover_pos();
         let hovered = response.contains_pointer()
@@ -907,6 +1055,17 @@ impl CanvasController {
             };
             output.needs_repaint = pan_changed || zoom_changed;
             return output;
+        }
+
+        if self.active_preview.is_none()
+            && self.selection_session.is_none()
+            && tool_settings.tool.is_drawing_tool()
+            && finger_touch_active
+            && !tool_settings.finger_draw_enabled
+            && let Some(long_press_output) =
+                self.handle_pending_long_press(ui, &pointer, document, viewport, canvas_rect)
+        {
+            return long_press_output;
         }
 
         if self.active_preview.is_none() && self.selection_session.is_none() && hovered {
@@ -953,6 +1112,20 @@ impl CanvasController {
                         document.canvas_size,
                         position,
                     );
+
+                    if tool_settings.tool.is_drawing_tool()
+                        && finger_touch_active
+                        && !tool_settings.finger_draw_enabled
+                    {
+                        self.pending_long_press = Some(PendingLongPress {
+                            start_screen: position,
+                            start_world: world,
+                            start_time: ui.input(|input| input.time),
+                            extend_selection,
+                        });
+                        output.needs_repaint = true;
+                        return output;
+                    }
 
                     match tool_settings.tool {
                         CanvasToolKind::Select => {
@@ -1010,6 +1183,7 @@ impl CanvasController {
                     PanMode::Space => pointer.primary_down() && space_pan,
                     PanMode::Middle => pointer.middle_down(),
                     PanMode::Tool => pointer.primary_down(),
+                    PanMode::Touch => pointer.primary_down() && touch_active,
                 };
 
                 if !still_active {
@@ -2413,7 +2587,7 @@ fn paint_empty_state(painter: &Painter, rect: Rect) {
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 62.0),
         Align2::CENTER_CENTER,
-        "選択ツールと複数選択モードで編集できます。手のひらツールや2本指ドラッグでパン、ピンチでズームできます。",
+        "選択ツールと複数選択モードで編集できます。タブレットでは指で2本指パン / ピンチズーム、長押しで選択にも入れます。",
         FontId::proportional(16.0),
         Color32::from_gray(96),
     );
@@ -3000,20 +3174,39 @@ fn hit_tolerance_world(zoom: f32, touch_active: bool, base: f32, touch_minimum: 
     effective_screen_hit_tolerance(touch_active, base, touch_minimum) / zoom.max(MIN_ZOOM)
 }
 
+fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContactKind> {
+    let mut saw_touch = false;
+    let mut saw_force = false;
+    for event in events {
+        if let egui::Event::Touch { force, .. } = event {
+            saw_touch = true;
+            saw_force |= force.is_some();
+        }
+    }
+
+    if saw_force {
+        Some(TouchContactKind::PenLike)
+    } else if saw_touch {
+        Some(TouchContactKind::Finger)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasViewState, bounds_from_points, canvas_rect, effective_screen_hit_tolerance,
-        group_resize_transform, hit_tolerance_world, marquee_rect_is_visible,
-        normalize_selection_indices, ruler_step_world, screen_to_canvas,
+        CanvasViewState, TouchContactKind, bounds_from_points, canvas_rect,
+        effective_screen_hit_tolerance, group_resize_transform, hit_tolerance_world,
+        marquee_rect_is_visible, normalize_selection_indices, ruler_step_world, screen_to_canvas,
         shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
-        snap_point_for_document,
+        snap_point_for_document, touch_contact_kind_from_events,
     };
     use crate::model::{
         CanvasSize, ElementBounds, GuideAxis, PaintDocument, PaintPoint, PaintVector, RgbaColor,
         ShapeElement, ShapeHandle, ShapeKind,
     };
-    use eframe::egui::{Pos2, Rect, Vec2};
+    use eframe::egui::{Event, Pos2, Rect, TouchDeviceId, TouchId, TouchPhase, Vec2};
 
     #[test]
     fn reset_view_fits_canvas_inside_viewport() {
@@ -3216,6 +3409,30 @@ mod tests {
     fn touch_world_tolerance_scales_with_zoom() {
         let tolerance = hit_tolerance_world(2.0, true, 8.0, 18.0);
         assert!((tolerance - 9.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn touch_events_with_force_are_treated_as_pen_like() {
+        let kind = touch_contact_kind_from_events(&[Event::Touch {
+            device_id: TouchDeviceId(1),
+            id: TouchId(1),
+            phase: TouchPhase::Start,
+            pos: Pos2::new(10.0, 20.0),
+            force: Some(0.5),
+        }]);
+        assert_eq!(kind, Some(TouchContactKind::PenLike));
+    }
+
+    #[test]
+    fn touch_events_without_force_are_treated_as_finger() {
+        let kind = touch_contact_kind_from_events(&[Event::Touch {
+            device_id: TouchDeviceId(1),
+            id: TouchId(2),
+            phase: TouchPhase::Start,
+            pos: Pos2::new(10.0, 20.0),
+            force: None,
+        }]);
+        assert_eq!(kind, Some(TouchContactKind::Finger));
     }
 
     #[test]
