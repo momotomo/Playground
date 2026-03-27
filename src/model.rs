@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 const HIT_TOLERANCE_MIN: f32 = 2.5;
+const MIN_SHAPE_HALF_EXTENT: f32 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSize {
@@ -63,12 +64,27 @@ impl PaintPoint {
         Self { x, y }
     }
 
+    pub fn midpoint(self, other: Self) -> Self {
+        Self::new((self.x + other.x) * 0.5, (self.y + other.y) * 0.5)
+    }
+
     pub fn offset(self, delta: PaintVector) -> Self {
         Self::new(self.x + delta.dx, self.y + delta.dy)
     }
 
     pub fn distance_to(self, other: Self) -> f32 {
         ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+
+    pub fn angle_from(self, center: Self) -> f32 {
+        (self.y - center.y).atan2(self.x - center.x)
+    }
+
+    pub fn rotated_around(self, center: Self, angle_radians: f32) -> Self {
+        center.offset(rotate_vector(
+            PaintVector::new(self.x - center.x, self.y - center.y),
+            angle_radians,
+        ))
     }
 }
 
@@ -85,6 +101,10 @@ impl PaintVector {
 
     pub fn is_zero(self) -> bool {
         self.dx.abs() < f32::EPSILON && self.dy.abs() < f32::EPSILON
+    }
+
+    pub fn midpoint(self, other: Self) -> Self {
+        Self::new((self.dx + other.dx) * 0.5, (self.dy + other.dy) * 0.5)
     }
 }
 
@@ -186,6 +206,38 @@ impl ShapeKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeHandle {
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+    Start,
+    End,
+}
+
+impl ShapeHandle {
+    pub fn corner_signs(self) -> Option<(f32, f32)> {
+        match self {
+            Self::TopLeft => Some((-1.0, -1.0)),
+            Self::TopRight => Some((1.0, -1.0)),
+            Self::BottomRight => Some((1.0, 1.0)),
+            Self::BottomLeft => Some((-1.0, 1.0)),
+            Self::Start | Self::End => None,
+        }
+    }
+
+    pub fn opposite_corner(self) -> Option<Self> {
+        match self {
+            Self::TopLeft => Some(Self::BottomRight),
+            Self::TopRight => Some(Self::BottomLeft),
+            Self::BottomRight => Some(Self::TopLeft),
+            Self::BottomLeft => Some(Self::TopRight),
+            Self::Start | Self::End => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     pub tool: ToolKind,
@@ -251,6 +303,8 @@ pub struct ShapeElement {
     pub width: f32,
     pub start: PaintPoint,
     pub end: PaintPoint,
+    #[serde(default)]
+    pub rotation_radians: f32,
 }
 
 impl ShapeElement {
@@ -267,6 +321,93 @@ impl ShapeElement {
             width,
             start,
             end,
+            rotation_radians: 0.0,
+        }
+    }
+
+    pub fn with_rotation(
+        kind: ShapeKind,
+        color: RgbaColor,
+        width: f32,
+        start: PaintPoint,
+        end: PaintPoint,
+        rotation_radians: f32,
+    ) -> Self {
+        Self {
+            kind,
+            color,
+            width,
+            start,
+            end,
+            rotation_radians,
+        }
+    }
+
+    pub fn center(&self) -> PaintPoint {
+        self.start.midpoint(self.end)
+    }
+
+    pub fn half_extents(&self) -> PaintVector {
+        PaintVector::new(
+            (self.end.x - self.start.x).abs() * 0.5,
+            (self.end.y - self.start.y).abs() * 0.5,
+        )
+    }
+
+    pub fn rotation_center(&self) -> PaintPoint {
+        match self.kind {
+            ShapeKind::Line => self.start.midpoint(self.end),
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.center(),
+        }
+    }
+
+    pub fn line_angle(&self) -> f32 {
+        (self.end.y - self.start.y).atan2(self.end.x - self.start.x)
+    }
+
+    pub fn control_handles(&self) -> Vec<(ShapeHandle, PaintPoint)> {
+        match self.kind {
+            ShapeKind::Line => vec![
+                (ShapeHandle::Start, self.start),
+                (ShapeHandle::End, self.end),
+            ],
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let corners = self.rotated_box_corners();
+                vec![
+                    (ShapeHandle::TopLeft, corners[0]),
+                    (ShapeHandle::TopRight, corners[1]),
+                    (ShapeHandle::BottomRight, corners[2]),
+                    (ShapeHandle::BottomLeft, corners[3]),
+                ]
+            }
+        }
+    }
+
+    pub fn rotation_handle_position(&self, distance: f32) -> Option<PaintPoint> {
+        match self.kind {
+            ShapeKind::Line => {
+                let center = self.rotation_center();
+                let direction =
+                    PaintVector::new(self.end.x - self.start.x, self.end.y - self.start.y);
+                let length = (direction.dx * direction.dx + direction.dy * direction.dy).sqrt();
+                if length <= f32::EPSILON {
+                    return None;
+                }
+
+                let normal = PaintVector::new(-direction.dy / length, direction.dx / length);
+                Some(center.offset(PaintVector::new(
+                    normal.dx * (length * 0.5 + distance),
+                    normal.dy * (length * 0.5 + distance),
+                )))
+            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let center = self.center();
+                let half = self.half_extents();
+                Some(center.offset(rotate_vector(
+                    PaintVector::new(0.0, -(half.dy + distance)),
+                    self.rotation_radians,
+                )))
+            }
         }
     }
 
@@ -277,11 +418,51 @@ impl ShapeElement {
             width: self.width,
             start: self.start.offset(delta),
             end: self.end.offset(delta),
+            rotation_radians: self.rotation_radians,
+        }
+    }
+
+    pub fn rotated_by(&self, delta_radians: f32) -> Self {
+        match self.kind {
+            ShapeKind::Line => {
+                let center = self.rotation_center();
+                Self {
+                    kind: self.kind,
+                    color: self.color,
+                    width: self.width,
+                    start: self.start.rotated_around(center, delta_radians),
+                    end: self.end.rotated_around(center, delta_radians),
+                    rotation_radians: 0.0,
+                }
+            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => Self {
+                kind: self.kind,
+                color: self.color,
+                width: self.width,
+                start: self.start,
+                end: self.end,
+                rotation_radians: self.rotation_radians + delta_radians,
+            },
+        }
+    }
+
+    pub fn resized_by_handle(&self, handle: ShapeHandle, world_point: PaintPoint) -> Option<Self> {
+        match self.kind {
+            ShapeKind::Line => self.resized_line(handle, world_point),
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.resized_box(handle, world_point),
         }
     }
 
     pub fn bounds(&self) -> ElementBounds {
-        ElementBounds::from_line(self.start, self.end, self.width.max(1.0) * 0.5)
+        match self.kind {
+            ShapeKind::Line => {
+                ElementBounds::from_line(self.start, self.end, self.width.max(1.0) * 0.5)
+            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                ElementBounds::from_points(&self.rotated_box_corners(), self.width.max(1.0) * 0.5)
+                    .expect("rotated box corners should not be empty")
+            }
+        }
     }
 
     pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> bool {
@@ -291,9 +472,96 @@ impl ShapeElement {
                 let radius = self.width * 0.5 + tolerance;
                 distance_to_segment_sq(point, self.start, self.end) <= radius * radius
             }
-            ShapeKind::Rectangle => hit_test_rectangle_outline(*self, point, tolerance),
-            ShapeKind::Ellipse => hit_test_ellipse_outline(*self, point, tolerance),
+            ShapeKind::Rectangle => {
+                let local_point = self.local_box_point(point);
+                hit_test_box_outline(self.start, self.end, self.width, local_point, tolerance)
+            }
+            ShapeKind::Ellipse => {
+                let local_point = self.local_box_point(point);
+                hit_test_ellipse_outline(self.start, self.end, self.width, local_point, tolerance)
+            }
         }
+    }
+
+    pub fn selection_outline(&self) -> Vec<PaintPoint> {
+        match self.kind {
+            ShapeKind::Line => vec![self.start, self.end],
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.rotated_box_corners().to_vec(),
+        }
+    }
+
+    pub fn is_transform_editable(&self) -> bool {
+        true
+    }
+
+    pub fn rotated_box_corners(&self) -> [PaintPoint; 4] {
+        let center = self.center();
+        let half = self.half_extents();
+        let local = [
+            PaintVector::new(-half.dx, -half.dy),
+            PaintVector::new(half.dx, -half.dy),
+            PaintVector::new(half.dx, half.dy),
+            PaintVector::new(-half.dx, half.dy),
+        ];
+
+        local.map(|offset| center.offset(rotate_vector(offset, self.rotation_radians)))
+    }
+
+    fn resized_line(&self, handle: ShapeHandle, world_point: PaintPoint) -> Option<Self> {
+        let mut next = *self;
+        match handle {
+            ShapeHandle::Start => next.start = world_point,
+            ShapeHandle::End => next.end = world_point,
+            _ => return None,
+        }
+        Some(next)
+    }
+
+    fn resized_box(&self, handle: ShapeHandle, world_point: PaintPoint) -> Option<Self> {
+        let (sign_x, sign_y) = handle.corner_signs()?;
+        let anchor = self.opposite_corner_local(handle)?;
+        let center = self.center();
+        let local_pointer = self.world_to_local_offset(world_point);
+        let clamped_pointer = PaintVector::new(
+            clamp_resized_axis(local_pointer.dx, anchor.dx, sign_x),
+            clamp_resized_axis(local_pointer.dy, anchor.dy, sign_y),
+        );
+        let new_center_local = anchor.midpoint(clamped_pointer);
+        let new_half = PaintVector::new(
+            (anchor.dx - clamped_pointer.dx).abs() * 0.5,
+            (anchor.dy - clamped_pointer.dy).abs() * 0.5,
+        );
+        let new_center = center.offset(rotate_vector(new_center_local, self.rotation_radians));
+
+        Some(Self {
+            kind: self.kind,
+            color: self.color,
+            width: self.width,
+            start: PaintPoint::new(new_center.x - new_half.dx, new_center.y - new_half.dy),
+            end: PaintPoint::new(new_center.x + new_half.dx, new_center.y + new_half.dy),
+            rotation_radians: self.rotation_radians,
+        })
+    }
+
+    fn world_to_local_offset(&self, point: PaintPoint) -> PaintVector {
+        let center = self.center();
+        rotate_vector(
+            PaintVector::new(point.x - center.x, point.y - center.y),
+            -self.rotation_radians,
+        )
+    }
+
+    fn local_box_point(&self, point: PaintPoint) -> PaintPoint {
+        let local = self.world_to_local_offset(point);
+        let center = self.center();
+        PaintPoint::new(center.x + local.dx, center.y + local.dy)
+    }
+
+    fn opposite_corner_local(&self, handle: ShapeHandle) -> Option<PaintVector> {
+        let opposite = handle.opposite_corner()?;
+        let half = self.half_extents();
+        let (sign_x, sign_y) = opposite.corner_signs()?;
+        Some(PaintVector::new(half.dx * sign_x, half.dy * sign_y))
     }
 }
 
@@ -331,6 +599,10 @@ impl PaintElement {
             Self::Stroke(stroke) => Self::Stroke(stroke.translated(delta)),
             Self::Shape(shape) => Self::Shape(shape.translated(delta)),
         }
+    }
+
+    pub fn is_transform_editable(&self) -> bool {
+        matches!(self, Self::Shape(shape) if shape.is_transform_editable())
     }
 }
 
@@ -461,6 +733,25 @@ impl DocumentHistory {
         true
     }
 
+    pub fn replace_element(&mut self, index: usize, element: PaintElement) -> bool {
+        let Some(existing) = self.current.element(index) else {
+            return false;
+        };
+        if existing == &element {
+            return false;
+        }
+
+        let mut next = self.current.clone();
+        if !next.replace_element(index, element) {
+            return false;
+        }
+
+        self.push_undo_snapshot();
+        self.current = next;
+        self.redo_stack.clear();
+        true
+    }
+
     pub fn translate_element(&mut self, index: usize, delta: PaintVector) -> bool {
         if delta.is_zero() {
             return false;
@@ -520,13 +811,19 @@ impl DocumentHistory {
     }
 }
 
-fn hit_test_rectangle_outline(shape: ShapeElement, point: PaintPoint, tolerance: f32) -> bool {
-    let outer = shape.bounds();
+fn hit_test_box_outline(
+    start: PaintPoint,
+    end: PaintPoint,
+    stroke_width: f32,
+    point: PaintPoint,
+    tolerance: f32,
+) -> bool {
+    let outer = ElementBounds::from_line(start, end, stroke_width.max(1.0) * 0.5);
     if !outer.contains(point) {
         return false;
     }
 
-    let inset = shape.width * 0.5 + tolerance;
+    let inset = stroke_width * 0.5 + tolerance;
     let inner_min_x = outer.min.x + inset;
     let inner_min_y = outer.min.y + inset;
     let inner_max_x = outer.max.x - inset;
@@ -542,8 +839,14 @@ fn hit_test_rectangle_outline(shape: ShapeElement, point: PaintPoint, tolerance:
         && point.y <= inner_max_y)
 }
 
-fn hit_test_ellipse_outline(shape: ShapeElement, point: PaintPoint, tolerance: f32) -> bool {
-    let bounds = shape.bounds();
+fn hit_test_ellipse_outline(
+    start: PaintPoint,
+    end: PaintPoint,
+    stroke_width: f32,
+    point: PaintPoint,
+    tolerance: f32,
+) -> bool {
+    let bounds = ElementBounds::from_line(start, end, stroke_width.max(1.0) * 0.5);
     let center = bounds.center();
     let outer_rx = (bounds.width() * 0.5).max(1.0);
     let outer_ry = (bounds.height() * 0.5).max(1.0);
@@ -553,7 +856,7 @@ fn hit_test_ellipse_outline(shape: ShapeElement, point: PaintPoint, tolerance: f
         return false;
     }
 
-    let inset = shape.width * 0.5 + tolerance;
+    let inset = stroke_width * 0.5 + tolerance;
     let inner_rx = outer_rx - inset;
     let inner_ry = outer_ry - inset;
     if inner_rx <= 0.0 || inner_ry <= 0.0 {
@@ -584,11 +887,28 @@ fn distance_to_segment_sq(point: PaintPoint, start: PaintPoint, end: PaintPoint)
     point.distance_to(nearest).powi(2)
 }
 
+fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
+    let cos = angle_radians.cos();
+    let sin = angle_radians.sin();
+    PaintVector::new(
+        vector.dx * cos - vector.dy * sin,
+        vector.dx * sin + vector.dy * cos,
+    )
+}
+
+fn clamp_resized_axis(value: f32, anchor: f32, sign: f32) -> f32 {
+    if sign < 0.0 {
+        value.min(anchor - MIN_SHAPE_HALF_EXTENT * 2.0)
+    } else {
+        value.max(anchor + MIN_SHAPE_HALF_EXTENT * 2.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CanvasSize, DocumentHistory, PaintDocument, PaintElement, PaintPoint, PaintVector,
-        RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
+        RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -623,6 +943,21 @@ mod tests {
     }
 
     #[test]
+    fn rotated_rectangle_hit_test_works() {
+        let shape = ShapeElement::with_rotation(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            4.0,
+            PaintPoint::new(80.0, 20.0),
+            PaintPoint::new(140.0, 70.0),
+            std::f32::consts::FRAC_PI_4,
+        );
+
+        assert!(shape.hit_test(PaintPoint::new(121.0, 20.0), 4.0));
+        assert!(!shape.hit_test(PaintPoint::new(110.0, 45.0), 2.0));
+    }
+
+    #[test]
     fn ellipse_hit_test_targets_outline() {
         let shape = ShapeElement::new(
             ShapeKind::Ellipse,
@@ -646,8 +981,8 @@ mod tests {
         document.push_shape(sample_shape());
         document.push_stroke(sample_stroke());
 
-        assert_eq!(document.hit_test(PaintPoint::new(82.0, 23.0), 3.0), Some(0),);
-        assert_eq!(document.hit_test(PaintPoint::new(20.0, 10.0), 3.0), Some(1),);
+        assert_eq!(document.hit_test(PaintPoint::new(82.0, 23.0), 3.0), Some(0));
+        assert_eq!(document.hit_test(PaintPoint::new(20.0, 10.0), 3.0), Some(1));
     }
 
     #[test]
@@ -666,13 +1001,46 @@ mod tests {
     }
 
     #[test]
-    fn history_tracks_move_without_recording_zero_delta() {
-        let mut history = DocumentHistory::new(PaintDocument::default());
-        history.commit_stroke(sample_stroke());
+    fn resize_rectangle_preserves_rotation() {
+        let shape = ShapeElement::with_rotation(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            4.0,
+            PaintPoint::new(80.0, 20.0),
+            PaintPoint::new(140.0, 70.0),
+            0.5,
+        );
 
-        assert!(!history.translate_element(0, PaintVector::default()));
-        assert!(history.translate_element(0, PaintVector::new(5.0, 4.0)));
-        assert!(history.can_undo());
+        let resized = shape
+            .resized_by_handle(ShapeHandle::TopLeft, PaintPoint::new(60.0, 10.0))
+            .expect("rectangle resize should succeed");
+
+        assert_eq!(resized.rotation_radians, 0.5);
+        assert!(resized.bounds().width() >= shape.bounds().width());
+    }
+
+    #[test]
+    fn rotate_line_moves_endpoints() {
+        let line = ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::charcoal(),
+            3.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(60.0, 20.0),
+        );
+
+        let rotated = line.rotated_by(std::f32::consts::FRAC_PI_2);
+        assert!((rotated.start.x - 40.0).abs() < 0.01);
+        assert!((rotated.end.x - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn history_tracks_replace_for_shape_editing() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+        history.commit_shape(sample_shape());
+
+        let replacement = PaintElement::Shape(sample_shape().rotated_by(0.5));
+        assert!(history.replace_element(0, replacement));
         assert!(history.undo());
         assert!(history.redo());
     }

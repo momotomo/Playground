@@ -435,12 +435,13 @@ mod tests {
         stroke.push_point(PaintPoint::new(4.0, 4.0));
         stroke.push_point(PaintPoint::new(28.0, 12.0));
         document.push_stroke(stroke);
-        document.push_shape(ShapeElement::new(
-            ShapeKind::Line,
+        document.push_shape(ShapeElement::with_rotation(
+            ShapeKind::Rectangle,
             RgbaColor::new(220, 64, 64, 255),
             3.0,
-            PaintPoint::new(40.0, 4.0),
-            PaintPoint::new(60.0, 28.0),
+            PaintPoint::new(36.0, 6.0),
+            PaintPoint::new(58.0, 26.0),
+            0.45,
         ));
         document
     }
@@ -453,6 +454,21 @@ mod tests {
         let decoded = storage.decode_document(&encoded).expect("must decode");
 
         assert_eq!(decoded, document);
+    }
+
+    #[test]
+    fn shape_rotation_survives_round_trip() {
+        let storage = StorageFacade::new();
+        let encoded = storage
+            .encode_document(&sample_document())
+            .expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        let Some(crate::model::PaintElement::Shape(shape)) = decoded.element(1) else {
+            panic!("second element should be a shape");
+        };
+
+        assert!((shape.rotation_radians - 0.45).abs() < 0.0001);
     }
 
     #[test]
@@ -529,12 +545,17 @@ mod tests {
         let decoded = storage.decode_document(&encoded).expect("must decode");
         let png = storage.export_png_bytes(&decoded).expect("must render");
         let pixmap = Pixmap::decode_png(&png).expect("png should decode");
-        let pixel = pixmap
-            .pixel(50, 16)
-            .expect("shape pixel should exist")
-            .demultiply();
+        let found_shape_pixel = (30..60).any(|x| {
+            (4..28).any(|y| {
+                let pixel = pixmap
+                    .pixel(x, y)
+                    .expect("shape pixel should exist")
+                    .demultiply();
+                (pixel.red(), pixel.green(), pixel.blue()) != (255, 255, 255)
+            })
+        });
 
-        assert_ne!((pixel.red(), pixel.green(), pixel.blue()), (255, 255, 255));
+        assert!(found_shape_pixel, "expected a non-background shape pixel");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -5,13 +5,16 @@ use eframe::egui::{
 
 use crate::model::{
     CanvasSize, ElementBounds, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor,
-    ShapeElement, ShapeKind, Stroke, ToolKind,
+    ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
 };
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const FIT_MARGIN: f32 = 24.0;
 const HIT_TOLERANCE_SCREEN: f32 = 8.0;
+const HANDLE_RADIUS: f32 = 6.5;
+const HANDLE_HIT_RADIUS: f32 = 12.0;
+const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 28.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
@@ -55,14 +58,32 @@ pub struct ToolSettings {
 #[derive(Debug, Default, Clone)]
 pub struct CanvasOutput {
     pub committed_element: Option<PaintElement>,
-    pub move_commit: Option<MoveCommit>,
+    pub committed_edit: Option<CommittedSelectionEdit>,
     pub needs_repaint: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct MoveCommit {
+#[derive(Debug, Clone)]
+pub struct CommittedSelectionEdit {
     pub index: usize,
-    pub delta: PaintVector,
+    pub element: PaintElement,
+    pub mode: SelectionEditMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionEditMode {
+    Move,
+    Resize,
+    Rotate,
+}
+
+impl SelectionEditMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Move => "moving",
+            Self::Resize => "resizing",
+            Self::Rotate => "rotating",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +91,7 @@ enum InteractionMode {
     Idle,
     Drawing,
     Panning(PanMode),
-    MovingSelection,
+    EditingSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,15 +190,11 @@ impl CanvasViewState {
 #[derive(Debug, Default, Clone, Copy)]
 struct SelectionState {
     selected_index: Option<usize>,
-    drag_origin: Option<PaintPoint>,
-    preview_delta: PaintVector,
 }
 
 impl SelectionState {
     fn clear(&mut self) {
         self.selected_index = None;
-        self.drag_origin = None;
-        self.preview_delta = PaintVector::default();
     }
 
     fn is_valid_for(&self, document: &PaintDocument) -> bool {
@@ -193,9 +210,95 @@ enum ActivePreview {
     Shape(ShapeElement),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlTarget {
+    Resize(ShapeHandle),
+    Rotate,
+}
+
+#[derive(Debug, Clone)]
+enum SelectionSession {
+    Move {
+        index: usize,
+        base_element: PaintElement,
+        drag_origin: PaintPoint,
+        preview_delta: PaintVector,
+    },
+    Resize {
+        index: usize,
+        base_shape: ShapeElement,
+        handle: ShapeHandle,
+        preview_shape: ShapeElement,
+    },
+    Rotate {
+        index: usize,
+        base_shape: ShapeElement,
+        start_pointer_angle: f32,
+        preview_shape: ShapeElement,
+    },
+}
+
+impl SelectionSession {
+    fn index(&self) -> usize {
+        match self {
+            Self::Move { index, .. } | Self::Resize { index, .. } | Self::Rotate { index, .. } => {
+                *index
+            }
+        }
+    }
+
+    fn mode(&self) -> SelectionEditMode {
+        match self {
+            Self::Move { .. } => SelectionEditMode::Move,
+            Self::Resize { .. } => SelectionEditMode::Resize,
+            Self::Rotate { .. } => SelectionEditMode::Rotate,
+        }
+    }
+
+    fn preview_element(&self) -> PaintElement {
+        match self {
+            Self::Move {
+                base_element,
+                preview_delta,
+                ..
+            } => base_element.translated(*preview_delta),
+            Self::Resize { preview_shape, .. } | Self::Rotate { preview_shape, .. } => {
+                PaintElement::Shape(*preview_shape)
+            }
+        }
+    }
+
+    fn control_target(&self) -> Option<ControlTarget> {
+        match self {
+            Self::Resize { handle, .. } => Some(ControlTarget::Resize(*handle)),
+            Self::Rotate { .. } => Some(ControlTarget::Rotate),
+            Self::Move { .. } => None,
+        }
+    }
+
+    fn finish(self) -> Option<CommittedSelectionEdit> {
+        let index = self.index();
+        let mode = self.mode();
+        let preview = self.preview_element();
+        let base = match &self {
+            Self::Move { base_element, .. } => base_element.clone(),
+            Self::Resize { base_shape, .. } | Self::Rotate { base_shape, .. } => {
+                PaintElement::Shape(*base_shape)
+            }
+        };
+
+        (preview != base).then_some(CommittedSelectionEdit {
+            index,
+            element: preview,
+            mode,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct CanvasController {
     active_preview: Option<ActivePreview>,
+    selection_session: Option<SelectionSession>,
     interaction_mode: InteractionMode,
     view: CanvasViewState,
     selection: SelectionState,
@@ -205,6 +308,7 @@ impl Default for CanvasController {
     fn default() -> Self {
         Self {
             active_preview: None,
+            selection_session: None,
             interaction_mode: InteractionMode::Idle,
             view: CanvasViewState::default(),
             selection: SelectionState::default(),
@@ -228,18 +332,17 @@ impl CanvasController {
         self.view.remember_viewport(viewport);
         self.view.ensure_visible_defaults(document);
 
-        let cursor_icon = self.cursor_icon(ui, tool_settings.tool);
-        let response = response.on_hover_cursor(cursor_icon);
-        let mut output = self.handle_input(ui, &response, document, tool_settings);
-
-        paint_workspace(&painter, viewport);
         let canvas_rect = canvas_rect(
             viewport,
             self.view.pan,
             self.view.zoom,
             document.canvas_size,
         );
+        let cursor_icon = self.cursor_icon(ui, document, canvas_rect, tool_settings.tool);
+        let response = response.on_hover_cursor(cursor_icon);
+        let mut output = self.handle_input(ui, &response, document, canvas_rect, tool_settings);
 
+        paint_workspace(&painter, viewport);
         paint_background(&painter, canvas_rect, document.background);
         paint_document(
             &painter,
@@ -259,15 +362,25 @@ impl CanvasController {
             );
         }
 
-        if let Some(bounds) = self.selected_bounds(document) {
-            paint_selection_overlay(&painter, canvas_rect, self.view.zoom, bounds);
+        if let Some(element) = self.current_selected_element_owned(document) {
+            let active_control = self
+                .selection_session
+                .as_ref()
+                .and_then(SelectionSession::control_target);
+            paint_selection_overlay(
+                &painter,
+                canvas_rect,
+                self.view.zoom,
+                element,
+                active_control,
+            );
         }
 
         if !document.has_elements() && self.active_preview.is_none() {
             painter.text(
                 canvas_rect.center(),
                 Align2::CENTER_CENTER,
-                "Select, draw, or drag shapes. Space + Drag pans the view.",
+                "Select shapes to move, resize, or rotate. Space + Drag pans the view.",
                 FontId::proportional(22.0),
                 Color32::from_gray(120),
             );
@@ -277,7 +390,7 @@ impl CanvasController {
             self.interaction_mode,
             InteractionMode::Drawing
                 | InteractionMode::Panning(_)
-                | InteractionMode::MovingSelection
+                | InteractionMode::EditingSelection
         ) {
             output.needs_repaint = true;
         }
@@ -285,33 +398,63 @@ impl CanvasController {
         output
     }
 
-    pub fn has_active_stroke(&self) -> bool {
-        self.active_preview.is_some()
+    pub fn has_active_interaction(&self) -> bool {
+        self.active_preview.is_some() || self.selection_session.is_some()
     }
 
-    pub fn discard_active_stroke(&mut self) -> bool {
+    pub fn discard_active_interaction(&mut self) -> bool {
+        let discarded =
+            self.active_preview.take().is_some() || self.selection_session.take().is_some();
         self.interaction_mode = InteractionMode::Idle;
-        self.active_preview.take().is_some()
+        discarded
     }
 
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+        self.selection_session = None;
+        if matches!(self.interaction_mode, InteractionMode::EditingSelection) {
+            self.interaction_mode = InteractionMode::Idle;
+        }
     }
 
     pub fn sync_with_document(&mut self, document: &PaintDocument) {
         if !self.selection.is_valid_for(document) {
             self.selection.clear();
+            self.selection_session = None;
+            if matches!(self.interaction_mode, InteractionMode::EditingSelection) {
+                self.interaction_mode = InteractionMode::Idle;
+            }
         }
     }
 
     pub fn selection_summary(&self, document: &PaintDocument) -> String {
-        if let Some(index) = self.selection.selected_index
-            && let Some(element) = document.element(index)
-        {
-            return format!("Selection: {} #{}", element.kind_label(), index + 1);
-        }
+        let Some(index) = self.selection.selected_index else {
+            return "Selection: None".to_owned();
+        };
 
-        "Selection: None".to_owned()
+        let Some(element) = self.current_selected_element_owned(document) else {
+            return "Selection: None".to_owned();
+        };
+
+        let capability = match &element {
+            PaintElement::Stroke(_) => "move only",
+            PaintElement::Shape(_) => "move / resize / rotate",
+        };
+
+        if let Some(session) = &self.selection_session {
+            format!(
+                "Selection: {} #{} ({})",
+                element.kind_label(),
+                index + 1,
+                session.mode().label()
+            )
+        } else {
+            format!(
+                "Selection: {} #{} ({capability})",
+                element.kind_label(),
+                index + 1
+            )
+        }
     }
 
     pub fn zoom_label(&self) -> String {
@@ -354,6 +497,7 @@ impl CanvasController {
         ui: &egui::Ui,
         response: &egui::Response,
         document: &PaintDocument,
+        canvas_rect: Rect,
         tool_settings: ToolSettings,
     ) -> CanvasOutput {
         let pointer = ui.input(|input| input.pointer.clone());
@@ -363,10 +507,7 @@ impl CanvasController {
         let space_pan = ui.input(|input| input.key_down(egui::Key::Space));
         let mut output = CanvasOutput::default();
 
-        if self.active_preview.is_none()
-            && !matches!(self.interaction_mode, InteractionMode::MovingSelection)
-            && hovered
-        {
+        if self.active_preview.is_none() && self.selection_session.is_none() && hovered {
             let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
             if zoom_delta != 1.0
                 && let Some(pointer_pos) = hover_pos
@@ -406,7 +547,13 @@ impl CanvasController {
 
                     match tool_settings.tool {
                         CanvasToolKind::Select => {
-                            self.begin_selection_drag(document, world);
+                            self.begin_selection_interaction(
+                                document,
+                                canvas_rect,
+                                self.view.zoom,
+                                position,
+                                world,
+                            );
                             output.needs_repaint = true;
                         }
                         CanvasToolKind::Brush | CanvasToolKind::Eraser => {
@@ -454,26 +601,21 @@ impl CanvasController {
                     self.interaction_mode = InteractionMode::Idle;
                 }
             }
-            InteractionMode::MovingSelection => {
+            InteractionMode::EditingSelection => {
                 if pointer.primary_down()
                     && let Some(position) = pointer.interact_pos()
                 {
-                    let world = screen_to_canvas_unclamped(
+                    self.update_selection_session(
                         viewport,
-                        self.view.pan,
-                        self.view.zoom,
                         document.canvas_size,
+                        canvas_rect,
                         position,
                     );
-                    if let Some(origin) = self.selection.drag_origin {
-                        self.selection.preview_delta =
-                            PaintVector::new(world.x - origin.x, world.y - origin.y);
-                    }
                     output.needs_repaint = true;
                 }
 
                 if pointer.primary_released() {
-                    output.move_commit = self.finish_move_commit();
+                    output.committed_edit = self.finish_selection_session();
                     self.interaction_mode = InteractionMode::Idle;
                     output.needs_repaint = true;
                 }
@@ -483,15 +625,56 @@ impl CanvasController {
         output
     }
 
-    fn begin_selection_drag(&mut self, document: &PaintDocument, world: PaintPoint) {
+    fn begin_selection_interaction(
+        &mut self,
+        document: &PaintDocument,
+        canvas_rect: Rect,
+        zoom: f32,
+        pointer_screen: Pos2,
+        pointer_world: PaintPoint,
+    ) {
+        if let Some(control) =
+            self.hit_selection_control(document, canvas_rect, zoom, pointer_screen)
+            && let Some(index) = self.selection.selected_index
+            && let Some(PaintElement::Shape(shape)) = self.current_selected_element(document)
+        {
+            self.selection_session = match control {
+                ControlTarget::Resize(handle) => Some(SelectionSession::Resize {
+                    index,
+                    base_shape: *shape,
+                    handle,
+                    preview_shape: *shape,
+                }),
+                ControlTarget::Rotate => Some(SelectionSession::Rotate {
+                    index,
+                    base_shape: *shape,
+                    start_pointer_angle: pointer_screen_angle(
+                        canvas_rect,
+                        zoom,
+                        shape.rotation_center(),
+                        pointer_screen,
+                    ),
+                    preview_shape: *shape,
+                }),
+            };
+            self.interaction_mode = InteractionMode::EditingSelection;
+            return;
+        }
+
         let tolerance = HIT_TOLERANCE_SCREEN / self.view.zoom.max(MIN_ZOOM);
-        if let Some(index) = document.hit_test(world, tolerance) {
+        if let Some(index) = document.hit_test(pointer_world, tolerance) {
             self.selection.selected_index = Some(index);
-            self.selection.drag_origin = Some(world);
-            self.selection.preview_delta = PaintVector::default();
-            self.interaction_mode = InteractionMode::MovingSelection;
+            if let Some(element) = document.element(index).cloned() {
+                self.selection_session = Some(SelectionSession::Move {
+                    index,
+                    base_element: element,
+                    drag_origin: pointer_world,
+                    preview_delta: PaintVector::default(),
+                });
+                self.interaction_mode = InteractionMode::EditingSelection;
+            }
         } else {
-            self.selection.clear();
+            self.clear_selection();
             self.interaction_mode = InteractionMode::Idle;
         }
     }
@@ -502,7 +685,7 @@ impl CanvasController {
         tool_settings: ToolSettings,
         start: PaintPoint,
     ) {
-        self.selection.clear();
+        self.clear_selection();
         let color = match tool_settings.tool {
             CanvasToolKind::Brush => tool_settings.color,
             CanvasToolKind::Eraser => document.background,
@@ -520,7 +703,7 @@ impl CanvasController {
     }
 
     fn begin_shape_preview(&mut self, tool_settings: ToolSettings, start: PaintPoint) {
-        self.selection.clear();
+        self.clear_selection();
         let Some(kind) = tool_settings.tool.shape_kind() else {
             return;
         };
@@ -553,47 +736,149 @@ impl CanvasController {
         }
     }
 
-    fn finish_move_commit(&mut self) -> Option<MoveCommit> {
-        let index = self.selection.selected_index?;
-        let delta = self.selection.preview_delta;
-        self.selection.drag_origin = None;
-        self.selection.preview_delta = PaintVector::default();
+    fn update_selection_session(
+        &mut self,
+        viewport: Rect,
+        canvas_size: CanvasSize,
+        canvas_rect: Rect,
+        pointer_screen: Pos2,
+    ) {
+        let pointer_world = screen_to_canvas_unclamped(
+            viewport,
+            self.view.pan,
+            self.view.zoom,
+            canvas_size,
+            pointer_screen,
+        );
 
-        (!delta.is_zero()).then_some(MoveCommit { index, delta })
-    }
-
-    fn selection_overlay_element(&self, document: &PaintDocument) -> Option<(usize, PaintElement)> {
-        let index = self.selection.selected_index?;
-        let element = document.element(index)?.clone();
-
-        if self.selection.preview_delta.is_zero() {
-            None
-        } else {
-            Some((index, element.translated(self.selection.preview_delta)))
+        match self.selection_session.as_mut() {
+            Some(SelectionSession::Move {
+                drag_origin,
+                preview_delta,
+                ..
+            }) => {
+                *preview_delta = PaintVector::new(
+                    pointer_world.x - drag_origin.x,
+                    pointer_world.y - drag_origin.y,
+                );
+            }
+            Some(SelectionSession::Resize {
+                base_shape,
+                handle,
+                preview_shape,
+                ..
+            }) => {
+                if let Some(next) = base_shape.resized_by_handle(*handle, pointer_world) {
+                    *preview_shape = next;
+                }
+            }
+            Some(SelectionSession::Rotate {
+                base_shape,
+                start_pointer_angle,
+                preview_shape,
+                ..
+            }) => {
+                let current_angle = pointer_screen_angle(
+                    canvas_rect,
+                    self.view.zoom,
+                    base_shape.rotation_center(),
+                    pointer_screen,
+                );
+                *preview_shape = base_shape.rotated_by(current_angle - *start_pointer_angle);
+            }
+            None => {}
         }
     }
 
-    fn selected_bounds(&self, document: &PaintDocument) -> Option<ElementBounds> {
-        let index = self.selection.selected_index?;
-        let element = document.element(index)?;
-        let element = if self.selection.preview_delta.is_zero() {
-            element.clone()
-        } else {
-            element.translated(self.selection.preview_delta)
-        };
-        element.bounds()
+    fn finish_selection_session(&mut self) -> Option<CommittedSelectionEdit> {
+        let session = self.selection_session.take()?;
+        session.finish()
     }
 
-    fn cursor_icon(&self, ui: &egui::Ui, tool: CanvasToolKind) -> egui::CursorIcon {
-        if matches!(
-            self.interaction_mode,
-            InteractionMode::Panning(_) | InteractionMode::MovingSelection
-        ) {
+    fn selection_overlay_element(
+        &self,
+        _document: &PaintDocument,
+    ) -> Option<(usize, PaintElement)> {
+        let session = self.selection_session.as_ref()?;
+        Some((session.index(), session.preview_element()))
+    }
+
+    fn current_selected_element<'a>(
+        &'a self,
+        document: &'a PaintDocument,
+    ) -> Option<&'a PaintElement> {
+        if let Some(session) = &self.selection_session
+            && let Some(index) = self.selection.selected_index
+            && index == session.index()
+        {
+            return None;
+        }
+
+        self.selection
+            .selected_index
+            .and_then(|index| document.element(index))
+    }
+
+    fn current_selected_element_owned(&self, document: &PaintDocument) -> Option<PaintElement> {
+        if let Some(session) = &self.selection_session {
+            return Some(session.preview_element());
+        }
+
+        self.selection
+            .selected_index
+            .and_then(|index| document.element(index))
+            .cloned()
+    }
+
+    fn hit_selection_control(
+        &self,
+        document: &PaintDocument,
+        canvas_rect: Rect,
+        zoom: f32,
+        pointer_screen: Pos2,
+    ) -> Option<ControlTarget> {
+        let Some(PaintElement::Shape(shape)) = self.current_selected_element_owned(document) else {
+            return None;
+        };
+
+        for (handle, handle_screen) in shape_control_handles_screen(shape, canvas_rect, zoom) {
+            if handle_screen.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
+                return Some(ControlTarget::Resize(handle));
+            }
+        }
+
+        let rotation_handle = shape_rotation_handle_screen(shape, canvas_rect, zoom)?;
+        (rotation_handle.distance(pointer_screen) <= HANDLE_HIT_RADIUS)
+            .then_some(ControlTarget::Rotate)
+    }
+
+    fn cursor_icon(
+        &self,
+        ui: &egui::Ui,
+        document: &PaintDocument,
+        canvas_rect: Rect,
+        tool: CanvasToolKind,
+    ) -> egui::CursorIcon {
+        if matches!(self.interaction_mode, InteractionMode::Panning(_)) {
             egui::CursorIcon::Grabbing
+        } else if matches!(self.interaction_mode, InteractionMode::EditingSelection) {
+            match self.selection_session.as_ref().map(SelectionSession::mode) {
+                Some(SelectionEditMode::Resize) => egui::CursorIcon::ResizeNwSe,
+                Some(SelectionEditMode::Rotate) => egui::CursorIcon::Crosshair,
+                Some(SelectionEditMode::Move) | None => egui::CursorIcon::Grabbing,
+            }
         } else if ui.input(|input| input.key_down(egui::Key::Space)) {
             egui::CursorIcon::Grab
         } else if tool == CanvasToolKind::Select {
-            egui::CursorIcon::PointingHand
+            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+                && self
+                    .hit_selection_control(document, canvas_rect, self.view.zoom, pointer)
+                    .is_some()
+            {
+                egui::CursorIcon::PointingHand
+            } else {
+                egui::CursorIcon::PointingHand
+            }
         } else {
             egui::CursorIcon::Crosshair
         }
@@ -714,23 +999,27 @@ fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, backg
 
 fn paint_shape(painter: &Painter, rect: Rect, zoom: f32, shape: &ShapeElement) {
     let stroke = EguiStroke::new(shape.width * zoom, color32_from_rgba(shape.color));
-    let start = canvas_to_screen(rect, zoom, shape.start);
-    let end = canvas_to_screen(rect, zoom, shape.end);
 
     match shape.kind {
         ShapeKind::Line => {
-            painter.line_segment([start, end], stroke);
-        }
-        ShapeKind::Rectangle => {
-            painter.rect_stroke(
-                Rect::from_two_pos(start, end),
-                0.0,
+            painter.line_segment(
+                [
+                    canvas_to_screen(rect, zoom, shape.start),
+                    canvas_to_screen(rect, zoom, shape.end),
+                ],
                 stroke,
-                egui::StrokeKind::Middle,
             );
         }
+        ShapeKind::Rectangle => {
+            let points: Vec<Pos2> = shape
+                .rotated_box_corners()
+                .into_iter()
+                .map(|point| canvas_to_screen(rect, zoom, point))
+                .collect();
+            painter.add(egui::Shape::closed_line(points, stroke));
+        }
         ShapeKind::Ellipse => {
-            let ellipse_points = ellipse_outline_points(Rect::from_two_pos(start, end));
+            let ellipse_points = ellipse_outline_points(shape, rect, zoom);
             if ellipse_points.len() >= 2 {
                 painter.add(egui::Shape::closed_line(ellipse_points, stroke));
             }
@@ -738,55 +1027,189 @@ fn paint_shape(painter: &Painter, rect: Rect, zoom: f32, shape: &ShapeElement) {
     }
 }
 
-fn paint_selection_overlay(painter: &Painter, rect: Rect, zoom: f32, bounds: ElementBounds) {
+fn paint_selection_overlay(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    element: PaintElement,
+    active_control: Option<ControlTarget>,
+) {
+    let accent = Color32::from_rgb(26, 115, 232);
+    let inactive_fill = Color32::WHITE;
+    let active_fill = Color32::from_rgb(26, 115, 232);
+
+    match element {
+        PaintElement::Stroke(stroke) => {
+            if let Some(bounds) = stroke.bounds() {
+                paint_axis_aligned_bounds(painter, rect, zoom, bounds, accent);
+            }
+        }
+        PaintElement::Shape(shape) => match shape.kind {
+            ShapeKind::Line => {
+                if let Some(bounds) = Some(shape.bounds()) {
+                    paint_axis_aligned_bounds(painter, rect, zoom, bounds, accent);
+                }
+                painter.line_segment(
+                    [
+                        canvas_to_screen(rect, zoom, shape.start),
+                        canvas_to_screen(rect, zoom, shape.end),
+                    ],
+                    EguiStroke::new(1.5, accent),
+                );
+                for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
+                    paint_handle(
+                        painter,
+                        position,
+                        HANDLE_RADIUS,
+                        match active_control {
+                            Some(ControlTarget::Resize(active)) if active == handle => active_fill,
+                            _ => inactive_fill,
+                        },
+                        accent,
+                    );
+                }
+                if let Some(rotation_handle) = shape_rotation_handle_screen(shape, rect, zoom) {
+                    paint_rotation_link(
+                        painter,
+                        canvas_to_screen(rect, zoom, shape.rotation_center()),
+                        rotation_handle,
+                        accent,
+                    );
+                    paint_handle(
+                        painter,
+                        rotation_handle,
+                        HANDLE_RADIUS,
+                        match active_control {
+                            Some(ControlTarget::Rotate) => active_fill,
+                            _ => inactive_fill,
+                        },
+                        accent,
+                    );
+                }
+            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let outline: Vec<Pos2> = shape
+                    .selection_outline()
+                    .into_iter()
+                    .map(|point| canvas_to_screen(rect, zoom, point))
+                    .collect();
+                painter.add(egui::Shape::closed_line(
+                    outline.clone(),
+                    EguiStroke::new(2.0, accent),
+                ));
+
+                for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
+                    paint_handle(
+                        painter,
+                        position,
+                        HANDLE_RADIUS,
+                        match active_control {
+                            Some(ControlTarget::Resize(active)) if active == handle => active_fill,
+                            _ => inactive_fill,
+                        },
+                        accent,
+                    );
+                }
+
+                if let Some(rotation_handle) = shape_rotation_handle_screen(shape, rect, zoom) {
+                    let top_mid = outline[0].lerp(outline[1], 0.5);
+                    paint_rotation_link(painter, top_mid, rotation_handle, accent);
+                    paint_handle(
+                        painter,
+                        rotation_handle,
+                        HANDLE_RADIUS,
+                        match active_control {
+                            Some(ControlTarget::Rotate) => active_fill,
+                            _ => inactive_fill,
+                        },
+                        accent,
+                    );
+                }
+            }
+        },
+    }
+}
+
+fn paint_axis_aligned_bounds(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    bounds: ElementBounds,
+    accent: Color32,
+) {
     let screen_rect = Rect::from_two_pos(
         canvas_to_screen(rect, zoom, bounds.min),
         canvas_to_screen(rect, zoom, bounds.max),
     )
     .expand(6.0);
-
-    let accent = Color32::from_rgb(26, 115, 232);
     painter.rect_stroke(
         screen_rect,
         6.0,
         EguiStroke::new(2.0, accent),
         egui::StrokeKind::Outside,
     );
-
-    for handle in [
-        screen_rect.left_top(),
-        screen_rect.right_top(),
-        screen_rect.left_bottom(),
-        screen_rect.right_bottom(),
-    ] {
-        painter.rect_filled(
-            Rect::from_center_size(handle, Vec2::splat(8.0)),
-            2.0,
-            Color32::WHITE,
-        );
-        painter.rect_stroke(
-            Rect::from_center_size(handle, Vec2::splat(8.0)),
-            2.0,
-            EguiStroke::new(1.0, accent),
-            egui::StrokeKind::Outside,
-        );
-    }
 }
 
-fn ellipse_outline_points(rect: Rect) -> Vec<Pos2> {
-    let center = rect.center();
-    let rx = rect.width().abs() * 0.5;
-    let ry = rect.height().abs() * 0.5;
-    if rx <= f32::EPSILON || ry <= f32::EPSILON {
+fn paint_handle(
+    painter: &Painter,
+    center: Pos2,
+    radius: f32,
+    fill: Color32,
+    stroke_color: Color32,
+) {
+    let handle_rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
+    painter.rect_filled(handle_rect, 3.0, fill);
+    painter.rect_stroke(
+        handle_rect,
+        3.0,
+        EguiStroke::new(1.0, stroke_color),
+        egui::StrokeKind::Outside,
+    );
+}
+
+fn paint_rotation_link(painter: &Painter, from: Pos2, to: Pos2, accent: Color32) {
+    painter.line_segment([from, to], EguiStroke::new(1.0, accent));
+}
+
+fn ellipse_outline_points(shape: &ShapeElement, rect: Rect, zoom: f32) -> Vec<Pos2> {
+    let center = shape.center();
+    let half = shape.half_extents();
+    if half.dx <= f32::EPSILON || half.dy <= f32::EPSILON {
         return Vec::new();
     }
 
-    (0..48)
+    (0..64)
         .map(|step| {
-            let t = step as f32 / 48.0 * std::f32::consts::TAU;
-            Pos2::new(center.x + rx * t.cos(), center.y + ry * t.sin())
+            let t = step as f32 / 64.0 * std::f32::consts::TAU;
+            let local = PaintVector::new(half.dx * t.cos(), half.dy * t.sin());
+            let world = center.offset(rotate_vector(local, shape.rotation_radians));
+            canvas_to_screen(rect, zoom, world)
         })
         .collect()
+}
+
+fn shape_control_handles_screen(
+    shape: ShapeElement,
+    rect: Rect,
+    zoom: f32,
+) -> Vec<(ShapeHandle, Pos2)> {
+    shape
+        .control_handles()
+        .into_iter()
+        .map(|(handle, point)| (handle, canvas_to_screen(rect, zoom, point)))
+        .collect()
+}
+
+fn shape_rotation_handle_screen(shape: ShapeElement, rect: Rect, zoom: f32) -> Option<Pos2> {
+    let world_offset = ROTATION_HANDLE_OFFSET_SCREEN / zoom.max(MIN_ZOOM);
+    shape
+        .rotation_handle_position(world_offset)
+        .map(|point| canvas_to_screen(rect, zoom, point))
+}
+
+fn pointer_screen_angle(rect: Rect, zoom: f32, center: PaintPoint, pointer: Pos2) -> f32 {
+    let center_screen = canvas_to_screen(rect, zoom, center);
+    (pointer.y - center_screen.y).atan2(pointer.x - center_screen.x)
 }
 
 fn stroke_is_committable(stroke: &Stroke) -> bool {
@@ -840,10 +1263,19 @@ fn canvas_to_screen(rect: Rect, zoom: f32, point: PaintPoint) -> Pos2 {
     Pos2::new(rect.min.x + point.x * zoom, rect.min.y + point.y * zoom)
 }
 
+fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
+    let cos = angle_radians.cos();
+    let sin = angle_radians.sin();
+    PaintVector::new(
+        vector.dx * cos - vector.dy * sin,
+        vector.dx * sin + vector.dy * cos,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CanvasViewState, canvas_rect, screen_to_canvas};
-    use crate::model::{CanvasSize, PaintPoint};
+    use super::{CanvasViewState, canvas_rect, screen_to_canvas, shape_rotation_handle_screen};
+    use crate::model::{CanvasSize, PaintPoint, RgbaColor, ShapeElement, ShapeKind};
     use eframe::egui::{Pos2, Rect, Vec2};
 
     #[test]
@@ -905,5 +1337,22 @@ mod tests {
 
         assert!((before.x - after.x).abs() < 0.01);
         assert!((before.y - after.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotation_handle_stays_off_the_shape() {
+        let shape = ShapeElement::with_rotation(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            4.0,
+            PaintPoint::new(40.0, 40.0),
+            PaintPoint::new(100.0, 80.0),
+            0.5,
+        );
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(300.0, 200.0));
+        let handle = shape_rotation_handle_screen(shape, rect, 1.0).expect("rotation handle");
+        let center = Pos2::new(70.0, 60.0);
+
+        assert!(handle.distance(center) > 20.0);
     }
 }

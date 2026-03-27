@@ -1,18 +1,16 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use tiny_skia::{
-    Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke as TinyStroke, Transform,
-};
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke as TinyStroke, Transform};
 
 use crate::model::{
-    PaintDocument, PaintElement, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
+    PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeKind,
+    Stroke, ToolKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
     InvalidCanvasSize,
-    InvalidShapeBounds,
     PngEncode(String),
 }
 
@@ -22,7 +20,6 @@ impl Display for RenderError {
             Self::InvalidCanvasSize => {
                 write!(f, "Canvas size must be finite and greater than zero")
             }
-            Self::InvalidShapeBounds => write!(f, "Shape bounds must describe a finite area"),
             Self::PngEncode(error) => write!(f, "PNG encoding failed: {error}"),
         }
     }
@@ -36,7 +33,7 @@ pub fn render_document_pixmap(document: &PaintDocument) -> Result<Pixmap, Render
     pixmap.fill(color_from_rgba(document.background));
 
     for element in &document.elements {
-        render_element(&mut pixmap, element, document.background)?;
+        render_element(&mut pixmap, element, document.background);
     }
 
     Ok(pixmap)
@@ -60,16 +57,9 @@ fn raster_dimensions(document: &PaintDocument) -> Result<(u32, u32), RenderError
     Ok((width.round() as u32, height.round() as u32))
 }
 
-fn render_element(
-    pixmap: &mut Pixmap,
-    element: &PaintElement,
-    background: RgbaColor,
-) -> Result<(), RenderError> {
+fn render_element(pixmap: &mut Pixmap, element: &PaintElement, background: RgbaColor) {
     match element {
-        PaintElement::Stroke(stroke) => {
-            render_stroke(pixmap, stroke, background);
-            Ok(())
-        }
+        PaintElement::Stroke(stroke) => render_stroke(pixmap, stroke, background),
         PaintElement::Shape(shape) => render_shape(pixmap, shape),
     }
 }
@@ -117,42 +107,17 @@ fn render_stroke(pixmap: &mut Pixmap, stroke: &Stroke, background: RgbaColor) {
     }
 }
 
-fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) -> Result<(), RenderError> {
+fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(shape.color.r, shape.color.g, shape.color.b, shape.color.a);
     paint.anti_alias = true;
 
-    let path = match shape.kind {
-        ShapeKind::Line => {
-            let mut builder = PathBuilder::new();
-            builder.move_to(shape.start.x, shape.start.y);
-            builder.line_to(shape.end.x, shape.end.y);
-            builder.finish()
-        }
-        ShapeKind::Rectangle => {
-            let left = shape.start.x.min(shape.end.x);
-            let right = shape.start.x.max(shape.end.x);
-            let top = shape.start.y.min(shape.end.y);
-            let bottom = shape.start.y.max(shape.end.y);
-            let Some(rect) = Rect::from_ltrb(left, top, right, bottom) else {
-                return Err(RenderError::InvalidShapeBounds);
-            };
-            Some(PathBuilder::from_rect(rect))
-        }
-        ShapeKind::Ellipse => {
-            let left = shape.start.x.min(shape.end.x);
-            let right = shape.start.x.max(shape.end.x);
-            let top = shape.start.y.min(shape.end.y);
-            let bottom = shape.start.y.max(shape.end.y);
-            let Some(rect) = Rect::from_ltrb(left, top, right, bottom) else {
-                return Err(RenderError::InvalidShapeBounds);
-            };
-            PathBuilder::from_oval(rect)
-        }
-    };
-
-    let Some(path) = path else {
-        return Ok(());
+    let Some(path) = (match shape.kind {
+        ShapeKind::Line => line_path(shape.start, shape.end),
+        ShapeKind::Rectangle => polygon_path(&shape.rotated_box_corners()),
+        ShapeKind::Ellipse => ellipse_path(shape),
+    }) else {
+        return;
     };
 
     pixmap.stroke_path(
@@ -162,8 +127,41 @@ fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) -> Result<(), RenderE
         Transform::identity(),
         None,
     );
+}
 
-    Ok(())
+fn line_path(start: PaintPoint, end: PaintPoint) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+    builder.move_to(start.x, start.y);
+    builder.line_to(end.x, end.y);
+    builder.finish()
+}
+
+fn polygon_path(points: &[PaintPoint]) -> Option<tiny_skia::Path> {
+    let (first, rest) = points.split_first()?;
+    let mut builder = PathBuilder::new();
+    builder.move_to(first.x, first.y);
+    for point in rest {
+        builder.line_to(point.x, point.y);
+    }
+    builder.close();
+    builder.finish()
+}
+
+fn ellipse_path(shape: &ShapeElement) -> Option<tiny_skia::Path> {
+    let center = shape.center();
+    let half = shape.half_extents();
+    if half.dx <= f32::EPSILON || half.dy <= f32::EPSILON {
+        return None;
+    }
+
+    let points: Vec<PaintPoint> = (0..96)
+        .map(|step| {
+            let t = step as f32 / 96.0 * std::f32::consts::TAU;
+            let local = PaintVector::new(half.dx * t.cos(), half.dy * t.sin());
+            center.offset(rotate_vector(local, shape.rotation_radians))
+        })
+        .collect();
+    polygon_path(&points)
 }
 
 fn stroke_style(width: f32) -> TinyStroke {
@@ -179,6 +177,15 @@ fn color_from_rgba(color: RgbaColor) -> Color {
     Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
+fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
+    let cos = angle_radians.cos();
+    let sin = angle_radians.sin();
+    PaintVector::new(
+        vector.dx * cos - vector.dy * sin,
+        vector.dx * sin + vector.dy * cos,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_document_pixmap, render_document_png};
@@ -189,21 +196,22 @@ mod tests {
 
     fn sample_document() -> PaintDocument {
         let mut document = PaintDocument {
-            canvas_size: CanvasSize::new(64.0, 32.0),
+            canvas_size: CanvasSize::new(64.0, 64.0),
             background: RgbaColor::white(),
             elements: Vec::new(),
         };
 
         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::charcoal(), 6.0);
         stroke.push_point(PaintPoint::new(8.0, 8.0));
-        stroke.push_point(PaintPoint::new(40.0, 8.0));
+        stroke.push_point(PaintPoint::new(28.0, 8.0));
         document.push_stroke(stroke);
-        document.push_shape(ShapeElement::new(
+        document.push_shape(ShapeElement::with_rotation(
             ShapeKind::Rectangle,
             RgbaColor::new(220, 64, 64, 255),
             4.0,
-            PaintPoint::new(44.0, 8.0),
-            PaintPoint::new(60.0, 24.0),
+            PaintPoint::new(24.0, 24.0),
+            PaintPoint::new(44.0, 40.0),
+            std::f32::consts::FRAC_PI_4,
         ));
         document
     }
@@ -213,15 +221,15 @@ mod tests {
         let pixmap = render_document_pixmap(&sample_document()).expect("document should render");
 
         let background = pixmap
-            .pixel(2, 28)
+            .pixel(2, 60)
             .expect("background pixel should exist")
             .demultiply();
         let stroke = pixmap
-            .pixel(20, 8)
+            .pixel(16, 8)
             .expect("stroke pixel should exist")
             .demultiply();
         let shape = pixmap
-            .pixel(44, 8)
+            .pixel(34, 24)
             .expect("shape pixel should exist")
             .demultiply();
 
@@ -242,6 +250,6 @@ mod tests {
         let decoded = Pixmap::decode_png(&png).expect("exported png should decode");
 
         assert_eq!(decoded.width(), 64);
-        assert_eq!(decoded.height(), 32);
+        assert_eq!(decoded.height(), 64);
     }
 }

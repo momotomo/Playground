@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::canvas::{
-    CanvasController, CanvasToolKind, MoveCommit, ToolSettings, color32_from_rgba,
-    rgba_from_color32,
+    CanvasController, CanvasToolKind, CommittedSelectionEdit, SelectionEditMode, ToolSettings,
+    color32_from_rgba, rgba_from_color32,
 };
 use crate::model::{DocumentHistory, PaintDocument, PaintElement, RgbaColor};
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
@@ -142,7 +142,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Select objects, save editable JSON, or export PNG for sharing.",
+                "Ready. Select shapes to move, resize, or rotate. Save JSON to keep edits.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -155,7 +155,6 @@ impl Default for PaintApp {
 impl PaintApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-
         Self::default()
     }
 
@@ -198,7 +197,7 @@ impl PaintApp {
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
         ui.heading("Tools");
-        ui.label("Select to move existing elements, or pick a drawing tool and drag.");
+        ui.label("Select existing elements to edit, or pick a drawing tool and drag.");
         ui.add_space(8.0);
 
         for tool in [
@@ -249,9 +248,9 @@ impl PaintApp {
         ));
         ui.label(format!("Elements: {}", self.document().element_count()));
         ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
-        ui.small("Zoom: Ctrl/Cmd + Wheel or toolbar buttons");
+        ui.small("Shapes: corner handles resize, round handle rotates");
+        ui.small("Strokes: move only in this phase");
         ui.small("Pan: Space + Drag or Middle Drag");
-        ui.small("Move: Select, then drag the highlighted element");
         ui.small("Reset view: Ctrl/Cmd + 0");
 
         ui.separator();
@@ -263,12 +262,12 @@ impl PaintApp {
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let has_active_preview = self.canvas.has_active_stroke();
-        let can_undo = has_active_preview || self.history.can_undo();
-        let can_redo = !has_active_preview && self.history.can_redo();
-        let can_clear = has_active_preview || self.document().has_elements();
-        let can_file_io = !has_active_preview && !self.has_pending_storage_task();
-        let can_adjust_view = !has_active_preview;
+        let has_canvas_interaction = self.canvas.has_active_interaction();
+        let can_undo = has_canvas_interaction || self.history.can_undo();
+        let can_redo = !has_canvas_interaction && self.history.can_redo();
+        let can_clear = has_canvas_interaction || self.document().has_elements();
+        let can_file_io = !has_canvas_interaction && !self.has_pending_storage_task();
+        let can_adjust_view = !has_canvas_interaction;
 
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -346,7 +345,7 @@ impl PaintApp {
     }
 
     fn perform_undo(&mut self) {
-        if self.canvas.discard_active_stroke() {
+        if self.canvas.discard_active_interaction() {
             self.set_info("Discarded the in-progress edit.");
         } else if self.history.undo() {
             self.canvas.clear_selection();
@@ -362,7 +361,7 @@ impl PaintApp {
     }
 
     fn perform_clear(&mut self) {
-        let discarded = self.canvas.discard_active_stroke();
+        let discarded = self.canvas.discard_active_interaction();
         if self.history.clear() {
             self.canvas.clear_selection();
             self.set_info("Cleared the canvas.");
@@ -400,12 +399,14 @@ impl PaintApp {
         }
     }
 
-    fn apply_move(&mut self, move_commit: MoveCommit) {
-        if self
-            .history
-            .translate_element(move_commit.index, move_commit.delta)
-        {
-            self.set_info("Moved the selected element.");
+    fn apply_selection_edit(&mut self, edit: CommittedSelectionEdit) {
+        if self.history.replace_element(edit.index, edit.element) {
+            let message = match edit.mode {
+                SelectionEditMode::Move => "Moved the selected element.",
+                SelectionEditMode::Resize => "Resized the selected shape.",
+                SelectionEditMode::Rotate => "Rotated the selected shape.",
+            };
+            self.set_info(message);
         }
     }
 
@@ -416,7 +417,7 @@ impl PaintApp {
     }
 
     fn finish_load(&mut self, loaded: LoadedDocument) {
-        self.canvas.discard_active_stroke();
+        self.canvas.discard_active_interaction();
         self.canvas.clear_selection();
         self.canvas.request_view_reset();
         self.history.replace_document(loaded.document.clone());
@@ -551,34 +552,36 @@ impl PaintApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let has_canvas_interaction = self.canvas.has_active_interaction();
+
         let redo_pressed = ctx.input_mut(|input| input.consume_shortcut(&shortcut_redo()))
             || ctx.input_mut(|input| input.consume_shortcut(&shortcut_redo_alt()));
-        if redo_pressed && !self.canvas.has_active_stroke() && self.history.can_redo() {
+        if redo_pressed && !has_canvas_interaction && self.history.can_redo() {
             self.perform_redo();
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_undo()))
-            && (self.canvas.has_active_stroke() || self.history.can_undo())
+            && (has_canvas_interaction || self.history.can_undo())
         {
             self.perform_undo();
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_save()))
-            && !self.canvas.has_active_stroke()
+            && !has_canvas_interaction
             && !self.has_pending_storage_task()
         {
             self.save_document(ctx);
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_load()))
-            && !self.canvas.has_active_stroke()
+            && !has_canvas_interaction
             && !self.has_pending_storage_task()
         {
             self.load_document(ctx);
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_export_png()))
-            && !self.canvas.has_active_stroke()
+            && !has_canvas_interaction
             && !self.has_pending_storage_task()
         {
             self.export_png(ctx);
@@ -586,23 +589,31 @@ impl PaintApp {
 
         let zoom_in_pressed = ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_in()))
             || ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_in_alt()));
-        if zoom_in_pressed && !self.canvas.has_active_stroke() {
+        if zoom_in_pressed && !has_canvas_interaction {
             self.zoom_in();
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_out()))
-            && !self.canvas.has_active_stroke()
+            && !has_canvas_interaction
         {
             self.zoom_out();
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_reset_view()))
-            && !self.canvas.has_active_stroke()
+            && !has_canvas_interaction
         {
             self.reset_view();
         }
 
-        self.handle_tool_shortcuts(ctx);
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+            && self.canvas.discard_active_interaction()
+        {
+            self.set_info("Cancelled the in-progress edit.");
+        }
+
+        if !has_canvas_interaction {
+            self.handle_tool_shortcuts(ctx);
+        }
     }
 
     fn handle_tool_shortcuts(&mut self, ctx: &egui::Context) {
@@ -685,8 +696,8 @@ impl eframe::App for PaintApp {
                 ctx.request_repaint();
             }
 
-            if let Some(move_commit) = output.move_commit {
-                self.apply_move(move_commit);
+            if let Some(edit) = output.committed_edit {
+                self.apply_selection_edit(edit);
             }
 
             if let Some(element) = output.committed_element {
@@ -698,7 +709,9 @@ impl eframe::App for PaintApp {
 
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
-        CanvasToolKind::Select => "Click an element to select it, then drag to move it.",
+        CanvasToolKind::Select => {
+            "Click an element to select it. Shapes can move, resize, and rotate."
+        }
         CanvasToolKind::Brush => "Freehand drawing tool. Drag to draw a stroke.",
         CanvasToolKind::Eraser => "Freehand eraser that paints with the canvas background.",
         CanvasToolKind::Rectangle => "Drag from one corner to the opposite corner.",
