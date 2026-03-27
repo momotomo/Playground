@@ -8,6 +8,7 @@ use crate::canvas::{
     CanvasController, CanvasToolKind, CommittedDocumentEdit, DocumentEditMode, ToolSettings,
     color32_from_rgba, rgba_from_color32,
 };
+use crate::fonts::install_japanese_fonts;
 use crate::model::{
     AlignmentKind, DistributionKind, DocumentHistory, GuideAxis, LayerId, PaintDocument,
     PaintElement, RgbaColor, StackOrderCommand,
@@ -179,6 +180,7 @@ impl Default for PaintApp {
 
 impl PaintApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_japanese_fonts(&cc.egui_ctx);
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         Self::default()
     }
