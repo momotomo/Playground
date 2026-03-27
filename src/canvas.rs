@@ -4,9 +4,9 @@ use eframe::egui::{
 };
 
 use crate::model::{
-    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, PaintDocument, PaintElement,
-    PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand,
-    Stroke, ToolKind,
+    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, LayerId, PaintDocument,
+    PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
+    StackOrderCommand, Stroke, ToolKind,
 };
 
 const MIN_ZOOM: f32 = 0.1;
@@ -202,11 +202,13 @@ impl CanvasViewState {
 
 #[derive(Debug, Default, Clone)]
 struct SelectionState {
+    layer_id: Option<LayerId>,
     indices: Vec<usize>,
 }
 
 impl SelectionState {
     fn clear(&mut self) {
+        self.layer_id = None;
         self.indices.clear();
     }
 
@@ -230,12 +232,18 @@ impl SelectionState {
         &self.indices
     }
 
-    fn set_only(&mut self, index: usize) {
+    fn set_only(&mut self, layer_id: LayerId, index: usize) {
+        self.layer_id = Some(layer_id);
         self.indices.clear();
         self.indices.push(index);
     }
 
-    fn toggle(&mut self, index: usize) {
+    fn toggle(&mut self, layer_id: LayerId, index: usize) {
+        if self.layer_id != Some(layer_id) {
+            self.indices.clear();
+            self.layer_id = Some(layer_id);
+        }
+
         if let Some(position) = self
             .indices
             .iter()
@@ -248,15 +256,28 @@ impl SelectionState {
         }
     }
 
-    fn set_indices(&mut self, mut indices: Vec<usize>) {
+    fn set_indices(&mut self, layer_id: LayerId, mut indices: Vec<usize>) {
         normalize_selection_indices(&mut indices);
+        self.layer_id = Some(layer_id);
         self.indices = indices;
+        if self.indices.is_empty() {
+            self.layer_id = None;
+        }
     }
 
     fn retain_valid(&mut self, document: &PaintDocument) {
+        if self.layer_id != Some(document.active_layer_id()) || !document.active_layer_is_editable()
+        {
+            self.clear();
+            return;
+        }
+
         self.indices
             .retain(|index| *index < document.element_count());
         normalize_selection_indices(&mut self.indices);
+        if self.indices.is_empty() {
+            self.layer_id = None;
+        }
     }
 }
 
@@ -534,8 +555,8 @@ impl CanvasController {
         }
     }
 
-    pub fn set_selection_indices(&mut self, indices: Vec<usize>) {
-        self.selection.set_indices(indices);
+    pub fn set_selection_indices(&mut self, layer_id: LayerId, indices: Vec<usize>) {
+        self.selection.set_indices(layer_id, indices);
     }
 
     pub fn selection_count(&self) -> usize {
@@ -561,8 +582,20 @@ impl CanvasController {
     }
 
     pub fn selection_summary(&self, document: &PaintDocument) -> String {
-        if self.selection.is_empty() {
+        let Some(active_layer) = document.active_layer() else {
             return "Selection: None".to_owned();
+        };
+
+        if !active_layer.visible {
+            return format!("Selection: None ({} is hidden)", active_layer.name);
+        }
+
+        if active_layer.locked {
+            return format!("Selection: None ({} is locked)", active_layer.name);
+        }
+
+        if self.selection.is_empty() {
+            return format!("Selection: None ({})", active_layer.name);
         }
 
         if let Some(session) = &self.selection_session {
@@ -655,7 +688,8 @@ impl CanvasController {
         }
 
         let (next, selection_indices) = document.grouped_document(self.selection.indices())?;
-        self.selection.set_indices(selection_indices.clone());
+        self.selection
+            .set_indices(document.active_layer_id(), selection_indices.clone());
         Some(CommittedDocumentEdit {
             document: next,
             selection_indices,
@@ -669,7 +703,8 @@ impl CanvasController {
         }
 
         let (next, selection_indices) = document.ungrouped_document(self.selection.indices())?;
-        self.selection.set_indices(selection_indices.clone());
+        self.selection
+            .set_indices(document.active_layer_id(), selection_indices.clone());
         Some(CommittedDocumentEdit {
             document: next,
             selection_indices,
@@ -705,7 +740,8 @@ impl CanvasController {
 
         let (next, selection_indices) =
             document.reordered_document(self.selection.indices(), command)?;
-        self.selection.set_indices(selection_indices.clone());
+        self.selection
+            .set_indices(document.active_layer_id(), selection_indices.clone());
         Some(CommittedDocumentEdit {
             document: next,
             selection_indices,
@@ -795,7 +831,7 @@ impl CanvasController {
                         CanvasToolKind::Rectangle
                         | CanvasToolKind::Ellipse
                         | CanvasToolKind::Line => {
-                            self.begin_shape_preview(tool_settings, world);
+                            self.begin_shape_preview(document, tool_settings, world);
                             output.needs_repaint = true;
                         }
                     }
@@ -939,14 +975,14 @@ impl CanvasController {
         let tolerance = HIT_TOLERANCE_SCREEN / self.view.zoom.max(MIN_ZOOM);
         if let Some(index) = document.hit_test(pointer_world, tolerance) {
             if extend_selection {
-                self.selection.toggle(index);
+                self.selection.toggle(document.active_layer_id(), index);
                 self.selection_session = None;
                 self.interaction_mode = InteractionMode::Idle;
                 return;
             }
 
             if !self.selection.contains(index) {
-                self.selection.set_only(index);
+                self.selection.set_only(document.active_layer_id(), index);
             }
             self.begin_move_session(document, pointer_world);
         } else {
@@ -994,6 +1030,10 @@ impl CanvasController {
         tool_settings: ToolSettings,
         start: PaintPoint,
     ) {
+        if !document.active_layer_is_editable() {
+            return;
+        }
+
         self.clear_selection();
         let color = match tool_settings.tool {
             CanvasToolKind::Brush => tool_settings.color,
@@ -1011,7 +1051,16 @@ impl CanvasController {
         self.interaction_mode = InteractionMode::Drawing;
     }
 
-    fn begin_shape_preview(&mut self, tool_settings: ToolSettings, start: PaintPoint) {
+    fn begin_shape_preview(
+        &mut self,
+        document: &PaintDocument,
+        tool_settings: ToolSettings,
+        start: PaintPoint,
+    ) {
+        if !document.active_layer_is_editable() {
+            return;
+        }
+
         self.clear_selection();
         let Some(kind) = tool_settings.tool.shape_kind() else {
             return;
@@ -1160,7 +1209,8 @@ impl CanvasController {
                     normalize_selection_indices(&mut next_selection);
                 }
 
-                self.selection.set_indices(next_selection);
+                self.selection
+                    .set_indices(document.active_layer_id(), next_selection);
                 None
             }
             SelectionSession::Move {
@@ -1183,8 +1233,10 @@ impl CanvasController {
                     DocumentEditMode::Move,
                 );
                 if let Some(committed) = &edit {
-                    self.selection
-                        .set_indices(committed.selection_indices.clone());
+                    self.selection.set_indices(
+                        document.active_layer_id(),
+                        committed.selection_indices.clone(),
+                    );
                 }
                 edit
             }
@@ -1205,8 +1257,10 @@ impl CanvasController {
                     DocumentEditMode::Resize,
                 );
                 if let Some(committed) = &edit {
-                    self.selection
-                        .set_indices(committed.selection_indices.clone());
+                    self.selection.set_indices(
+                        document.active_layer_id(),
+                        committed.selection_indices.clone(),
+                    );
                 }
                 edit
             }
@@ -1227,8 +1281,10 @@ impl CanvasController {
                     DocumentEditMode::Rotate,
                 );
                 if let Some(committed) = &edit {
-                    self.selection
-                        .set_indices(committed.selection_indices.clone());
+                    self.selection.set_indices(
+                        document.active_layer_id(),
+                        committed.selection_indices.clone(),
+                    );
                 }
                 edit
             }
@@ -1249,8 +1305,10 @@ impl CanvasController {
                     DocumentEditMode::Resize,
                 );
                 if let Some(committed) = &edit {
-                    self.selection
-                        .set_indices(committed.selection_indices.clone());
+                    self.selection.set_indices(
+                        document.active_layer_id(),
+                        committed.selection_indices.clone(),
+                    );
                 }
                 edit
             }
@@ -1271,8 +1329,10 @@ impl CanvasController {
                     DocumentEditMode::Rotate,
                 );
                 if let Some(committed) = &edit {
-                    self.selection
-                        .set_indices(committed.selection_indices.clone());
+                    self.selection.set_indices(
+                        document.active_layer_id(),
+                        committed.selection_indices.clone(),
+                    );
                 }
                 edit
             }
@@ -1458,18 +1518,25 @@ fn paint_document(
     document: &PaintDocument,
     overlays: &[(usize, PaintElement)],
 ) {
-    for (index, element) in document.elements.iter().enumerate() {
-        if overlays
-            .iter()
-            .any(|(overlay_index, _)| *overlay_index == index)
-        {
-            continue;
+    let active_layer_id = document.active_layer_id();
+    for layer in document.visible_layers() {
+        let is_active_layer = layer.id == active_layer_id;
+        for (index, element) in layer.elements.iter().enumerate() {
+            if is_active_layer
+                && overlays
+                    .iter()
+                    .any(|(overlay_index, _)| *overlay_index == index)
+            {
+                continue;
+            }
+            paint_element(painter, rect, zoom, element, document.background);
         }
-        paint_element(painter, rect, zoom, element, document.background);
-    }
 
-    for (_, element) in overlays {
-        paint_element(painter, rect, zoom, element, document.background);
+        if is_active_layer {
+            for (_, element) in overlays {
+                paint_element(painter, rect, zoom, element, document.background);
+            }
+        }
     }
 }
 

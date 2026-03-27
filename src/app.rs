@@ -9,8 +9,8 @@ use crate::canvas::{
     color32_from_rgba, rgba_from_color32,
 };
 use crate::model::{
-    AlignmentKind, DistributionKind, DocumentHistory, PaintDocument, PaintElement, RgbaColor,
-    StackOrderCommand,
+    AlignmentKind, DistributionKind, DocumentHistory, LayerId, PaintDocument, PaintElement,
+    RgbaColor, StackOrderCommand,
 };
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
@@ -143,6 +143,8 @@ pub struct PaintApp {
     status_message: StatusMessage,
     document_name: String,
     saved_snapshot: PaintDocument,
+    layer_name_draft: String,
+    layer_name_draft_for: Option<LayerId>,
     #[cfg(target_arch = "wasm32")]
     pending_web_task: Option<PendingWebStorageTask>,
 }
@@ -163,6 +165,8 @@ impl Default for PaintApp {
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
+            layer_name_draft: "Layer 1".to_owned(),
+            layer_name_draft_for: Some(1),
             #[cfg(target_arch = "wasm32")]
             pending_web_task: None,
         }
@@ -203,6 +207,23 @@ impl PaintApp {
             tool: self.active_tool,
             color: self.brush_color,
             width: self.brush_width,
+        }
+    }
+
+    fn sync_layer_name_draft(&mut self) {
+        let Some((layer_id, layer_name)) = self
+            .document()
+            .active_layer()
+            .map(|layer| (layer.id, layer.name.clone()))
+        else {
+            self.layer_name_draft_for = None;
+            self.layer_name_draft.clear();
+            return;
+        };
+
+        if self.layer_name_draft_for != Some(layer_id) {
+            self.layer_name_draft_for = Some(layer_id);
+            self.layer_name_draft = layer_name;
         }
     }
 
@@ -263,8 +284,15 @@ impl PaintApp {
             self.document().canvas_size.width,
             self.document().canvas_size.height
         ));
-        ui.label(format!("Elements: {}", self.document().element_count()));
+        ui.label(format!(
+            "Elements: {} total / {} active layer",
+            self.document().total_element_count(),
+            self.document().element_count()
+        ));
         ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
+        if let Some(active_layer) = self.document().active_layer() {
+            ui.label(format!("Active Layer: {}", active_layer.name));
+        }
         ui.small("Shapes: corner handles resize, round handle rotates");
         ui.small("Strokes: single and multi transforms use simple move / scale / rotate");
         ui.small("Multi-select: Shift + Click or drag a marquee");
@@ -280,6 +308,117 @@ impl PaintApp {
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
         ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG, Group, Ungroup");
+    }
+
+    fn show_layers(&mut self, ui: &mut egui::Ui) {
+        self.sync_layer_name_draft();
+
+        let layer_count = self.document().layer_count();
+        let active_layer_id = self.document().active_layer_id();
+        let layers: Vec<_> = self
+            .document()
+            .layers()
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| {
+                (
+                    index,
+                    layer.id,
+                    layer.name.clone(),
+                    layer.visible,
+                    layer.locked,
+                    layer.elements.len(),
+                )
+            })
+            .collect();
+        let active_layer_state = self
+            .document()
+            .active_layer()
+            .map(|layer| (layer.id, layer.name.clone(), layer.visible, layer.locked));
+
+        ui.heading("Layers");
+        ui.small("Selection and drawing target the active visible, unlocked layer.");
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            if ui.button("Add Layer").clicked() {
+                self.add_layer();
+            }
+
+            if ui
+                .add_enabled(layer_count > 1, egui::Button::new("Delete Layer"))
+                .clicked()
+            {
+                self.delete_active_layer();
+            }
+        });
+
+        ui.separator();
+
+        for (index, layer_id, name, visible, locked, element_count) in layers.into_iter().rev() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(layer_id == active_layer_id, name.as_str())
+                        .clicked()
+                    {
+                        self.set_active_layer(layer_id);
+                    }
+
+                    if ui
+                        .small_button(if visible { "Hide" } else { "Show" })
+                        .clicked()
+                    {
+                        self.toggle_layer_visibility(layer_id);
+                    }
+
+                    if ui
+                        .small_button(if locked { "Unlock" } else { "Lock" })
+                        .clicked()
+                    {
+                        self.toggle_layer_locked(layer_id);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.small(format!("{element_count} elements"));
+                    if ui.small_button("Up").clicked() {
+                        self.move_layer_up(layer_id);
+                    }
+                    if ui.small_button("Down").clicked() {
+                        self.move_layer_down(layer_id);
+                    }
+                });
+
+                if index + 1 == self.document().layer_count() {
+                    ui.small("Topmost");
+                } else if index == 0 {
+                    ui.small("Bottom");
+                }
+            });
+            ui.add_space(4.0);
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Rename Active").strong());
+        let rename_response = ui.text_edit_singleline(&mut self.layer_name_draft);
+        let rename_on_enter =
+            rename_response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+        if ui.button("Rename Layer").clicked() || rename_on_enter {
+            self.rename_active_layer();
+        }
+
+        if let Some((_, active_name, visible, locked)) = active_layer_state {
+            if !visible {
+                ui.small(format!(
+                    "{active_name} is hidden. It will not render or export."
+                ));
+            } else if locked {
+                ui.small(format!(
+                    "{active_name} is locked. It renders but cannot be selected or edited."
+                ));
+            }
+        }
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -435,6 +574,7 @@ impl PaintApp {
             self.set_info("Discarded the in-progress edit.");
         } else if self.history.undo() {
             self.canvas.clear_selection();
+            self.sync_layer_name_draft();
             self.set_info("Undid the last change.");
         }
     }
@@ -442,6 +582,7 @@ impl PaintApp {
     fn perform_redo(&mut self) {
         if self.history.redo() {
             self.canvas.clear_selection();
+            self.sync_layer_name_draft();
             self.set_info("Redid the last undone change.");
         }
     }
@@ -450,6 +591,7 @@ impl PaintApp {
         let discarded = self.canvas.discard_active_interaction();
         if self.history.clear() {
             self.canvas.clear_selection();
+            self.sync_layer_name_draft();
             self.set_info("Cleared the canvas.");
         } else if discarded {
             self.set_info("Discarded the in-progress edit.");
@@ -486,8 +628,10 @@ impl PaintApp {
     }
 
     fn apply_document_edit(&mut self, edit: CommittedDocumentEdit) {
+        let selection_layer_id = edit.document.active_layer_id();
         if self.history.replace_document(edit.document) {
-            self.canvas.set_selection_indices(edit.selection_indices);
+            self.canvas
+                .set_selection_indices(selection_layer_id, edit.selection_indices);
             let message = match edit.mode {
                 DocumentEditMode::Move => {
                     if self.canvas.selection_count() > 1 {
@@ -540,6 +684,7 @@ impl PaintApp {
                 },
             };
             self.set_info(message);
+            self.sync_layer_name_draft();
         }
     }
 
@@ -578,6 +723,100 @@ impl PaintApp {
         }
     }
 
+    fn apply_layer_document_change(&mut self, document: PaintDocument, message: impl Into<String>) {
+        if self.history.replace_document(document) {
+            self.canvas.discard_active_interaction();
+            self.canvas.clear_selection();
+            self.sync_layer_name_draft();
+            self.set_info(message);
+        }
+    }
+
+    fn set_active_layer(&mut self, layer_id: LayerId) {
+        if self.history.set_active_layer(layer_id) {
+            self.canvas.discard_active_interaction();
+            self.canvas.clear_selection();
+            self.sync_layer_name_draft();
+            if let Some(layer) = self.document().active_layer() {
+                self.set_info(format!("Switched to {}.", layer.name));
+            }
+        }
+    }
+
+    fn add_layer(&mut self) {
+        let document = self.document().clone();
+        let (next, layer_id) = document.add_layer_document();
+        let layer_name = next
+            .layer(layer_id)
+            .map(|layer| layer.name.clone())
+            .unwrap_or_else(|| "New Layer".to_owned());
+        self.apply_layer_document_change(next, format!("Added {layer_name}."));
+    }
+
+    fn delete_active_layer(&mut self) {
+        let document = self.document().clone();
+        if let Some((next, next_active)) = document.delete_active_layer_document() {
+            let next_name = next
+                .layer(next_active)
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| "remaining layer".to_owned());
+            self.apply_layer_document_change(
+                next,
+                format!("Deleted the active layer. {next_name} is now active."),
+            );
+        }
+    }
+
+    fn rename_active_layer(&mut self) {
+        let Some(active_layer) = self.document().active_layer() else {
+            return;
+        };
+        let document = self.document().clone();
+        if let Some(next) = document.renamed_layer_document(active_layer.id, &self.layer_name_draft)
+        {
+            self.apply_layer_document_change(
+                next,
+                format!("Renamed the layer to {}.", self.layer_name_draft.trim()),
+            );
+        }
+    }
+
+    fn toggle_layer_visibility(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_layer_visibility_document(layer_id) {
+            let state = next
+                .layer(layer_id)
+                .map(|layer| if layer.visible { "visible" } else { "hidden" })
+                .unwrap_or("updated");
+            self.apply_layer_document_change(next, format!("Set the layer to {state}."));
+        }
+    }
+
+    fn toggle_layer_locked(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_layer_locked_document(layer_id) {
+            let state = next
+                .layer(layer_id)
+                .map(|layer| if layer.locked { "locked" } else { "unlocked" })
+                .unwrap_or("updated");
+            self.apply_layer_document_change(next, format!("Set the layer to {state}."));
+        }
+    }
+
+    fn move_layer_up(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if let Some(next) = document.moved_layer_up_document(layer_id) {
+            self.apply_layer_document_change(next, "Moved the layer up.");
+        }
+    }
+
+    fn move_layer_down(&mut self, layer_id: LayerId) {
+        let document = self.document().clone();
+        if let Some(next) = document.moved_layer_down_document(layer_id) {
+            self.apply_layer_document_change(next, "Moved the layer down.");
+        }
+    }
+
     fn finish_save(&mut self, saved: SavedDocument) {
         self.document_name = saved.file_name;
         self.saved_snapshot = self.document().clone();
@@ -591,6 +830,7 @@ impl PaintApp {
         self.history.replace_document(loaded.document.clone());
         self.document_name = loaded.file_name;
         self.saved_snapshot = loaded.document;
+        self.sync_layer_name_draft();
         self.set_info(format!("Loaded {}.", self.document_name));
     }
 
@@ -865,6 +1105,12 @@ impl eframe::App for PaintApp {
             .min_width(220.0)
             .show(ctx, |ui| self.show_tools(ui));
 
+        egui::SidePanel::right("layers_panel")
+            .resizable(false)
+            .default_width(240.0)
+            .min_width(240.0)
+            .show(ctx, |ui| self.show_layers(ui));
+
         egui::TopBottomPanel::top("actions_panel")
             .resizable(false)
             .show(ctx, |ui| self.show_actions(ui, ctx));
@@ -892,13 +1138,21 @@ impl eframe::App for PaintApp {
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => {
-            "Click to select. Shift+Click adds or removes. Drag empty space for marquee select. Single shapes resize/rotate; multi-select can move, group-resize, rotate, align, and reorder."
+            "Click to select on the active layer. Shift+Click adds or removes. Drag empty space for marquee select. Single shapes resize/rotate; multi-select can move, group-resize, rotate, align, and reorder."
         }
-        CanvasToolKind::Brush => "Freehand drawing tool. Drag to draw a stroke.",
-        CanvasToolKind::Eraser => "Freehand eraser that paints with the canvas background.",
-        CanvasToolKind::Rectangle => "Drag from one corner to the opposite corner.",
-        CanvasToolKind::Ellipse => "Drag a bounding box to create an ellipse outline.",
-        CanvasToolKind::Line => "Drag from a start point to an end point.",
+        CanvasToolKind::Brush => {
+            "Freehand drawing tool. Drag to draw a stroke on the active layer."
+        }
+        CanvasToolKind::Eraser => {
+            "Freehand eraser that paints with the canvas background on the active layer."
+        }
+        CanvasToolKind::Rectangle => {
+            "Drag from one corner to the opposite corner on the active layer."
+        }
+        CanvasToolKind::Ellipse => {
+            "Drag a bounding box to create an ellipse outline on the active layer."
+        }
+        CanvasToolKind::Line => "Drag from a start point to an end point on the active layer.",
     }
 }
 
