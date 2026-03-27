@@ -86,6 +86,13 @@ impl PaintPoint {
             angle_radians,
         ))
     }
+
+    pub fn scaled_from(self, anchor: Self, scale_x: f32, scale_y: f32) -> Self {
+        Self::new(
+            anchor.x + (self.x - anchor.x) * scale_x,
+            anchor.y + (self.y - anchor.y) * scale_y,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -176,6 +183,13 @@ impl ElementBounds {
             min: PaintPoint::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y)),
             max: PaintPoint::new(self.max.x.max(other.max.x), self.max.y.max(other.max.y)),
         }
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
     }
 }
 
@@ -315,6 +329,22 @@ impl Stroke {
             *point = point.offset(delta);
         }
         translated
+    }
+
+    pub fn scaled_from(&self, anchor: PaintPoint, scale_x: f32, scale_y: f32) -> Self {
+        let mut scaled = self.clone();
+        for point in &mut scaled.points {
+            *point = point.scaled_from(anchor, scale_x, scale_y);
+        }
+        scaled
+    }
+
+    pub fn rotated_around(&self, center: PaintPoint, angle_radians: f32) -> Self {
+        let mut rotated = self.clone();
+        for point in &mut rotated.points {
+            *point = point.rotated_around(center, angle_radians);
+        }
+        rotated
     }
 
     pub fn bounds(&self) -> Option<ElementBounds> {
@@ -468,6 +498,59 @@ impl ShapeElement {
             start: self.start.offset(delta),
             end: self.end.offset(delta),
             rotation_radians: self.rotation_radians,
+        }
+    }
+
+    pub fn scaled_from(&self, anchor: PaintPoint, scale_x: f32, scale_y: f32) -> Self {
+        match self.kind {
+            ShapeKind::Line => Self {
+                kind: self.kind,
+                color: self.color,
+                width: self.width,
+                start: self.start.scaled_from(anchor, scale_x, scale_y),
+                end: self.end.scaled_from(anchor, scale_x, scale_y),
+                rotation_radians: 0.0,
+            },
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let center = self.center().scaled_from(anchor, scale_x, scale_y);
+                let half = self.half_extents();
+                let scaled_half =
+                    PaintVector::new((half.dx * scale_x).abs(), (half.dy * scale_y).abs());
+
+                Self {
+                    kind: self.kind,
+                    color: self.color,
+                    width: self.width,
+                    start: PaintPoint::new(center.x - scaled_half.dx, center.y - scaled_half.dy),
+                    end: PaintPoint::new(center.x + scaled_half.dx, center.y + scaled_half.dy),
+                    rotation_radians: self.rotation_radians,
+                }
+            }
+        }
+    }
+
+    pub fn rotated_around(&self, pivot: PaintPoint, delta_radians: f32) -> Self {
+        match self.kind {
+            ShapeKind::Line => Self {
+                kind: self.kind,
+                color: self.color,
+                width: self.width,
+                start: self.start.rotated_around(pivot, delta_radians),
+                end: self.end.rotated_around(pivot, delta_radians),
+                rotation_radians: 0.0,
+            },
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let center = self.center().rotated_around(pivot, delta_radians);
+                let half = self.half_extents();
+                Self {
+                    kind: self.kind,
+                    color: self.color,
+                    width: self.width,
+                    start: PaintPoint::new(center.x - half.dx, center.y - half.dy),
+                    end: PaintPoint::new(center.x + half.dx, center.y + half.dy),
+                    rotation_radians: self.rotation_radians + delta_radians,
+                }
+            }
         }
     }
 
@@ -650,8 +733,25 @@ impl PaintElement {
         }
     }
 
+    pub fn scaled_from(&self, anchor: PaintPoint, scale_x: f32, scale_y: f32) -> Self {
+        match self {
+            Self::Stroke(stroke) => Self::Stroke(stroke.scaled_from(anchor, scale_x, scale_y)),
+            Self::Shape(shape) => Self::Shape(shape.scaled_from(anchor, scale_x, scale_y)),
+        }
+    }
+
+    pub fn rotated_around(&self, pivot: PaintPoint, angle_radians: f32) -> Self {
+        match self {
+            Self::Stroke(stroke) => Self::Stroke(stroke.rotated_around(pivot, angle_radians)),
+            Self::Shape(shape) => Self::Shape(shape.rotated_around(pivot, angle_radians)),
+        }
+    }
+
     pub fn is_transform_editable(&self) -> bool {
-        matches!(self, Self::Shape(shape) if shape.is_transform_editable())
+        match self {
+            Self::Stroke(stroke) => !stroke.points.is_empty(),
+            Self::Shape(shape) => shape.is_transform_editable(),
+        }
     }
 }
 
@@ -758,6 +858,32 @@ impl PaintDocument {
             .filter_map(|index| self.elements[index].bounds());
         let first = bounds.next()?;
         Some(bounds.fold(first, ElementBounds::union))
+    }
+
+    pub fn hit_test_rect(&self, selection_rect: ElementBounds) -> Vec<usize> {
+        self.elements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| {
+                element
+                    .bounds()
+                    .is_some_and(|bounds| bounds.intersects(selection_rect))
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn replace_elements(&mut self, replacements: &[(usize, PaintElement)]) -> bool {
+        let replacements = normalize_replacements(replacements, self.elements.len());
+        if replacements.is_empty() {
+            return false;
+        }
+
+        for (index, element) in replacements {
+            self.elements[index] = element;
+        }
+
+        true
     }
 
     pub fn aligned_document(&self, indices: &[usize], alignment: AlignmentKind) -> Option<Self> {
@@ -899,6 +1025,49 @@ impl PaintDocument {
             .enumerate()
             .rev()
             .find_map(|(index, element)| element.hit_test(point, tolerance).then_some(index))
+    }
+
+    pub fn resized_selection_document(
+        &self,
+        indices: &[usize],
+        anchor: PaintPoint,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Option<Self> {
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.is_empty() {
+            return None;
+        }
+
+        let mut replacements = Vec::new();
+        for index in indices {
+            let element = self.element(index)?.clone();
+            replacements.push((index, element.scaled_from(anchor, scale_x, scale_y)));
+        }
+
+        let mut next = self.clone();
+        next.replace_elements(&replacements).then_some(next)
+    }
+
+    pub fn rotated_selection_document(
+        &self,
+        indices: &[usize],
+        pivot: PaintPoint,
+        angle_radians: f32,
+    ) -> Option<Self> {
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.is_empty() || angle_radians.abs() < f32::EPSILON {
+            return None;
+        }
+
+        let mut replacements = Vec::new();
+        for index in indices {
+            let element = self.element(index)?.clone();
+            replacements.push((index, element.rotated_around(pivot, angle_radians)));
+        }
+
+        let mut next = self.clone();
+        next.replace_elements(&replacements).then_some(next)
     }
 }
 
@@ -1149,6 +1318,20 @@ fn selected_flags_to_indices(flags: &[bool]) -> Vec<usize> {
         .collect()
 }
 
+fn normalize_replacements(
+    replacements: &[(usize, PaintElement)],
+    len: usize,
+) -> Vec<(usize, PaintElement)> {
+    let mut replacements: Vec<_> = replacements
+        .iter()
+        .filter(|(index, _)| *index < len)
+        .map(|(index, element)| (*index, element.clone()))
+        .collect();
+    replacements.sort_unstable_by_key(|(index, _)| *index);
+    replacements.dedup_by(|left, right| left.0 == right.0);
+    replacements
+}
+
 fn alignment_delta(
     element_bounds: ElementBounds,
     selection_bounds: ElementBounds,
@@ -1175,9 +1358,9 @@ fn alignment_delta(
 #[cfg(test)]
 mod tests {
     use super::{
-        AlignmentKind, CanvasSize, DocumentHistory, PaintDocument, PaintElement, PaintPoint,
-        PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand, Stroke,
-        ToolKind,
+        AlignmentKind, CanvasSize, DocumentHistory, ElementBounds, PaintDocument, PaintElement,
+        PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
+        StackOrderCommand, Stroke, ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -1343,6 +1526,20 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_rect_selects_multiple_elements() {
+        let mut document = PaintDocument::default();
+        document.push_shape(sample_shape());
+        document.push_stroke(sample_stroke());
+
+        let indices = document.hit_test_rect(ElementBounds {
+            min: PaintPoint::new(0.0, 0.0),
+            max: PaintPoint::new(100.0, 60.0),
+        });
+
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
     fn align_left_moves_selection_to_group_edge() {
         let mut document = PaintDocument::default();
         document.push_shape(ShapeElement::new(
@@ -1443,5 +1640,78 @@ mod tests {
         let document = PaintDocument::default();
         let mut history = DocumentHistory::new(document.clone());
         assert!(!history.replace_document(document));
+    }
+
+    #[test]
+    fn resized_selection_document_scales_multiple_elements() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(60.0, 20.0),
+            PaintPoint::new(80.0, 40.0),
+        ));
+
+        let resized = document
+            .resized_selection_document(&[0, 1], PaintPoint::new(20.0, 20.0), 2.0, 2.0)
+            .expect("resize should succeed");
+
+        let first_bounds = resized
+            .element(0)
+            .and_then(PaintElement::bounds)
+            .expect("first bounds");
+        let second_bounds = resized
+            .element(1)
+            .and_then(PaintElement::bounds)
+            .expect("second bounds");
+
+        assert!(first_bounds.width() > 20.0);
+        assert!(second_bounds.min.x > 80.0);
+    }
+
+    #[test]
+    fn rotated_selection_document_rotates_shapes_and_strokes() {
+        let mut document = PaintDocument::default();
+        document.push_shape(sample_shape());
+        document.push_stroke(sample_stroke());
+
+        let pivot = PaintPoint::new(100.0, 50.0);
+        let rotated = document
+            .rotated_selection_document(&[0, 1], pivot, std::f32::consts::FRAC_PI_2)
+            .expect("rotate should succeed");
+
+        let Some(PaintElement::Shape(shape)) = rotated.element(0) else {
+            panic!("first element should stay a shape");
+        };
+        let Some(PaintElement::Stroke(stroke)) = rotated.element(1) else {
+            panic!("second element should stay a stroke");
+        };
+
+        assert!(shape.rotation_radians.abs() > 0.1);
+        assert_ne!(stroke.points[0], PaintPoint::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn history_replace_document_tracks_multi_resize_undo_redo() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+        history.commit_shape(sample_shape());
+        history.commit_stroke(sample_stroke());
+
+        let resized = history
+            .current()
+            .resized_selection_document(&[0, 1], PaintPoint::new(0.0, 0.0), 1.5, 1.25)
+            .expect("resize should succeed");
+        assert!(history.replace_document(resized.clone()));
+        assert!(history.undo());
+        assert!(history.redo());
+        assert_eq!(history.current(), &resized);
     }
 }
