@@ -2,7 +2,7 @@
 
 `egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
 同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
-このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集` に加えて、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`Group / Ungroup`、`整列 / 等間隔配置`、`重なり順操作` を追加しています。
+このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集`、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`Group / Ungroup`、`整列 / 等間隔配置`、`重なり順操作` に加えて、`最小レイヤー機能` を追加しています。
 
 ## プロジェクト概要
 
@@ -17,6 +17,7 @@
 - 単一選択での移動、リサイズ、回転
 - 複数選択での一括移動、グループリサイズ、グループ回転、Group / Ungroup、整列、等間隔配置、重なり順変更
 - 矩形、楕円、直線ツール
+- レイヤーの追加 / 削除 / 名前変更 / 表示切替 / ロック / 並び替え
 - native / web の保存導線差分吸収
 
 ## 技術選定理由
@@ -111,6 +112,9 @@ trunk build --release
 ### 選択 / 再編集
 
 - `Select` ツールでストロークと図形のどちらも選択できます
+- 最小レイヤー実装では、選択と描画の対象は `active layer` のみです
+- `visible = false` のレイヤーは描画、選択、PNG 出力に含まれません
+- `locked = true` のレイヤーは表示されますが、選択や編集の対象になりません
 - `Shift + Click` で選択に追加 / 解除できます
 - 空き領域をドラッグすると矩形選択できます
 - `Shift` を押したまま矩形選択すると、既存選択へ追加できます
@@ -160,6 +164,17 @@ trunk build --release
 - `Load`: JSON から再編集状態を復元します
 - `Export PNG`: 背景と全要素を含む共有用 PNG を書き出します
 
+### レイヤー
+
+- 右側の `Layers` パネルでレイヤーを管理します
+- `Add Layer` で新規レイヤーを追加し、そのレイヤーを active にします
+- `Delete Layer` は active layer を削除します
+- 最低 1 レイヤーは必ず残ります
+- レイヤー名は `Rename Layer` で変更できます
+- `Show` / `Hide` で表示切替、`Lock` / `Unlock` で編集可否を切り替えます
+- `Up` / `Down` でレイヤー順を並び替えます
+- 要素の重なり順は「同一レイヤー内」で維持され、レイヤー順はその外側の描画順として効きます
+
 ### ズーム / パン
 
 - `+` / `-` ボタンでズーム
@@ -195,10 +210,16 @@ trunk build --release
 
 - 用途は「再編集用」
 - 既定ファイル名は `untitled.paint.json`
-- 現在の format version は `3` です
+- 現在の format version は `4` です
 - 旧 `version = 1` の stroke-only JSON も読込互換を残しています
-- 旧 `version = 2` の stroke / shape JSON も読込互換を残しています
-- `document.elements[]` に stroke / shape / group を保存します
+- 旧 `version = 2` と `version = 3` の flat な stroke / shape / group JSON も読込互換を残しています
+- `document.layers[]` にレイヤーを保存します
+- 各レイヤーは次の情報を持ちます
+  - `id`
+  - `name`
+  - `visible`
+  - `locked`
+  - `elements[]`
 - group は `elements[]` を再帰的に保持します
 - shape では次の情報を保持します
   - `kind`
@@ -207,7 +228,8 @@ trunk build --release
   - `start`
   - `end`
   - `rotation_radians`
-- 要素の並び順は `document.elements[]` の順序で保持され、重なり順としてそのまま復元されます
+- 要素の並び順は各レイヤー内の `elements[]` 順として保持され、重なり順としてそのまま復元されます
+- レイヤーの並び順も保存され、描画順としてそのまま復元されます
 - 旧 shape JSON に `rotation_radians` がない場合は `0` として読み込みます
 
 ### PNG 出力
@@ -216,6 +238,8 @@ trunk build --release
 - 既定ファイル名は `untitled.png`
 - 表示中のズーム倍率や選択枠、ハンドルは含めません
 - 作品のキャンバスサイズを基準に、背景色と全要素をラスタライズします
+- `visible = true` のレイヤーだけを出力します
+- `locked` は表示だけに影響せず、可視なら出力されます
 - 回転やリサイズ後の図形も、そのまま出力へ反映されます
 - 複数選択による整列結果、等間隔配置、グループ変形、重なり順変更、group 化結果も、そのまま出力へ反映されます
 
@@ -236,11 +260,14 @@ trunk build --release
 - 左 / 横中央 / 右 / 上 / 縦中央 / 下揃え
 - 水平方向 / 垂直方向の等間隔配置
 - Bring to Front / Send to Back / Bring Forward / Send Backward
+- レイヤーの追加 / 削除 / 名前変更 / 表示切替 / ロック / 並び替え
 
 未対応:
 - リサイズ中のスナップ
 - 塗り
 - グループ内だけを直接選択する isolate モード
+- レイヤー opacity / blend mode
+- レイヤー間ドラッグ移動
 
 ## native / web の違い
 
@@ -252,7 +279,7 @@ trunk build --release
   - `Load` はブラウザのファイル選択を使います
   - `Export PNG` はブラウザダウンロードとして保存します
   - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
-- 選択 / 矩形選択 / Group / Ungroup / 一括リサイズ / 一括回転 / 整列 / 等間隔配置 / 重なり順変更 / 図形再編集 / ズーム / パンの基本操作は native / web で同じです
+- 選択 / 矩形選択 / Group / Ungroup / 一括リサイズ / 一括回転 / 整列 / 等間隔配置 / 重なり順変更 / 図形再編集 / レイヤー操作 / ズーム / パンの基本操作は native / web で同じです
 
 ## GitHub Pages デプロイ手順
 
@@ -277,10 +304,10 @@ trunk build --release
 
 ## 今後の拡張候補
 
-- レイヤー
+- group 内だけを直接編集する isolate モード
 - 塗り、角丸矩形、矢印付き線
 - スナップ、グリッド
-- group 内だけを直接編集する isolate モード
+- レイヤー opacity / blend mode
 - ストロークの専用変形ハンドル
 - 保存形式 migration
 - ペン / タッチ入力最適化

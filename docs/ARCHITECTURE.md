@@ -35,6 +35,7 @@
   - ハンドル判定と preview 表示
 - `src/model.rs`
   - `PaintDocument`
+  - `PaintLayer`
   - `PaintElement`
   - `Stroke`
   - `ShapeElement`
@@ -56,7 +57,13 @@
 
 ## 図形データモデルの拡張
 
-- 作品の中身は `PaintDocument.elements: Vec<PaintElement>` で保持する
+- 作品の中身は `PaintDocument.layers: Vec<PaintLayer>` で保持する
+- `PaintLayer` は次の情報を持つ
+  - `id`
+  - `name`
+  - `visible`
+  - `locked`
+  - `elements: Vec<PaintElement>`
 - `PaintElement` は次の enum
   - `Stroke`
   - `Shape`
@@ -78,7 +85,7 @@
   - `start` と `end` を endpoint として扱う
   - 回転は endpoint を中心回りに回した結果で表現する
 - group
-  - top-level 要素として `document.elements[]` に入る
+  - レイヤー内の top-level 要素として `layer.elements[]` に入る
   - 移動 / スケール / 回転は子要素へ再帰的に適用する
   - PNG render や Save / Load でも同じ構造をそのまま使う
 
@@ -87,7 +94,8 @@
 - 作品状態は `PaintDocument`
   - `canvas_size`
   - `background`
-  - `elements`
+  - `layers`
+  - `active_layer_id`
 - ビュー状態は `CanvasController` 内の `CanvasViewState`
   - `zoom`
   - `pan`
@@ -95,6 +103,7 @@
   - `needs_reset`
 - 選択状態は `SelectionState`
   - `selected indices`
+  - `selected layer id`
 - 編集中一時状態は `SelectionSession`
   - `Move`
   - `SingleResize`
@@ -108,7 +117,9 @@
 
 ## 選択モデルの拡張内容
 
-- 選択は `Vec<usize>` ベースで保持し、作品データには保存しない
+- 選択は `active layer + Vec<usize>` ベースで保持し、作品データには保存しない
+- 最小レイヤー実装では、選択と描画は active layer のみを対象にする
+- active layer が hidden または locked の場合、選択と描画は無効化する
 - 選択の追加 / 解除は `Shift + Click`
 - 空き領域ドラッグで矩形選択を行う
 - `Shift` 付き矩形選択は既存選択へ加算する
@@ -128,6 +139,20 @@
 - 単一選択では shape は専用ハンドル、stroke / group は group bbox ハンドルを表示する
 - 複数選択では group bbox ハンドルを表示する
 - group 化した後は top-level では 1 要素扱いに戻るため、既存の単一選択フローを再利用できる
+
+## レイヤーの責務
+
+- レイヤー順は背景側から前景側へ `layers[0] -> layers[last]` で保持する
+- 同一レイヤー内の重なり順は既存どおり `elements[]` の配列順で表現する
+- layer `visible = false`
+  - canvas 描画に含めない
+  - hit test / marquee 選択に含めない
+  - PNG 出力に含めない
+- layer `locked = true`
+  - canvas 描画には含める
+  - 選択 / 描画 / 編集対象にはしない
+- active layer の切替は UI 状態として扱い、Undo/Redo には積まない
+- layer add/delete/rename/visible/locked/order は document 変更として Undo/Redo に積む
 
 ## リサイズ / 回転操作の設計
 
@@ -201,11 +226,15 @@
 
 ## 重なり順変更のモデル
 
-- 重なり順は `PaintDocument.elements` の配列順で表現する
+- 重なり順は「レイヤー順」と「各レイヤー内の要素順」の 2 段で表現する
+- layer order
+  - `layers[]` の配列順
+- element order
+  - `layer.elements[]` の配列順
 - `Bring to Front` / `Send to Back`
-  - 選択要素を配列の末尾 / 先頭へまとまって移動する
+  - active layer 内で選択要素を配列の末尾 / 先頭へまとまって移動する
 - `Bring Forward` / `Send Backward`
-  - 1 ステップだけ前後へ移動する
+  - active layer 内で 1 ステップだけ前後へ移動する
 - 複数選択時は、選択要素どうしの相対順を保ったまま移動する
 - group の内部順序は `GroupElement.elements[]` の順序で保持し、Ungroup 時もその順を維持して top-level へ戻す
 
@@ -214,6 +243,7 @@
 - 新規 stroke / 図形作成は `commit_element`
 - 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
 - 複数要素の Move / Resize / Rotate / Group / Ungroup / Align / Distribute / Reorder も `replace_document` を 1 回だけ積む
+- layer Add / Delete / Rename / Visibility / Lock / Move も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -221,7 +251,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、layer add/delete/rename/visible/locked/order、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -229,26 +259,31 @@
 
 - JSON 保存は「再編集用」
 - `storage` が JSON envelope の version 管理と encode / decode を担当する
-- 現在の保存は `format.version = 3`
+- 現在の保存は `format.version = 4`
 - 旧 `version = 1` の stroke-only 形式は decode 側で `PaintElement::Stroke` へ変換して読む
-- 旧 `version = 2` の stroke / shape 形式は decode 側でそのまま読める
-- 旧 `version = 2` の shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
+- 旧 `version = 2` と `version = 3` の flat な stroke / shape / group 形式は decode 側で単一 layer document へ migration する
+- 旧 shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
 - group は `PaintElement::Group` として再帰的に保存する
-- 重なり順は `document.elements[]` の配列順としてそのまま保存する
+- レイヤー順は `document.layers[]` の配列順として保存する
+- レイヤー内重なり順は `layer.elements[]` の配列順として保存する
 
 ## PNG 出力の責務
 
 - PNG は「共有 / 閲覧用」
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
+- visible な layer だけを順番に描画する
+- locked layer も visible なら描画する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
-- group、整列、等間隔配置、group transform、重なり順変更も作品データどおりに反映する
+- group、整列、等間隔配置、group transform、重なり順変更、layer order も作品データどおりに反映する
 - 選択枠やハンドルは出力に含めない
 
 ## 将来の拡張方針
 
 - レイヤー
-  - `PaintDocument` に layer 配列を導入し、各 layer が `PaintElement` 配列を持つ形へ拡張
+  - opacity
+  - blend mode
+  - layer 間ドラッグ移動
 - 複数選択強化
   - group 内だけを直接編集する isolate モード
   - group のネスト可視化

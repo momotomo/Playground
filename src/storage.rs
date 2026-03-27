@@ -8,8 +8,9 @@ use crate::render::render_document_png;
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
-const EDITABLE_FORMAT_VERSION: u32 = 3;
-const PREVIOUS_EDITABLE_FORMAT_VERSION: u32 = 2;
+const EDITABLE_FORMAT_VERSION: u32 = 4;
+const PREVIOUS_EDITABLE_FORMAT_VERSION: u32 = 3;
+const EARLIER_EDITABLE_FORMAT_VERSION: u32 = 2;
 const LEGACY_EDITABLE_FORMAT_VERSION: u32 = 1;
 const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
 const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
@@ -107,10 +108,15 @@ impl StorageFacade {
         }
 
         match header.format.version {
-            EDITABLE_FORMAT_VERSION | PREVIOUS_EDITABLE_FORMAT_VERSION => {
+            EDITABLE_FORMAT_VERSION => {
                 let payload: EditablePaintFile = serde_json::from_slice(bytes)
                     .map_err(|error| StorageError::Deserialize(error.to_string()))?;
-                Ok(payload.document)
+                Ok(payload.document.sanitized())
+            }
+            PREVIOUS_EDITABLE_FORMAT_VERSION | EARLIER_EDITABLE_FORMAT_VERSION => {
+                let payload: FlatEditablePaintFile = serde_json::from_slice(bytes)
+                    .map_err(|error| StorageError::Deserialize(error.to_string()))?;
+                Ok(payload.document.into_current())
             }
             LEGACY_EDITABLE_FORMAT_VERSION => {
                 let payload: LegacyEditablePaintFile = serde_json::from_slice(bytes)
@@ -134,7 +140,7 @@ impl StorageFacade {
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
-        "Editable JSON envelope v3 (.paint.json)"
+        "Editable JSON envelope v4 (.paint.json)"
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
@@ -343,6 +349,28 @@ impl EditablePaintFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FlatEditablePaintFile {
+    format: FileFormatDescriptor,
+    #[serde(default)]
+    metadata: FileMetadata,
+    document: PaintDocumentV3,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PaintDocumentV3 {
+    canvas_size: crate::model::CanvasSize,
+    background: crate::model::RgbaColor,
+    #[serde(default)]
+    elements: Vec<PaintElement>,
+}
+
+impl PaintDocumentV3 {
+    fn into_current(self) -> PaintDocument {
+        PaintDocument::from_flat_elements(self.canvas_size, self.background, self.elements)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct LegacyEditablePaintFile {
     format: FileFormatDescriptor,
     #[serde(default)]
@@ -359,11 +387,11 @@ struct PaintDocumentV1 {
 
 impl PaintDocumentV1 {
     fn into_current(self) -> PaintDocument {
-        PaintDocument {
-            canvas_size: self.canvas_size,
-            background: self.background,
-            elements: self.strokes.into_iter().map(PaintElement::Stroke).collect(),
-        }
+        PaintDocument::from_flat_elements(
+            self.canvas_size,
+            self.background,
+            self.strokes.into_iter().map(PaintElement::Stroke).collect(),
+        )
     }
 }
 
@@ -430,7 +458,7 @@ mod tests {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(64.0, 32.0),
             background: RgbaColor::white(),
-            elements: Vec::new(),
+            ..PaintDocument::default()
         };
 
         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::default(), 6.0);
@@ -449,10 +477,10 @@ mod tests {
     }
 
     fn grouped_document() -> PaintDocument {
-        PaintDocument {
-            canvas_size: CanvasSize::new(96.0, 64.0),
-            background: RgbaColor::white(),
-            elements: vec![PaintElement::Group(GroupElement {
+        PaintDocument::from_flat_elements(
+            CanvasSize::new(96.0, 64.0),
+            RgbaColor::white(),
+            vec![PaintElement::Group(GroupElement {
                 elements: vec![
                     PaintElement::Stroke({
                         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::charcoal(), 6.0);
@@ -470,7 +498,23 @@ mod tests {
                     )),
                 ],
             })],
-        }
+        )
+    }
+
+    fn layered_document() -> PaintDocument {
+        let document = sample_document();
+        let (mut next, top_layer_id) = document.add_layer_document();
+        next.push_shape(ShapeElement::new(
+            ShapeKind::Ellipse,
+            RgbaColor::new(64, 96, 220, 255),
+            3.0,
+            PaintPoint::new(20.0, 6.0),
+            PaintPoint::new(30.0, 18.0),
+        ));
+        next = next
+            .toggled_layer_locked_document(top_layer_id)
+            .expect("lock top layer");
+        next
     }
 
     #[test]
@@ -507,6 +551,18 @@ mod tests {
         let decoded = storage.decode_document(&encoded).expect("must decode");
 
         assert_eq!(decoded, grouped_document());
+    }
+
+    #[test]
+    fn layer_round_trip_preserves_visibility_and_lock_state() {
+        let storage = StorageFacade::new();
+        let encoded = storage
+            .encode_document(&layered_document())
+            .expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, layered_document());
+        assert_eq!(decoded.layer_count(), 2);
     }
 
     #[test]
@@ -589,6 +645,42 @@ mod tests {
             .decode_document(previous)
             .expect("previous version should decode");
 
+        assert_eq!(decoded.element_count(), 1);
+    }
+
+    #[test]
+    fn decode_previous_v3_flat_document() {
+        let storage = StorageFacade::new();
+        let previous = br#"{
+          "format":{"id":"rust-paint-foundation/document","version":3},
+          "metadata":{},
+          "document":{
+            "canvas_size":{"width":64.0,"height":32.0},
+            "background":{"r":255,"g":255,"b":255,"a":255},
+            "elements":[
+              {
+                "element_type":"group",
+                "elements":[
+                  {
+                    "element_type":"shape",
+                    "kind":"rectangle",
+                    "color":{"r":220,"g":64,"b":64,"a":255},
+                    "width":3.0,
+                    "start":{"x":12.0,"y":8.0},
+                    "end":{"x":40.0,"y":24.0},
+                    "rotation_radians":0.2
+                  }
+                ]
+              }
+            ]
+          }
+        }"#;
+
+        let decoded = storage
+            .decode_document(previous)
+            .expect("previous version should decode");
+
+        assert_eq!(decoded.layer_count(), 1);
         assert_eq!(decoded.element_count(), 1);
     }
 

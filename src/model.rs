@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 
 const HIT_TOLERANCE_MIN: f32 = 2.5;
 const MIN_SHAPE_HALF_EXTENT: f32 = 0.5;
+const DEFAULT_LAYER_ID: u64 = 1;
+
+pub type LayerId = u64;
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_active_layer_id() -> LayerId {
+    DEFAULT_LAYER_ID
+}
+
+fn default_next_layer_id() -> LayerId {
+    DEFAULT_LAYER_ID + 1
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSize {
@@ -840,13 +855,45 @@ impl PaintElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaintLayer {
+    pub id: LayerId,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub elements: Vec<PaintElement>,
+}
+
+impl PaintLayer {
+    pub fn new(id: LayerId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            visible: true,
+            locked: false,
+            elements: Vec::new(),
+        }
+    }
+
+    pub fn is_editable(&self) -> bool {
+        self.visible && !self.locked
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaintDocument {
     #[serde(default)]
     pub canvas_size: CanvasSize,
     #[serde(default = "RgbaColor::white")]
     pub background: RgbaColor,
-    #[serde(default)]
-    pub elements: Vec<PaintElement>,
+    #[serde(default = "PaintDocument::default_layers")]
+    pub layers: Vec<PaintLayer>,
+    #[serde(default = "default_active_layer_id")]
+    pub active_layer_id: LayerId,
+    #[serde(default = "default_next_layer_id")]
+    pub next_layer_id: LayerId,
 }
 
 impl Default for PaintDocument {
@@ -854,14 +901,74 @@ impl Default for PaintDocument {
         Self {
             canvas_size: CanvasSize::default(),
             background: RgbaColor::white(),
-            elements: Vec::new(),
+            layers: Self::default_layers(),
+            active_layer_id: default_active_layer_id(),
+            next_layer_id: default_next_layer_id(),
         }
     }
 }
 
 impl PaintDocument {
+    fn default_layers() -> Vec<PaintLayer> {
+        vec![PaintLayer::new(DEFAULT_LAYER_ID, "Layer 1")]
+    }
+
+    pub fn from_flat_elements(
+        canvas_size: CanvasSize,
+        background: RgbaColor,
+        elements: Vec<PaintElement>,
+    ) -> Self {
+        Self {
+            canvas_size,
+            background,
+            layers: vec![PaintLayer {
+                id: DEFAULT_LAYER_ID,
+                name: "Layer 1".to_owned(),
+                visible: true,
+                locked: false,
+                elements,
+            }],
+            active_layer_id: DEFAULT_LAYER_ID,
+            next_layer_id: DEFAULT_LAYER_ID + 1,
+        }
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.sanitize_in_place();
+        self
+    }
+
+    pub fn sanitize_in_place(&mut self) {
+        if self.layers.is_empty() {
+            self.layers = Self::default_layers();
+        }
+
+        let max_id = self
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .max()
+            .unwrap_or(DEFAULT_LAYER_ID);
+
+        if !self
+            .layers
+            .iter()
+            .any(|layer| layer.id == self.active_layer_id)
+        {
+            self.active_layer_id = self
+                .layers
+                .last()
+                .map(|layer| layer.id)
+                .unwrap_or(DEFAULT_LAYER_ID);
+        }
+
+        if self.next_layer_id <= max_id {
+            self.next_layer_id = max_id + 1;
+        }
+    }
+
     pub fn has_elements(&self) -> bool {
-        !self.elements.is_empty()
+        self.layers.iter().any(|layer| !layer.elements.is_empty())
     }
 
     pub fn has_strokes(&self) -> bool {
@@ -869,27 +976,171 @@ impl PaintDocument {
     }
 
     pub fn element_count(&self) -> usize {
-        self.elements.len()
+        self.active_layer().map_or(0, |layer| layer.elements.len())
     }
 
     pub fn stroke_count(&self) -> usize {
         self.element_count()
     }
 
+    pub fn total_element_count(&self) -> usize {
+        self.layers.iter().map(|layer| layer.elements.len()).sum()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn layers(&self) -> &[PaintLayer] {
+        &self.layers
+    }
+
+    pub fn visible_layers(&self) -> impl Iterator<Item = &PaintLayer> {
+        self.layers.iter().filter(|layer| layer.visible)
+    }
+
+    pub fn active_layer_id(&self) -> LayerId {
+        self.active_layer_id
+    }
+
+    pub fn active_layer_index(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .position(|layer| layer.id == self.active_layer_id)
+    }
+
+    pub fn active_layer(&self) -> Option<&PaintLayer> {
+        self.layers
+            .iter()
+            .find(|layer| layer.id == self.active_layer_id)
+    }
+
+    pub fn layer(&self, layer_id: LayerId) -> Option<&PaintLayer> {
+        self.layers.iter().find(|layer| layer.id == layer_id)
+    }
+
+    fn active_layer_mut(&mut self) -> Option<&mut PaintLayer> {
+        let active_id = self.active_layer_id;
+        self.layers.iter_mut().find(|layer| layer.id == active_id)
+    }
+
+    fn layer_mut(&mut self, layer_id: LayerId) -> Option<&mut PaintLayer> {
+        self.layers.iter_mut().find(|layer| layer.id == layer_id)
+    }
+
+    pub fn active_layer_is_editable(&self) -> bool {
+        self.active_layer().is_some_and(PaintLayer::is_editable)
+    }
+
+    pub fn set_active_layer(&mut self, layer_id: LayerId) -> bool {
+        if self.layers.iter().any(|layer| layer.id == layer_id) {
+            self.active_layer_id = layer_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_layer_document(&self) -> (Self, LayerId) {
+        let mut next = self.clone();
+        let new_id = next.next_layer_id.max(
+            next.layers
+                .iter()
+                .map(|layer| layer.id)
+                .max()
+                .unwrap_or(DEFAULT_LAYER_ID)
+                + 1,
+        );
+        let layer_name = format!("Layer {}", next.layers.len() + 1);
+        next.layers.push(PaintLayer::new(new_id, layer_name));
+        next.active_layer_id = new_id;
+        next.next_layer_id = new_id + 1;
+        (next, new_id)
+    }
+
+    pub fn delete_active_layer_document(&self) -> Option<(Self, LayerId)> {
+        if self.layers.len() <= 1 {
+            return None;
+        }
+
+        let mut next = self.clone();
+        let active_index = next.active_layer_index()?;
+        next.layers.remove(active_index);
+        let fallback_index = active_index.saturating_sub(1).min(next.layers.len() - 1);
+        let next_active = next.layers.get(fallback_index)?.id;
+        next.active_layer_id = next_active;
+        Some((next, next_active))
+    }
+
+    pub fn renamed_layer_document(&self, layer_id: LayerId, name: &str) -> Option<Self> {
+        let next_name = name.trim();
+        if next_name.is_empty() {
+            return None;
+        }
+
+        let mut next = self.clone();
+        let layer = next.layer_mut(layer_id)?;
+        if layer.name == next_name {
+            return None;
+        }
+        layer.name = next_name.to_owned();
+        Some(next)
+    }
+
+    pub fn toggled_layer_visibility_document(&self, layer_id: LayerId) -> Option<Self> {
+        let mut next = self.clone();
+        let layer = next.layer_mut(layer_id)?;
+        layer.visible = !layer.visible;
+        Some(next)
+    }
+
+    pub fn toggled_layer_locked_document(&self, layer_id: LayerId) -> Option<Self> {
+        let mut next = self.clone();
+        let layer = next.layer_mut(layer_id)?;
+        layer.locked = !layer.locked;
+        Some(next)
+    }
+
+    pub fn moved_layer_up_document(&self, layer_id: LayerId) -> Option<Self> {
+        let mut next = self.clone();
+        let index = next.layers.iter().position(|layer| layer.id == layer_id)?;
+        if index + 1 >= next.layers.len() {
+            return None;
+        }
+        next.layers.swap(index, index + 1);
+        Some(next)
+    }
+
+    pub fn moved_layer_down_document(&self, layer_id: LayerId) -> Option<Self> {
+        let mut next = self.clone();
+        let index = next.layers.iter().position(|layer| layer.id == layer_id)?;
+        if index == 0 {
+            return None;
+        }
+        next.layers.swap(index - 1, index);
+        Some(next)
+    }
+
     pub fn push_stroke(&mut self, stroke: Stroke) {
-        self.elements.push(PaintElement::Stroke(stroke));
+        self.push_element(PaintElement::Stroke(stroke));
     }
 
     pub fn push_shape(&mut self, shape: ShapeElement) {
-        self.elements.push(PaintElement::Shape(shape));
+        self.push_element(PaintElement::Shape(shape));
     }
 
     pub fn push_element(&mut self, element: PaintElement) {
-        self.elements.push(element);
+        if let Some(layer) = self.active_layer_mut() {
+            layer.elements.push(element);
+        }
     }
 
     pub fn replace_element(&mut self, index: usize, element: PaintElement) -> bool {
-        if let Some(slot) = self.elements.get_mut(index) {
+        let Some(layer) = self.active_layer_mut() else {
+            return false;
+        };
+
+        if let Some(slot) = layer.elements.get_mut(index) {
             *slot = element;
             true
         } else {
@@ -898,7 +1149,7 @@ impl PaintDocument {
     }
 
     pub fn element(&self, index: usize) -> Option<&PaintElement> {
-        self.elements.get(index)
+        self.active_layer()?.elements.get(index)
     }
 
     pub fn translate_element(&mut self, index: usize, delta: PaintVector) -> bool {
@@ -906,11 +1157,14 @@ impl PaintDocument {
             return false;
         }
 
-        let Some(element) = self.elements.get(index).cloned() else {
+        let Some(element) = self.element(index).cloned() else {
             return false;
         };
 
-        self.elements[index] = element.translated(delta);
+        let Some(layer) = self.active_layer_mut() else {
+            return false;
+        };
+        layer.elements[index] = element.translated(delta);
         true
     }
 
@@ -919,33 +1173,47 @@ impl PaintDocument {
             return false;
         }
 
-        let indices = normalize_indices(indices, self.elements.len());
+        let element_len = self.active_layer().map_or(0, |layer| layer.elements.len());
+        let indices = normalize_indices(indices, element_len);
         if indices.is_empty() {
             return false;
         }
 
+        let Some(layer) = self.active_layer_mut() else {
+            return false;
+        };
         for index in indices {
-            let element = self
+            let element = layer
                 .elements
                 .get(index)
                 .cloned()
                 .expect("normalized indices should stay in bounds");
-            self.elements[index] = element.translated(delta);
+            layer.elements[index] = element.translated(delta);
         }
 
         true
     }
 
     pub fn selection_bounds(&self, indices: &[usize]) -> Option<ElementBounds> {
-        let mut bounds = normalize_indices(indices, self.elements.len())
+        let layer = self.active_layer()?;
+        let mut bounds = normalize_indices(indices, layer.elements.len())
             .into_iter()
-            .filter_map(|index| self.elements[index].bounds());
+            .filter_map(|index| layer.elements[index].bounds());
         let first = bounds.next()?;
         Some(bounds.fold(first, ElementBounds::union))
     }
 
     pub fn hit_test_rect(&self, selection_rect: ElementBounds) -> Vec<usize> {
-        self.elements
+        if !self.active_layer_is_editable() {
+            return Vec::new();
+        }
+
+        let Some(layer) = self.active_layer() else {
+            return Vec::new();
+        };
+
+        layer
+            .elements
             .iter()
             .enumerate()
             .filter_map(|(index, element)| {
@@ -958,39 +1226,50 @@ impl PaintDocument {
     }
 
     pub fn replace_elements(&mut self, replacements: &[(usize, PaintElement)]) -> bool {
-        let replacements = normalize_replacements(replacements, self.elements.len());
+        let element_len = self.active_layer().map_or(0, |layer| layer.elements.len());
+        let replacements = normalize_replacements(replacements, element_len);
         if replacements.is_empty() {
             return false;
         }
 
+        let Some(layer) = self.active_layer_mut() else {
+            return false;
+        };
         for (index, element) in replacements {
-            self.elements[index] = element;
+            layer.elements[index] = element;
         }
 
         true
     }
 
     pub fn selection_contains_group(&self, indices: &[usize]) -> bool {
-        normalize_indices(indices, self.elements.len())
+        let Some(layer) = self.active_layer() else {
+            return false;
+        };
+
+        normalize_indices(indices, layer.elements.len())
             .into_iter()
-            .any(|index| self.elements[index].is_group())
+            .any(|index| layer.elements[index].is_group())
     }
 
     pub fn grouped_document(&self, indices: &[usize]) -> Option<(Self, Vec<usize>)> {
-        let indices = normalize_indices(indices, self.elements.len());
+        let layer = self.active_layer()?;
+        let indices = normalize_indices(indices, layer.elements.len());
         if indices.len() < 2 {
             return None;
         }
 
         let insert_index = indices[0];
-        let selected_flags = selection_flags(self.elements.len(), &indices);
+        let selected_flags = selection_flags(layer.elements.len(), &indices);
         let grouped_elements: Vec<PaintElement> = indices
             .iter()
-            .map(|index| self.elements[*index].clone())
+            .map(|index| layer.elements[*index].clone())
             .collect();
 
-        let mut next_elements = Vec::with_capacity(self.elements.len() - indices.len() + 1);
-        for (index, element) in self.elements.iter().enumerate() {
+        let mut next = self.clone();
+        let active_index = next.active_layer_index()?;
+        let mut next_elements = Vec::with_capacity(layer.elements.len() - indices.len() + 1);
+        for (index, element) in layer.elements.iter().enumerate() {
             if index == insert_index {
                 next_elements.push(PaintElement::Group(GroupElement {
                     elements: grouped_elements.clone(),
@@ -1001,29 +1280,24 @@ impl PaintDocument {
                 next_elements.push(element.clone());
             }
         }
+        next.layers[active_index].elements = next_elements;
 
-        Some((
-            Self {
-                canvas_size: self.canvas_size,
-                background: self.background,
-                elements: next_elements,
-            },
-            vec![insert_index],
-        ))
+        Some((next, vec![insert_index]))
     }
 
     pub fn ungrouped_document(&self, indices: &[usize]) -> Option<(Self, Vec<usize>)> {
-        let selected_indices = normalize_indices(indices, self.elements.len());
+        let layer = self.active_layer()?;
+        let selected_indices = normalize_indices(indices, layer.elements.len());
         if selected_indices.is_empty() {
             return None;
         }
 
-        let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+        let selected_flags = selection_flags(layer.elements.len(), &selected_indices);
         let mut next_elements = Vec::new();
         let mut next_selection = Vec::new();
         let mut changed = false;
 
-        for (index, element) in self.elements.iter().enumerate() {
+        for (index, element) in layer.elements.iter().enumerate() {
             match (selected_flags[index], element) {
                 (true, PaintElement::Group(group)) => {
                     changed = true;
@@ -1040,18 +1314,23 @@ impl PaintDocument {
             }
         }
 
-        changed.then_some((
-            Self {
-                canvas_size: self.canvas_size,
-                background: self.background,
-                elements: next_elements,
-            },
-            next_selection,
-        ))
+        if !changed {
+            return None;
+        }
+
+        let mut next = self.clone();
+        let active_index = next.active_layer_index()?;
+        next.layers[active_index].elements = next_elements;
+        Some((next, next_selection))
     }
 
     pub fn aligned_document(&self, indices: &[usize], alignment: AlignmentKind) -> Option<Self> {
-        let indices = normalize_indices(indices, self.elements.len());
+        if !self.active_layer_is_editable() {
+            return None;
+        }
+
+        let layer = self.active_layer()?;
+        let indices = normalize_indices(indices, layer.elements.len());
         if indices.len() < 2 {
             return None;
         }
@@ -1083,16 +1362,21 @@ impl PaintDocument {
         indices: &[usize],
         command: StackOrderCommand,
     ) -> Option<(Self, Vec<usize>)> {
-        let selected_indices = normalize_indices(indices, self.elements.len());
+        if !self.active_layer_is_editable() {
+            return None;
+        }
+
+        let layer = self.active_layer()?;
+        let selected_indices = normalize_indices(indices, layer.elements.len());
         if selected_indices.is_empty() {
             return None;
         }
 
-        let mut next_elements = self.elements.clone();
+        let mut next_elements = layer.elements.clone();
         let mut changed = false;
         match command {
             StackOrderCommand::BringToFront => {
-                let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+                let selected_flags = selection_flags(layer.elements.len(), &selected_indices);
                 let selected: Vec<_> = next_elements
                     .iter()
                     .enumerate()
@@ -1110,17 +1394,16 @@ impl PaintDocument {
                 next_elements.extend(selected);
                 let next_selected: Vec<usize> = (split..split + selected_indices.len()).collect();
                 changed = next_selected != selected_indices;
-                return changed.then_some((
-                    Self {
-                        canvas_size: self.canvas_size,
-                        background: self.background,
-                        elements: next_elements,
-                    },
-                    next_selected,
-                ));
+                if !changed {
+                    return None;
+                }
+                let mut next = self.clone();
+                let active_index = next.active_layer_index()?;
+                next.layers[active_index].elements = next_elements;
+                return Some((next, next_selected));
             }
             StackOrderCommand::SendToBack => {
-                let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+                let selected_flags = selection_flags(layer.elements.len(), &selected_indices);
                 let selected: Vec<_> = next_elements
                     .iter()
                     .enumerate()
@@ -1137,14 +1420,13 @@ impl PaintDocument {
                 next_elements.extend(unselected);
                 let next_selected: Vec<usize> = (0..selected_indices.len()).collect();
                 changed = next_selected != selected_indices;
-                return changed.then_some((
-                    Self {
-                        canvas_size: self.canvas_size,
-                        background: self.background,
-                        elements: next_elements,
-                    },
-                    next_selected,
-                ));
+                if !changed {
+                    return None;
+                }
+                let mut next = self.clone();
+                let active_index = next.active_layer_index()?;
+                next.layers[active_index].elements = next_elements;
+                return Some((next, next_selected));
             }
             StackOrderCommand::BringForward | StackOrderCommand::SendBackward => {}
         }
@@ -1173,18 +1455,23 @@ impl PaintDocument {
         }
 
         let next_selected = selected_flags_to_indices(&selected_flags);
-        changed.then_some((
-            Self {
-                canvas_size: self.canvas_size,
-                background: self.background,
-                elements: next_elements,
-            },
-            next_selected,
-        ))
+        if !changed {
+            return None;
+        }
+
+        let mut next = self.clone();
+        let active_index = next.active_layer_index()?;
+        next.layers[active_index].elements = next_elements;
+        Some((next, next_selected))
     }
 
     pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> Option<usize> {
-        self.elements
+        if !self.active_layer_is_editable() {
+            return None;
+        }
+
+        self.active_layer()?
+            .elements
             .iter()
             .enumerate()
             .rev()
@@ -1198,7 +1485,8 @@ impl PaintDocument {
         scale_x: f32,
         scale_y: f32,
     ) -> Option<Self> {
-        let indices = normalize_indices(indices, self.elements.len());
+        let layer = self.active_layer()?;
+        let indices = normalize_indices(indices, layer.elements.len());
         if indices.is_empty() {
             return None;
         }
@@ -1219,7 +1507,8 @@ impl PaintDocument {
         pivot: PaintPoint,
         angle_radians: f32,
     ) -> Option<Self> {
-        let indices = normalize_indices(indices, self.elements.len());
+        let layer = self.active_layer()?;
+        let indices = normalize_indices(indices, layer.elements.len());
         if indices.is_empty() || angle_radians.abs() < f32::EPSILON {
             return None;
         }
@@ -1239,7 +1528,12 @@ impl PaintDocument {
         indices: &[usize],
         distribution: DistributionKind,
     ) -> Option<Self> {
-        let indices = normalize_indices(indices, self.elements.len());
+        if !self.active_layer_is_editable() {
+            return None;
+        }
+
+        let layer = self.active_layer()?;
+        let indices = normalize_indices(indices, layer.elements.len());
         if indices.len() < 3 {
             return None;
         }
@@ -1316,7 +1610,7 @@ pub struct DocumentHistory {
 impl DocumentHistory {
     pub fn new(document: PaintDocument) -> Self {
         Self {
-            current: document,
+            current: document.sanitized(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -1390,12 +1684,15 @@ impl DocumentHistory {
         }
 
         self.push_undo_snapshot();
-        self.current.elements.clear();
+        for layer in &mut self.current.layers {
+            layer.elements.clear();
+        }
         self.redo_stack.clear();
         true
     }
 
     pub fn replace_document(&mut self, document: PaintDocument) -> bool {
+        let document = document.sanitized();
         if self.current == document {
             return false;
         }
@@ -1404,6 +1701,10 @@ impl DocumentHistory {
         self.current = document;
         self.redo_stack.clear();
         true
+    }
+
+    pub fn set_active_layer(&mut self, layer_id: LayerId) -> bool {
+        self.current.set_active_layer(layer_id)
     }
 
     pub fn undo(&mut self) -> bool {
@@ -1663,7 +1964,7 @@ mod tests {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(200.0, 120.0),
             background: RgbaColor::white(),
-            elements: Vec::new(),
+            ..PaintDocument::default()
         };
         document.push_shape(sample_shape());
         document.push_stroke(sample_stroke());
@@ -1837,6 +2138,8 @@ mod tests {
             .expect("reorder should succeed");
 
         let colors: Vec<_> = reordered
+            .active_layer()
+            .expect("active layer")
             .elements
             .iter()
             .map(|element| match element {
@@ -1994,13 +2297,13 @@ mod tests {
 
     #[test]
     fn selection_contains_group_detects_group_elements() {
-        let document = PaintDocument {
-            canvas_size: CanvasSize::default(),
-            background: RgbaColor::white(),
-            elements: vec![PaintElement::Group(GroupElement {
+        let document = PaintDocument::from_flat_elements(
+            CanvasSize::default(),
+            RgbaColor::white(),
+            vec![PaintElement::Group(GroupElement {
                 elements: vec![PaintElement::Stroke(sample_stroke())],
             })],
-        };
+        );
 
         assert!(document.selection_contains_group(&[0]));
         assert!(!document.selection_contains_group(&[1]));
@@ -2068,5 +2371,52 @@ mod tests {
         assert!(history.undo());
         assert!(history.redo());
         assert_eq!(history.current(), &grouped);
+    }
+
+    #[test]
+    fn layer_add_delete_tracks_undo_redo() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+        let (with_layer, new_layer_id) = history.current().add_layer_document();
+        assert!(history.replace_document(with_layer.clone()));
+        assert_eq!(history.current().layer_count(), 2);
+        assert_eq!(history.current().active_layer_id(), new_layer_id);
+        assert!(history.undo());
+        assert_eq!(history.current().layer_count(), 1);
+        assert!(history.redo());
+        assert_eq!(history.current().layer_count(), 2);
+
+        let deleted = history
+            .current()
+            .delete_active_layer_document()
+            .expect("delete layer should succeed")
+            .0;
+        assert!(history.replace_document(deleted.clone()));
+        assert_eq!(history.current().layer_count(), 1);
+    }
+
+    #[test]
+    fn hidden_or_locked_active_layer_disables_selection_hits() {
+        let mut document = PaintDocument::default();
+        document.push_shape(sample_shape());
+
+        let hidden = document
+            .toggled_layer_visibility_document(document.active_layer_id())
+            .expect("hide active layer");
+        assert_eq!(hidden.hit_test(PaintPoint::new(82.0, 23.0), 3.0), None);
+        assert!(
+            hidden
+                .hit_test_rect(hidden.selection_bounds(&[0]).unwrap())
+                .is_empty()
+        );
+
+        let locked = document
+            .toggled_layer_locked_document(document.active_layer_id())
+            .expect("lock active layer");
+        assert_eq!(locked.hit_test(PaintPoint::new(82.0, 23.0), 3.0), None);
+        assert!(
+            locked
+                .hit_test_rect(locked.selection_bounds(&[0]).unwrap())
+                .is_empty()
+        );
     }
 }

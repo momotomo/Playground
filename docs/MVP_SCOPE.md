@@ -2,23 +2,23 @@
 
 ## 今回追加した範囲
 
-- `Shift + Click` による複数選択
-- ドラッグ矩形選択
-- 複数要素の一括移動
-- 複数要素の一括リサイズ
-- 複数要素の一括回転
-- ストロークを含む簡易 group transform
-- Group / Ungroup
-- 左 / 横中央 / 右 / 上 / 縦中央 / 下揃え
-- 水平方向 / 垂直方向の等間隔配置
-- Bring to Front / Send to Back / Bring Forward / Send Backward
-- 単一選択ハンドル編集と複数選択 UI の共存
-- group を保持した Save / Load / PNG 出力
-- 矩形選択 / Group / Ungroup / 等間隔配置 / Undo/Redo のテスト
+- 最小レイヤー実装
+- レイヤー追加 / 削除 / 名前変更 / 表示切替 / ロック / 並び替え
+- active layer の切り替え
+- active layer への新規要素追加
+- visible / locked 状態を反映した選択 / 描画 / PNG 出力
+- レイヤー順と同一レイヤー内の重なり順の分離
+- `format.version = 4` の JSON 保存
+- `v3 / v2 / v1` の読込互換を維持した migration
+- レイヤー変更を含む Undo / Redo
+- layer round-trip、hidden / locked、layer add/delete のテスト
 
 ## 今回あえて入れなかった範囲
 
-- レイヤー
+- layer opacity / blend mode
+- レイヤー間ドラッグ移動
+- レイヤー間での要素コピー / 貼り付け
+- 複数レイヤー横断の同時選択 / 一括編集
 - 単一選択ストロークの専用リサイズ / 回転ハンドル
 - 塗り
 - 角丸矩形
@@ -30,7 +30,10 @@
 
 ## 次フェーズ候補
 
-- レイヤー管理
+- layer opacity / blend mode
+- レイヤー間ドラッグ移動
+- レイヤー間の要素移送 UI
+- 複数レイヤー横断の選択 / 整列
 - group 内部編集とネスト可視化
 - 単一選択ストロークの専用変形 UI
 - 塗り、角丸矩形、矢印付き線

@@ -32,8 +32,10 @@ pub fn render_document_pixmap(document: &PaintDocument) -> Result<Pixmap, Render
     let mut pixmap = Pixmap::new(width, height).ok_or(RenderError::InvalidCanvasSize)?;
     pixmap.fill(color_from_rgba(document.background));
 
-    for element in &document.elements {
-        render_element(&mut pixmap, element, document.background);
+    for layer in document.visible_layers() {
+        for element in &layer.elements {
+            render_element(&mut pixmap, element, document.background);
+        }
     }
 
     Ok(pixmap)
@@ -206,7 +208,7 @@ mod tests {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(64.0, 64.0),
             background: RgbaColor::white(),
-            elements: Vec::new(),
+            ..PaintDocument::default()
         };
 
         let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::charcoal(), 6.0);
@@ -266,7 +268,7 @@ mod tests {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(48.0, 48.0),
             background: RgbaColor::white(),
-            elements: Vec::new(),
+            ..PaintDocument::default()
         };
 
         document.push_shape(ShapeElement::new(
@@ -295,10 +297,10 @@ mod tests {
 
     #[test]
     fn render_group_elements_into_png() {
-        let document = PaintDocument {
-            canvas_size: CanvasSize::new(64.0, 64.0),
-            background: RgbaColor::white(),
-            elements: vec![PaintElement::Group(GroupElement {
+        let document = PaintDocument::from_flat_elements(
+            CanvasSize::new(64.0, 64.0),
+            RgbaColor::white(),
+            vec![PaintElement::Group(GroupElement {
                 elements: vec![
                     PaintElement::Shape(ShapeElement::new(
                         ShapeKind::Rectangle,
@@ -316,7 +318,7 @@ mod tests {
                     )),
                 ],
             })],
-        };
+        );
 
         let png = render_document_png(&document).expect("grouped document should render");
         let decoded = Pixmap::decode_png(&png).expect("group png should decode");
@@ -331,5 +333,40 @@ mod tests {
         });
 
         assert!(colored_pixels, "group rendering should contribute pixels");
+    }
+
+    #[test]
+    fn hidden_layers_do_not_render() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(32.0, 32.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(220, 64, 64, 255),
+            6.0,
+            PaintPoint::new(4.0, 4.0),
+            PaintPoint::new(28.0, 28.0),
+        ));
+        let (mut layered, hidden_id) = document.add_layer_document();
+        layered.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(64, 96, 220, 255),
+            6.0,
+            PaintPoint::new(4.0, 4.0),
+            PaintPoint::new(28.0, 28.0),
+        ));
+        layered = layered
+            .toggled_layer_visibility_document(hidden_id)
+            .expect("hide layer");
+
+        let pixmap = render_document_pixmap(&layered).expect("document should render");
+        let pixel = pixmap
+            .pixel(4, 16)
+            .expect("pixel should exist")
+            .demultiply();
+
+        assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (220, 64, 64));
     }
 }
