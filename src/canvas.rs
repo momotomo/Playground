@@ -13,14 +13,17 @@ const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const FIT_MARGIN: f32 = 24.0;
 const HIT_TOLERANCE_SCREEN: f32 = 8.0;
+const TOUCH_HIT_TOLERANCE_SCREEN: f32 = 18.0;
 const HANDLE_RADIUS: f32 = 6.5;
 const HANDLE_HIT_RADIUS: f32 = 12.0;
+const TOUCH_HANDLE_HIT_RADIUS: f32 = 22.0;
 const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 28.0;
 const MIN_SELECTION_TRANSFORM_EXTENT: f32 = 4.0;
 const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
 const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
 const MIN_GRID_VISIBLE_SPACING_SCREEN: f32 = 12.0;
 const GUIDE_HIT_TOLERANCE_SCREEN: f32 = 8.0;
+const TOUCH_GUIDE_HIT_TOLERANCE_SCREEN: f32 = 16.0;
 const SMART_GUIDE_TOLERANCE_SCREEN: f32 = 10.0;
 const RULER_THICKNESS: f32 = 20.0;
 const RULER_LABEL_MIN_SPACING_SCREEN: f32 = 56.0;
@@ -540,10 +543,11 @@ impl CanvasController {
         let preview_overlays = self.preview_overlay_elements();
         let selected_visual = self.selected_visual_elements(document);
         let hover_pos = ui.input(|input| input.pointer.hover_pos());
+        let touch_active = ui.input(|input| input.any_touches());
         let hovered_guide =
             if tool_settings.tool == CanvasToolKind::Select && self.selection_session.is_none() {
                 hover_pos.and_then(|pointer| {
-                    self.hit_guide(document, canvas_rect, self.view.zoom, pointer)
+                    self.hit_guide(document, canvas_rect, self.view.zoom, pointer, touch_active)
                         .map(|(index, _)| index)
                 })
             } else {
@@ -873,13 +877,37 @@ impl CanvasController {
         tool_settings: ToolSettings,
     ) -> CanvasOutput {
         let pointer = ui.input(|input| input.pointer.clone());
+        let multi_touch = ui.input(|input| input.multi_touch());
+        let touch_active = ui.input(|input| input.any_touches());
         let viewport = response.rect;
         let hover_pos = pointer.hover_pos();
-        let hovered = response.contains_pointer();
+        let hovered = response.contains_pointer()
+            || multi_touch.is_some_and(|gesture| viewport.contains(gesture.center_pos));
         let space_pan = ui.input(|input| input.key_down(egui::Key::Space));
         let extend_selection =
             ui.input(|input| input.modifiers.shift) || tool_settings.multi_select_mode;
         let mut output = CanvasOutput::default();
+
+        if self.active_preview.is_none()
+            && self.selection_session.is_none()
+            && let Some(gesture) = multi_touch
+            && gesture.num_touches >= 2
+            && viewport.contains(gesture.center_pos)
+        {
+            if matches!(self.interaction_mode, InteractionMode::Panning(_)) {
+                self.interaction_mode = InteractionMode::Idle;
+            }
+
+            let pan_changed = self.view.pan_by(gesture.translation_delta);
+            let zoom_changed = if gesture.zoom_delta != 1.0 {
+                self.view
+                    .zoom_around(gesture.zoom_delta, gesture.center_pos, document.canvas_size)
+            } else {
+                false
+            };
+            output.needs_repaint = pan_changed || zoom_changed;
+            return output;
+        }
 
         if self.active_preview.is_none() && self.selection_session.is_none() && hovered {
             let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
@@ -931,10 +959,10 @@ impl CanvasController {
                             self.begin_selection_interaction(
                                 document,
                                 canvas_rect,
-                                self.view.zoom,
                                 position,
                                 world,
                                 extend_selection,
+                                touch_active,
                             );
                             output.needs_repaint = true;
                         }
@@ -1011,14 +1039,19 @@ impl CanvasController {
         &mut self,
         document: &PaintDocument,
         canvas_rect: Rect,
-        zoom: f32,
         pointer_screen: Pos2,
         pointer_world: PaintPoint,
         extend_selection: bool,
+        touch_active: bool,
     ) {
         if !extend_selection
-            && let Some(control) =
-                self.hit_selection_control(document, canvas_rect, zoom, pointer_screen)
+            && let Some(control) = self.hit_selection_control(
+                document,
+                canvas_rect,
+                self.view.zoom,
+                pointer_screen,
+                touch_active,
+            )
         {
             match control {
                 ControlTarget::SingleResize(handle) => {
@@ -1040,7 +1073,7 @@ impl CanvasController {
                             base_shape: shape,
                             start_pointer_angle: pointer_screen_angle(
                                 canvas_rect,
-                                zoom,
+                                self.view.zoom,
                                 shape.rotation_center(),
                                 pointer_screen,
                             ),
@@ -1073,7 +1106,7 @@ impl CanvasController {
                             group_center: base_bounds.center(),
                             start_pointer_angle: pointer_screen_angle(
                                 canvas_rect,
-                                zoom,
+                                self.view.zoom,
                                 base_bounds.center(),
                                 pointer_screen,
                             ),
@@ -1086,7 +1119,12 @@ impl CanvasController {
             }
         }
 
-        let tolerance = HIT_TOLERANCE_SCREEN / self.view.zoom.max(MIN_ZOOM);
+        let tolerance = hit_tolerance_world(
+            self.view.zoom,
+            touch_active,
+            HIT_TOLERANCE_SCREEN,
+            TOUCH_HIT_TOLERANCE_SCREEN,
+        );
         if let Some(index) = document.hit_test(pointer_world, tolerance) {
             if extend_selection {
                 self.selection.toggle(document.active_layer_id(), index);
@@ -1100,8 +1138,13 @@ impl CanvasController {
             }
             self.begin_move_session(document, pointer_world);
         } else if !extend_selection
-            && let Some((guide_index, guide)) =
-                self.hit_guide(document, canvas_rect, zoom, pointer_screen)
+            && let Some((guide_index, guide)) = self.hit_guide(
+                document,
+                canvas_rect,
+                self.view.zoom,
+                pointer_screen,
+                touch_active,
+            )
         {
             self.begin_guide_move(guide_index, guide);
         } else {
@@ -1590,18 +1633,24 @@ impl CanvasController {
         canvas_rect: Rect,
         zoom: f32,
         pointer_screen: Pos2,
+        touch_active: bool,
     ) -> Option<ControlTarget> {
+        let handle_hit_radius = effective_screen_hit_tolerance(
+            touch_active,
+            HANDLE_HIT_RADIUS,
+            TOUCH_HANDLE_HIT_RADIUS,
+        );
         if self.selection_uses_group_controls(document) {
             let bounds = self.selection_control_bounds(document)?;
             for (handle, handle_screen) in bounds_control_handles_screen(bounds, canvas_rect, zoom)
             {
-                if handle_screen.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
+                if handle_screen.distance(pointer_screen) <= handle_hit_radius {
                     return Some(ControlTarget::GroupResize(handle));
                 }
             }
 
             let rotation_handle = bounds_rotation_handle_screen(bounds, canvas_rect, zoom)?;
-            if rotation_handle.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
+            if rotation_handle.distance(pointer_screen) <= handle_hit_radius {
                 return Some(ControlTarget::GroupRotate);
             }
             return None;
@@ -1610,13 +1659,13 @@ impl CanvasController {
         let (_, shape) = self.single_selected_shape_owned(document)?;
 
         for (handle, handle_screen) in shape_control_handles_screen(shape, canvas_rect, zoom) {
-            if handle_screen.distance(pointer_screen) <= HANDLE_HIT_RADIUS {
+            if handle_screen.distance(pointer_screen) <= handle_hit_radius {
                 return Some(ControlTarget::SingleResize(handle));
             }
         }
 
         let rotation_handle = shape_rotation_handle_screen(shape, canvas_rect, zoom)?;
-        (rotation_handle.distance(pointer_screen) <= HANDLE_HIT_RADIUS)
+        (rotation_handle.distance(pointer_screen) <= handle_hit_radius)
             .then_some(ControlTarget::SingleRotate)
     }
 
@@ -1626,11 +1675,17 @@ impl CanvasController {
         canvas_rect: Rect,
         zoom: f32,
         pointer_screen: Pos2,
+        touch_active: bool,
     ) -> Option<(usize, GuideLine)> {
         if !document.guides().visible {
             return None;
         }
 
+        let guide_tolerance = effective_screen_hit_tolerance(
+            touch_active,
+            GUIDE_HIT_TOLERANCE_SCREEN,
+            TOUCH_GUIDE_HIT_TOLERANCE_SCREEN,
+        );
         document
             .guides()
             .lines
@@ -1639,7 +1694,7 @@ impl CanvasController {
             .enumerate()
             .filter_map(|(index, guide)| {
                 let distance = guide_screen_distance(canvas_rect, zoom, guide, pointer_screen);
-                (distance <= GUIDE_HIT_TOLERANCE_SCREEN).then_some((index, guide, distance))
+                (distance <= guide_tolerance).then_some((index, guide, distance))
             })
             .min_by(|left, right| left.2.total_cmp(&right.2))
             .map(|(index, guide, _)| (index, guide))
@@ -1652,6 +1707,7 @@ impl CanvasController {
         canvas_rect: Rect,
         tool: CanvasToolKind,
     ) -> egui::CursorIcon {
+        let touch_active = ui.input(|input| input.any_touches());
         if matches!(self.interaction_mode, InteractionMode::Panning(_)) {
             egui::CursorIcon::Grabbing
         } else if let Some(session) = &self.selection_session {
@@ -1673,14 +1729,26 @@ impl CanvasController {
             egui::CursorIcon::Grab
         } else if tool == CanvasToolKind::Select {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
-                match self.hit_selection_control(document, canvas_rect, self.view.zoom, pointer) {
+                match self.hit_selection_control(
+                    document,
+                    canvas_rect,
+                    self.view.zoom,
+                    pointer,
+                    touch_active,
+                ) {
                     Some(ControlTarget::SingleResize(_)) | Some(ControlTarget::GroupResize(_)) => {
                         egui::CursorIcon::ResizeNwSe
                     }
                     Some(ControlTarget::SingleRotate) | Some(ControlTarget::GroupRotate) => {
                         egui::CursorIcon::Crosshair
                     }
-                    None => match self.hit_guide(document, canvas_rect, self.view.zoom, pointer) {
+                    None => match self.hit_guide(
+                        document,
+                        canvas_rect,
+                        self.view.zoom,
+                        pointer,
+                        touch_active,
+                    ) {
                         Some((_, guide)) => match guide.axis {
                             GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
                             GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
@@ -2345,7 +2413,7 @@ fn paint_empty_state(painter: &Painter, rect: Rect) {
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 62.0),
         Align2::CENTER_CENTER,
-        "選択ツールと複数選択モードで編集できます。手のひらツールならドラッグでパンできます。",
+        "選択ツールと複数選択モードで編集できます。手のひらツールや2本指ドラッグでパン、ピンチでズームできます。",
         FontId::proportional(16.0),
         Color32::from_gray(96),
     );
@@ -2920,11 +2988,24 @@ fn normalize_selection_indices(indices: &mut Vec<usize>) {
     indices.dedup();
 }
 
+fn effective_screen_hit_tolerance(touch_active: bool, base: f32, touch_minimum: f32) -> f32 {
+    if touch_active {
+        base.max(touch_minimum)
+    } else {
+        base
+    }
+}
+
+fn hit_tolerance_world(zoom: f32, touch_active: bool, base: f32, touch_minimum: f32) -> f32 {
+    effective_screen_hit_tolerance(touch_active, base, touch_minimum) / zoom.max(MIN_ZOOM)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasViewState, bounds_from_points, canvas_rect, group_resize_transform,
-        marquee_rect_is_visible, normalize_selection_indices, ruler_step_world, screen_to_canvas,
+        CanvasViewState, bounds_from_points, canvas_rect, effective_screen_hit_tolerance,
+        group_resize_transform, hit_tolerance_world, marquee_rect_is_visible,
+        normalize_selection_indices, ruler_step_world, screen_to_canvas,
         shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
         snap_point_for_document,
     };
@@ -3123,6 +3204,18 @@ mod tests {
 
         assert!((matched.target - 120.0).abs() < 0.01);
         assert!((matched.delta - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn touch_hit_tolerance_expands_for_touch_input() {
+        assert_eq!(effective_screen_hit_tolerance(false, 8.0, 18.0), 8.0);
+        assert_eq!(effective_screen_hit_tolerance(true, 8.0, 18.0), 18.0);
+    }
+
+    #[test]
+    fn touch_world_tolerance_scales_with_zoom() {
+        let tolerance = hit_tolerance_world(2.0, true, 8.0, 18.0);
+        assert!((tolerance - 9.0).abs() < f32::EPSILON);
     }
 
     #[test]
