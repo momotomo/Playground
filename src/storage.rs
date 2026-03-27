@@ -566,6 +566,27 @@ mod tests {
     }
 
     #[test]
+    fn layer_transfer_round_trip_preserves_destination_elements() {
+        let storage = StorageFacade::new();
+        let document = sample_document();
+        let source_layer_id = document.active_layer_id();
+        let (mut document, destination_layer_id) = document.add_layer_document();
+        assert!(document.set_active_layer(source_layer_id));
+
+        let (duplicated, _) = document
+            .duplicated_selection_to_layer_document(&[0, 1], destination_layer_id)
+            .expect("duplicate should succeed");
+        let encoded = storage.encode_document(&duplicated).expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, duplicated);
+        assert_eq!(
+            decoded.layer(destination_layer_id).unwrap().elements.len(),
+            2
+        );
+    }
+
+    #[test]
     fn decode_rejects_broken_json() {
         let storage = StorageFacade::new();
         let error = storage

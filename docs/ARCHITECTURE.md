@@ -120,6 +120,7 @@
 - 選択は `active layer + Vec<usize>` ベースで保持し、作品データには保存しない
 - 最小レイヤー実装では、選択と描画は active layer のみを対象にする
 - active layer が hidden または locked の場合、選択と描画は無効化する
+- レイヤー間移動 / 複製も active layer 上の選択を起点にし、完了後は destination layer を active にして選択を付け替える
 - 選択の追加 / 解除は `Shift + Click`
 - 空き領域ドラッグで矩形選択を行う
 - `Shift` 付き矩形選択は既存選択へ加算する
@@ -153,6 +154,8 @@
   - 選択 / 描画 / 編集対象にはしない
 - active layer の切替は UI 状態として扱い、Undo/Redo には積まない
 - layer add/delete/rename/visible/locked/order は document 変更として Undo/Redo に積む
+- 要素のレイヤー間移動 / 複製は visible かつ unlocked な destination layer にだけ許可する
+- レイヤー間移動 / 複製は destination layer の末尾へ要素を追加し、同一レイヤー内の既存重なり順ルールを維持する
 
 ## リサイズ / 回転操作の設計
 
@@ -243,7 +246,7 @@
 - 新規 stroke / 図形作成は `commit_element`
 - 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
 - 複数要素の Move / Resize / Rotate / Group / Ungroup / Align / Distribute / Reorder も `replace_document` を 1 回だけ積む
-- layer Add / Delete / Rename / Visibility / Lock / Move も `replace_document` を 1 回だけ積む
+- layer Add / Delete / Rename / Visibility / Lock / Move と selection の layer transfer も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -251,7 +254,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、layer add/delete/rename/visible/locked/order、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、layer add/delete/rename/visible/locked/order、selection の layer move / duplicate、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -266,6 +269,7 @@
 - group は `PaintElement::Group` として再帰的に保存する
 - レイヤー順は `document.layers[]` の配列順として保存する
 - レイヤー内重なり順は `layer.elements[]` の配列順として保存する
+- レイヤー間移動 / 複製の結果も追加メタデータなしでそのまま保存できるため、format version は `4` のまま維持している
 
 ## PNG 出力の責務
 

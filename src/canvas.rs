@@ -563,6 +563,14 @@ impl CanvasController {
         self.selection.len()
     }
 
+    pub fn selection_indices(&self) -> &[usize] {
+        self.selection.indices()
+    }
+
+    pub fn selection_layer_id(&self) -> Option<LayerId> {
+        self.selection.layer_id
+    }
+
     pub fn selection_contains_group(&self, document: &PaintDocument) -> bool {
         document.selection_contains_group(self.selection.indices())
     }

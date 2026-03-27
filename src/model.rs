@@ -1004,9 +1004,7 @@ impl PaintDocument {
     }
 
     pub fn active_layer_index(&self) -> Option<usize> {
-        self.layers
-            .iter()
-            .position(|layer| layer.id == self.active_layer_id)
+        self.layer_index(self.active_layer_id)
     }
 
     pub fn active_layer(&self) -> Option<&PaintLayer> {
@@ -1017,6 +1015,10 @@ impl PaintDocument {
 
     pub fn layer(&self, layer_id: LayerId) -> Option<&PaintLayer> {
         self.layers.iter().find(|layer| layer.id == layer_id)
+    }
+
+    fn layer_index(&self, layer_id: LayerId) -> Option<usize> {
+        self.layers.iter().position(|layer| layer.id == layer_id)
     }
 
     fn active_layer_mut(&mut self) -> Option<&mut PaintLayer> {
@@ -1030,6 +1032,10 @@ impl PaintDocument {
 
     pub fn active_layer_is_editable(&self) -> bool {
         self.active_layer().is_some_and(PaintLayer::is_editable)
+    }
+
+    pub fn layer_is_editable(&self, layer_id: LayerId) -> bool {
+        self.layer(layer_id).is_some_and(PaintLayer::is_editable)
     }
 
     pub fn set_active_layer(&mut self, layer_id: LayerId) -> bool {
@@ -1119,6 +1125,22 @@ impl PaintDocument {
         }
         next.layers.swap(index - 1, index);
         Some(next)
+    }
+
+    pub fn moved_selection_to_layer_document(
+        &self,
+        indices: &[usize],
+        destination_layer_id: LayerId,
+    ) -> Option<(Self, Vec<usize>)> {
+        self.transfer_selection_to_layer_document(indices, destination_layer_id, false)
+    }
+
+    pub fn duplicated_selection_to_layer_document(
+        &self,
+        indices: &[usize],
+        destination_layer_id: LayerId,
+    ) -> Option<(Self, Vec<usize>)> {
+        self.transfer_selection_to_layer_document(indices, destination_layer_id, true)
     }
 
     pub fn push_stroke(&mut self, stroke: Stroke) {
@@ -1598,6 +1620,55 @@ impl PaintDocument {
 
         changed.then_some(next)
     }
+
+    fn transfer_selection_to_layer_document(
+        &self,
+        indices: &[usize],
+        destination_layer_id: LayerId,
+        duplicate: bool,
+    ) -> Option<(Self, Vec<usize>)> {
+        if !self.active_layer_is_editable() || self.active_layer_id == destination_layer_id {
+            return None;
+        }
+
+        let source_layer = self.active_layer()?;
+        let selected_indices = normalize_indices(indices, source_layer.elements.len());
+        if selected_indices.is_empty() {
+            return None;
+        }
+
+        let destination_index = self.layer_index(destination_layer_id)?;
+        if !self.layers.get(destination_index)?.is_editable() {
+            return None;
+        }
+
+        let transferred_elements: Vec<_> = selected_indices
+            .iter()
+            .map(|index| source_layer.elements[*index].clone())
+            .collect();
+        let source_index = self.active_layer_index()?;
+        let mut next = self.clone();
+        let insertion_start = next.layers[destination_index].elements.len();
+        next.layers[destination_index]
+            .elements
+            .extend(transferred_elements.iter().cloned());
+
+        if !duplicate {
+            let selected_flags =
+                selection_flags(next.layers[source_index].elements.len(), &selected_indices);
+            next.layers[source_index].elements = next.layers[source_index]
+                .elements
+                .iter()
+                .enumerate()
+                .filter_map(|(index, element)| (!selected_flags[index]).then_some(element.clone()))
+                .collect();
+        }
+
+        next.active_layer_id = destination_layer_id;
+        let next_selection =
+            (insertion_start..insertion_start + transferred_elements.len()).collect();
+        Some((next, next_selection))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1895,8 +1966,8 @@ fn alignment_delta(
 mod tests {
     use super::{
         AlignmentKind, CanvasSize, DistributionKind, DocumentHistory, ElementBounds, GroupElement,
-        PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
-        ShapeKind, StackOrderCommand, Stroke, ToolKind,
+        LayerId, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement,
+        ShapeHandle, ShapeKind, StackOrderCommand, Stroke, ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -1914,6 +1985,24 @@ mod tests {
             PaintPoint::new(80.0, 20.0),
             PaintPoint::new(140.0, 70.0),
         )
+    }
+
+    fn layered_transfer_document() -> (PaintDocument, LayerId, LayerId) {
+        let mut document = PaintDocument::default();
+        let source_layer_id = document.active_layer_id();
+        document.push_shape(sample_shape());
+        document.push_stroke(sample_stroke());
+
+        let (mut next, destination_layer_id) = document.add_layer_document();
+        next.push_shape(ShapeElement::new(
+            ShapeKind::Ellipse,
+            RgbaColor::new(32, 96, 220, 255),
+            3.0,
+            PaintPoint::new(24.0, 24.0),
+            PaintPoint::new(60.0, 52.0),
+        ));
+        assert!(next.set_active_layer(source_layer_id));
+        (next, source_layer_id, destination_layer_id)
     }
 
     #[test]
@@ -2417,6 +2506,87 @@ mod tests {
             locked
                 .hit_test_rect(locked.selection_bounds(&[0]).unwrap())
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn move_selection_to_another_layer_tracks_undo_redo() {
+        let (document, source_layer_id, destination_layer_id) = layered_transfer_document();
+        let (moved, selection) = document
+            .moved_selection_to_layer_document(&[0, 1], destination_layer_id)
+            .expect("move to other layer should succeed");
+
+        assert_eq!(moved.active_layer_id(), destination_layer_id);
+        assert_eq!(selection, vec![1, 2]);
+        assert_eq!(moved.layer(source_layer_id).unwrap().elements.len(), 0);
+        assert_eq!(moved.layer(destination_layer_id).unwrap().elements.len(), 3);
+
+        let mut history = DocumentHistory::new(document.clone());
+        assert!(history.replace_document(moved.clone()));
+        assert_eq!(history.current(), &moved);
+        assert!(history.undo());
+        assert_eq!(history.current(), &document);
+        assert!(history.redo());
+        assert_eq!(history.current(), &moved);
+    }
+
+    #[test]
+    fn duplicate_selection_to_another_layer_tracks_undo_redo() {
+        let (document, source_layer_id, destination_layer_id) = layered_transfer_document();
+        let (duplicated, selection) = document
+            .duplicated_selection_to_layer_document(&[0, 1], destination_layer_id)
+            .expect("duplicate to other layer should succeed");
+
+        assert_eq!(duplicated.active_layer_id(), destination_layer_id);
+        assert_eq!(selection, vec![1, 2]);
+        assert_eq!(duplicated.layer(source_layer_id).unwrap().elements.len(), 2);
+        assert_eq!(
+            duplicated
+                .layer(destination_layer_id)
+                .unwrap()
+                .elements
+                .len(),
+            3
+        );
+
+        let mut history = DocumentHistory::new(document.clone());
+        assert!(history.replace_document(duplicated.clone()));
+        assert_eq!(history.current(), &duplicated);
+        assert!(history.undo());
+        assert_eq!(history.current(), &document);
+        assert!(history.redo());
+        assert_eq!(history.current(), &duplicated);
+    }
+
+    #[test]
+    fn hidden_or_locked_destination_rejects_layer_transfer() {
+        let (document, _, destination_layer_id) = layered_transfer_document();
+        let hidden = document
+            .toggled_layer_visibility_document(destination_layer_id)
+            .expect("hide destination layer");
+        assert!(
+            hidden
+                .moved_selection_to_layer_document(&[0], destination_layer_id)
+                .is_none()
+        );
+        assert!(
+            hidden
+                .duplicated_selection_to_layer_document(&[0], destination_layer_id)
+                .is_none()
+        );
+
+        let locked = document
+            .toggled_layer_locked_document(destination_layer_id)
+            .expect("lock destination layer");
+        assert!(
+            locked
+                .moved_selection_to_layer_document(&[0], destination_layer_id)
+                .is_none()
+        );
+        assert!(
+            locked
+                .duplicated_selection_to_layer_document(&[0], destination_layer_id)
+                .is_none()
         );
     }
 }
