@@ -147,6 +147,7 @@ pub struct PaintApp {
     saved_snapshot: PaintDocument,
     layer_name_draft: String,
     layer_name_draft_for: Option<LayerId>,
+    show_help: bool,
     #[cfg(target_arch = "wasm32")]
     pending_web_task: Option<PendingWebStorageTask>,
 }
@@ -163,12 +164,13 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Shift+Click or drag a marquee to multi-select, then group, transform, or arrange elements.",
+                "Ready to draw. Open Help for the basics, then drag with Brush or a shape tool.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
             layer_name_draft: "Layer 1".to_owned(),
             layer_name_draft_for: Some(1),
+            show_help: false,
             #[cfg(target_arch = "wasm32")]
             pending_web_task: None,
         }
@@ -230,14 +232,19 @@ impl PaintApp {
     }
 
     fn show_file_summary(&self, ui: &mut egui::Ui) {
-        let dirty_suffix = if self.is_dirty() { " *" } else { "" };
-        ui.label(RichText::new("File").strong());
-        ui.label(format!("{}{}", self.document_name, dirty_suffix));
+        let dirty_suffix = if self.is_dirty() {
+            "Unsaved changes"
+        } else {
+            "Saved"
+        };
+        ui.label(RichText::new("Document").strong());
+        ui.label(self.document_name.as_str());
+        ui.small(dirty_suffix);
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Tools");
-        ui.label("Select existing elements to edit, or pick a drawing tool and drag.");
+        ui.heading("Toolbox");
+        ui.label("Pick a tool, then draw or edit on the active layer.");
         ui.add_space(8.0);
 
         for tool in [
@@ -309,11 +316,11 @@ impl PaintApp {
         self.show_canvas_aids(ui);
 
         ui.separator();
-        ui.label(RichText::new("Storage").strong());
+        ui.label(RichText::new("Files & Export").strong());
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
-        ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG, Group, Ungroup");
+        ui.small("Top bar: Save JSON, Open JSON, Export PNG, Help");
     }
 
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
@@ -730,14 +737,14 @@ impl PaintApp {
             ui.separator();
 
             if ui
-                .add_enabled(can_file_io, egui::Button::new("Save"))
+                .add_enabled(can_file_io, egui::Button::new("Save JSON"))
                 .clicked()
             {
                 self.save_document(ctx);
             }
 
             if ui
-                .add_enabled(can_file_io, egui::Button::new("Load"))
+                .add_enabled(can_file_io, egui::Button::new("Open JSON"))
                 .clicked()
             {
                 self.load_document(ctx);
@@ -834,8 +841,45 @@ impl PaintApp {
             }
 
             ui.separator();
+            if ui
+                .button(if self.show_help { "Hide Help" } else { "Help" })
+                .clicked()
+            {
+                self.show_help = !self.show_help;
+            }
+
+            ui.separator();
+            ui.label(RichText::new("Status").small().strong());
             ui.label(self.status_message.rich_text());
         });
+    }
+
+    fn show_help_window(&mut self, ctx: &egui::Context) {
+        if !self.show_help {
+            return;
+        }
+
+        egui::Window::new("Quick Help")
+            .open(&mut self.show_help)
+            .resizable(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Start Here").strong());
+                ui.small("Draw: Pick Brush, Rectangle, Ellipse, or Line, then drag on the canvas.");
+                ui.small("Select: Use Select to click an element. Corner handles resize, the round handle rotates.");
+                ui.small("Multi-select: Shift+Click or drag a marquee. Then move, group, align, distribute, or reorder.");
+                ui.small("Pan & Zoom: Space+Drag or Middle Drag pans. Ctrl/Cmd+Wheel or +/- zooms. Ctrl/Cmd+0 resets.");
+                ui.small("Files: Save JSON keeps editing state, Open JSON restores it, Export PNG creates a shareable image.");
+                ui.small("Layers: Draw on the active visible, unlocked layer. Hidden layers do not export.");
+                #[cfg(target_arch = "wasm32")]
+                ui.small("Web: Save/Open/Export uses browser download or file picker flows on GitHub Pages.");
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("Shortcuts").strong());
+                ui.small("Undo: Ctrl/Cmd+Z · Redo: Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y");
+                ui.small("Save JSON: Ctrl/Cmd+S · Open JSON: Ctrl/Cmd+O · Export PNG: Ctrl/Cmd+Shift+E");
+                ui.small("Tools: V Select · B Brush · R Rectangle · O Ellipse · L Line · E Eraser");
+            });
     }
 
     fn perform_undo(&mut self) {
@@ -1325,7 +1369,7 @@ impl PaintApp {
     fn finish_save(&mut self, saved: SavedDocument) {
         self.document_name = saved.file_name;
         self.saved_snapshot = self.document().clone();
-        self.set_info(format!("Saved {}.", self.document_name));
+        self.set_info(format!("Saved editable JSON as {}.", self.document_name));
     }
 
     fn finish_load(&mut self, loaded: LoadedDocument) {
@@ -1336,22 +1380,67 @@ impl PaintApp {
         self.document_name = loaded.file_name;
         self.saved_snapshot = loaded.document;
         self.sync_layer_name_draft();
-        self.set_info(format!("Loaded {}.", self.document_name));
+        self.set_info(format!("Opened {}.", self.document_name));
     }
 
     fn finish_export(&mut self, exported: ExportedImage) {
-        self.set_info(format!("Exported {}.", exported.file_name));
+        self.set_info(format!("Exported PNG as {}.", exported.file_name));
+    }
+
+    fn storage_action_title(action: &'static str) -> &'static str {
+        match action {
+            "save" => "Save JSON",
+            "load" => "Open JSON",
+            "export" => "Export PNG",
+            _ => "File action",
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn storage_pending_message(action: &'static str) -> &'static str {
+        match action {
+            "save" => "Browser save flow opened. Pick where to save the editable JSON.",
+            "load" => "Browser file picker opened. Choose a .paint.json document.",
+            "export" => "Preparing the PNG download in the browser...",
+            _ => "Waiting for the browser file flow...",
+        }
+    }
+
+    fn storage_error_message(action: &'static str, error: &StorageError) -> String {
+        let label = Self::storage_action_title(action);
+        match error {
+            StorageError::Cancelled => format!("{label} canceled."),
+            StorageError::EmptyFile => {
+                format!("{label} failed. The selected file was empty.")
+            }
+            StorageError::UnsupportedFormat(_) => {
+                format!("{label} failed. Pick a .paint.json document from this app.")
+            }
+            StorageError::UnsupportedVersion(_) => {
+                format!("{label} failed. This document version is not supported here yet.")
+            }
+            StorageError::Deserialize(_) => {
+                format!("{label} failed. The file could not be read as a paint document.")
+            }
+            StorageError::Serialize(_) => {
+                format!("{label} failed while preparing the file.")
+            }
+            StorageError::Render(_) => {
+                format!("{label} failed while rendering the canvas.")
+            }
+            StorageError::Io(details) => format!("{label} failed: {details}"),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn report_storage_result(&mut self, action: &'static str, result: Result<(), StorageError>) {
         if let Err(error) = result {
-            match error {
+            match &error {
                 StorageError::Cancelled => {
-                    self.set_info(format!("{} cancelled.", capitalize(action)));
+                    self.set_info(Self::storage_error_message(action, &error));
                 }
-                other => {
-                    self.set_error(format!("{} failed: {other}", capitalize(action)));
+                _ => {
+                    self.set_error(Self::storage_error_message(action, &error));
                 }
             }
         }
@@ -1389,7 +1478,7 @@ impl PaintApp {
                 label: "save",
                 slot,
             });
-            self.set_info("Waiting for the browser save flow...");
+            self.set_info(Self::storage_pending_message("save"));
         }
     }
 
@@ -1423,7 +1512,7 @@ impl PaintApp {
                 label: "load",
                 slot,
             });
-            self.set_info("Waiting for the browser file picker...");
+            self.set_info(Self::storage_pending_message("load"));
         }
     }
 
@@ -1460,7 +1549,7 @@ impl PaintApp {
                 label: "export",
                 slot,
             });
-            self.set_info("Preparing the PNG download...");
+            self.set_info(Self::storage_pending_message("export"));
         }
     }
 
@@ -1583,12 +1672,14 @@ impl PaintApp {
                 Ok(WebStorageResult::Saved(saved)) => self.finish_save(saved),
                 Ok(WebStorageResult::Loaded(loaded)) => self.finish_load(loaded),
                 Ok(WebStorageResult::Exported(exported)) => self.finish_export(exported),
-                Err(StorageError::Cancelled) => {
-                    self.set_info(format!("{} cancelled.", capitalize(task.label)));
-                }
-                Err(error) => {
-                    self.set_error(format!("{} failed: {error}", capitalize(task.label)));
-                }
+                Err(error) => match &error {
+                    StorageError::Cancelled => {
+                        self.set_info(Self::storage_error_message(task.label, &error));
+                    }
+                    _ => {
+                        self.set_error(Self::storage_error_message(task.label, &error));
+                    }
+                },
             }
         } else {
             self.pending_web_task = Some(task);
@@ -1637,6 +1728,8 @@ impl eframe::App for PaintApp {
                 self.commit_element(element);
             }
         });
+
+        self.show_help_window(ctx);
     }
 }
 
@@ -1659,13 +1752,4 @@ fn tool_hint(tool: CanvasToolKind) -> &'static str {
         }
         CanvasToolKind::Line => "Drag from a start point to an end point on the active layer.",
     }
-}
-
-fn capitalize(action: &str) -> String {
-    let mut chars = action.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-
-    first.to_uppercase().chain(chars).collect()
 }
