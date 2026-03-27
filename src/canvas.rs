@@ -2565,7 +2565,7 @@ fn paint_marquee_overlay(painter: &Painter, rect: Rect, zoom: f32, bounds: Eleme
 }
 
 fn paint_empty_state(painter: &Painter, rect: Rect) {
-    let panel = Rect::from_center_size(rect.center(), Vec2::new(520.0, 132.0));
+    let panel = Rect::from_center_size(rect.center(), Vec2::new(500.0, 116.0));
     painter.rect_filled(
         panel,
         12.0,
@@ -2580,21 +2580,21 @@ fn paint_empty_state(painter: &Painter, rect: Rect) {
     painter.text(
         Pos2::new(panel.center().x, panel.top() + 30.0),
         Align2::CENTER_CENTER,
-        "ブラシ、四角形、楕円、直線のどれかを選んでドラッグしてください。",
+        "ブラシか図形ツールを選んで、まず 1 つ描いてみましょう。",
         FontId::proportional(22.0),
         Color32::from_gray(72),
     );
     painter.text(
-        Pos2::new(panel.center().x, panel.top() + 62.0),
+        Pos2::new(panel.center().x, panel.top() + 60.0),
         Align2::CENTER_CENTER,
-        "選択ツールと複数選択モードで編集できます。タブレットでは指で2本指パン / ピンチズーム、長押しで選択にも入れます。",
+        "選択ツールで動かせます。詳しい流れはヘルプやミニチュートリアルで確認できます。",
         FontId::proportional(16.0),
         Color32::from_gray(96),
     );
     painter.text(
-        Pos2::new(panel.center().x, panel.top() + 90.0),
+        Pos2::new(panel.center().x, panel.top() + 86.0),
         Align2::CENTER_CENTER,
-        "JSON保存は再編集用、PNG書き出しは共有用です。迷ったらヘルプを開いてください。",
+        "JSON保存は再編集用、PNG書き出しは共有用です。",
         FontId::proportional(15.0),
         Color32::from_gray(110),
     );

@@ -1,4 +1,5 @@
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
+use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
@@ -20,6 +21,7 @@ const MAX_BRUSH_WIDTH: f32 = 48.0;
 const GRID_SPACING_PRESETS: [f32; 6] = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
 const GRID_SPACING_STEP: f32 = 8.0;
 const TOOL_BUTTON_HEIGHT: f32 = 36.0;
+const APP_UI_STATE_KEY: &str = "paint_app_ui_state";
 
 fn shortcut_undo() -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
@@ -137,6 +139,25 @@ enum WebStorageResult {
     Exported(ExportedImage),
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct UiStatePersistence {
+    tutorial_dismissed: bool,
+}
+
+#[derive(Clone, Default)]
+struct TutorialOverlayState {
+    visible: bool,
+    step_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TutorialStepContent {
+    title: &'static str,
+    body: &'static str,
+    action: &'static str,
+}
+
 pub struct PaintApp {
     history: DocumentHistory,
     canvas: CanvasController,
@@ -152,6 +173,9 @@ pub struct PaintApp {
     layer_name_draft: String,
     layer_name_draft_for: Option<LayerId>,
     show_help: bool,
+    ui_state: UiStatePersistence,
+    ui_state_dirty: bool,
+    tutorial: TutorialOverlayState,
     #[cfg(target_arch = "wasm32")]
     pending_web_task: Option<PendingWebStorageTask>,
 }
@@ -177,6 +201,9 @@ impl Default for PaintApp {
             layer_name_draft: "レイヤー 1".to_owned(),
             layer_name_draft_for: Some(1),
             show_help: false,
+            ui_state: UiStatePersistence::default(),
+            ui_state_dirty: false,
+            tutorial: TutorialOverlayState::default(),
             #[cfg(target_arch = "wasm32")]
             pending_web_task: None,
         }
@@ -187,7 +214,20 @@ impl PaintApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_japanese_fonts(&cc.egui_ctx);
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        Self::default()
+        let ui_state = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, APP_UI_STATE_KEY))
+            .unwrap_or_default();
+        let mut app = Self {
+            ui_state,
+            ..Self::default()
+        };
+        app.tutorial.visible = !app.ui_state.tutorial_dismissed;
+        if app.tutorial.visible {
+            app.status_message =
+                StatusMessage::info("最初の操作はミニチュートリアルで確認できます。");
+        }
+        app
     }
 
     fn document(&self) -> &PaintDocument {
@@ -279,6 +319,35 @@ impl PaintApp {
         }
     }
 
+    fn persist_ui_state_if_needed(&mut self, frame: &mut eframe::Frame) {
+        if !self.ui_state_dirty {
+            return;
+        }
+
+        if let Some(storage) = frame.storage_mut() {
+            eframe::set_value(storage, APP_UI_STATE_KEY, &self.ui_state);
+            self.ui_state_dirty = false;
+        }
+    }
+
+    fn open_tutorial(&mut self) {
+        self.show_help = false;
+        self.tutorial.visible = true;
+        self.tutorial.step_index = 0;
+        self.set_info("ミニチュートリアルを開きました。短く流れを確認できます。");
+    }
+
+    fn close_tutorial(&mut self, completed: bool) {
+        self.tutorial.visible = false;
+        self.ui_state.tutorial_dismissed = true;
+        self.ui_state_dirty = true;
+        self.set_info(if completed {
+            "チュートリアルを閉じました。必要ならヘルプからもう一度開けます。"
+        } else {
+            "チュートリアルをスキップしました。必要ならヘルプから開けます。"
+        });
+    }
+
     fn show_file_summary(&self, ui: &mut egui::Ui) {
         let dirty_suffix = if self.is_dirty() {
             "未保存の変更あり"
@@ -291,48 +360,60 @@ impl PaintApp {
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ツール");
-        ui.label("ツールを選んで、現在のレイヤーに描くか編集します。");
+        ui.horizontal(|ui| {
+            ui.heading("ツール");
+            let response = help_icon_button(
+                ui,
+                "描く / 選ぶ / 動かすツールを切り替えます。詳しい流れはヘルプやチュートリアルで確認できます。",
+            );
+            if response.clicked() {
+                self.set_info("ツールを切り替えて、現在のレイヤーを描いたり編集したりできます。");
+            }
+        });
+        ui.label("よく使う操作だけを置いています。迷ったらヘルプを開けます。");
         ui.add_space(8.0);
 
-        ui.label(RichText::new("タブレット向け").strong());
-        if ui
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("タブレット向け").strong());
+            let response = help_icon_button(
+                ui,
+                "キーボードなしで複数選択したり、指で描く / パンするための切り替えです。",
+            );
+            if response.clicked() {
+                self.set_info(
+                    "タブレットでは複数選択モード、手のひら、指でも描くを切り替えて使えます。",
+                );
+            }
+        });
+        let multi_select_response = ui
             .add_sized(
                 [ui.available_width(), TOOL_BUTTON_HEIGHT],
                 egui::Button::new("複数選択モード").selected(self.multi_select_mode),
             )
-            .clicked()
-        {
+            .on_hover_text("タップ / クリックで追加選択や解除をします。");
+        if multi_select_response.clicked() {
             self.set_multi_select_mode(!self.multi_select_mode);
         }
-        ui.small("オンの間は、選択ツールでタップすると追加選択 / 解除できます。");
         if self.multi_select_mode && self.canvas.selection_count() > 0 {
-            if ui
+            let keep_selection_response = ui
                 .add_sized(
                     [ui.available_width(), TOOL_BUTTON_HEIGHT],
                     egui::Button::new("選択を保ったまま移動へ"),
                 )
-                .clicked()
-            {
+                .on_hover_text("複数選択を保ったまま通常のドラッグ移動に戻します。");
+            if keep_selection_response.clicked() {
                 self.exit_multi_select_mode_for_editing();
             }
-            ui.small(
-                "選び終わったらこのボタンで通常の選択に戻り、そのままドラッグで移動できます。",
-            );
         }
-        if ui
+        let finger_draw_response = ui
             .add_sized(
                 [ui.available_width(), TOOL_BUTTON_HEIGHT],
                 egui::Button::new("指でも描く").selected(self.finger_draw_enabled),
             )
-            .clicked()
-        {
+            .on_hover_text("指でもそのまま描画できるようにします。");
+        if finger_draw_response.clicked() {
             self.set_finger_draw_enabled(!self.finger_draw_enabled);
         }
-        ui.small(
-            "オフのときは、指はパン / 長押し選択寄り、ペンやマウスは描画寄りの挙動になります。",
-        );
-        ui.small("タブレットではピンチでズーム、2本指ドラッグでパンできます。");
         ui.add_space(8.0);
 
         for tool in [
@@ -345,15 +426,15 @@ impl PaintApp {
             CanvasToolKind::Eraser,
         ] {
             let is_selected = self.active_tool == tool;
-            if ui
+            let response = ui
                 .add_sized(
                     [ui.available_width(), TOOL_BUTTON_HEIGHT],
                     egui::Button::new(tool.label()).selected(is_selected),
                 )
-                .clicked()
-                && !is_selected
-            {
-                self.set_active_tool(tool, false);
+                .on_hover_text(tool_button_tooltip(tool));
+            if response.clicked() && !is_selected {
+                self.active_tool = tool;
+                self.set_info(format!("{}: {}", tool.label(), tool_button_tooltip(tool)));
             }
         }
 
@@ -380,22 +461,11 @@ impl PaintApp {
 
         ui.separator();
         ui.label(RichText::new("現在のモード").strong());
-        ui.small(tool_hint(self.active_tool));
+        ui.small(format!("ツール: {}", self.active_tool.label()));
         ui.small(format!(
-            "複数選択モード: {}",
-            if self.multi_select_mode {
-                "オン"
-            } else {
-                "オフ"
-            }
-        ));
-        ui.small(format!(
-            "指でも描く: {}",
-            if self.finger_draw_enabled {
-                "オン"
-            } else {
-                "オフ"
-            }
+            "複数選択モード {} / 指でも描く {}",
+            on_off_label(self.multi_select_mode),
+            on_off_label(self.finger_draw_enabled),
         ));
         ui.small(self.canvas.selection_summary(self.document()));
 
@@ -417,25 +487,26 @@ impl PaintApp {
         if let Some(active_layer) = self.document().active_layer() {
             ui.label(format!("現在のレイヤー: {}", active_layer.name));
         }
-        ui.small("図形: 角ハンドルでサイズ変更、丸いハンドルで回転します");
-        ui.small("ストローク: 単体 / 複数変形では簡易的な移動 / 拡大縮小 / 回転を使います");
-        ui.small("複数選択: Shift+Click、複数選択モード、またはドラッグ選択");
-        ui.small("複数編集: 移動、グループ化、サイズ変更 / 回転、整列、等間隔、重なり順変更");
-        ui.small("パン: 手のひらツール、Space+Drag、または中ボタンドラッグ");
-        ui.small("タブレット: ピンチでズーム、2本指ドラッグでパン");
-        ui.small("タブレット: 指は長押しで選択に入りやすく、必要なら「指でも描く」で描画に切り替えられます");
-        ui.small("表示リセット: Ctrl/Cmd + 0");
-        ui.small("ヒント: タブレットでは複数選択モード、手のひらツール、ピンチズームが便利です。");
+        ui.small("詳しい操作はボタンのツールチップかヘルプで確認できます。");
 
         ui.separator();
         self.show_canvas_aids(ui);
 
         ui.separator();
-        ui.label(RichText::new("保存と書き出し").strong());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("保存と書き出し").strong());
+            let response = help_icon_button(
+                ui,
+                "JSON保存は再編集用、PNG書き出しは共有用です。上部バーから使えます。",
+            );
+            if response.clicked() {
+                self.set_info(
+                    "JSON保存は続きから再編集、PNG書き出しは画像として共有したいときに使います。",
+                );
+            }
+        });
+        ui.small("JSONは再編集用、PNGは共有用です。");
         ui.small(self.storage.storage_strategy_summary());
-        ui.small(self.storage.editable_format_label());
-        ui.small(self.storage.planned_export_format());
-        ui.small("上部バー: JSON保存 / JSONを開く / PNG書き出し / ヘルプ");
     }
 
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
@@ -468,7 +539,18 @@ impl PaintApp {
             .collect();
         let mut pending_action = None;
 
-        ui.label(RichText::new("配置補助").strong());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("配置補助").strong());
+            let response = help_icon_button(
+                ui,
+                "グリッド、ガイド、ルーラー、スナップの切り替えです。細かい位置合わせに使います。",
+            );
+            if response.clicked() {
+                self.set_info(
+                    "配置補助ではグリッド、ガイド、ルーラー、スマートガイドを切り替えられます。",
+                );
+            }
+        });
         ui.small(format!(
             "ルーラー: {} · グリッド: {:.0}px · スマートガイド: {} · ガイド: {}本",
             if rulers_visible {
@@ -484,20 +566,22 @@ impl PaintApp {
             },
             guides.len(),
         ));
-        ui.small("移動中はグリッド / ガイド / スマートガイドに吸着できます。表示中のガイドはドラッグで動かせます。");
 
         ui.add_enabled_ui(!has_canvas_interaction, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let mut show_rulers = rulers_visible;
-                if ui.checkbox(&mut show_rulers, "ルーラーを表示").changed() {
+                let rulers_response = ui
+                    .checkbox(&mut show_rulers, "ルーラーを表示")
+                    .on_hover_text("キャンバスの上端と左端に目盛りを表示します。");
+                if rulers_response.changed() {
                     pending_action = Some(AidAction::ToggleRulersVisible);
                 }
 
                 let mut show_smart_guides = smart_guides_visible;
-                if ui
+                let smart_guides_response = ui
                     .checkbox(&mut show_smart_guides, "スマートガイド")
-                    .changed()
-                {
+                    .on_hover_text("移動中に他の要素へそろう位置を線で示します。");
+                if smart_guides_response.changed() {
                     pending_action = Some(AidAction::ToggleSmartGuidesVisible);
                 }
             });
@@ -506,22 +590,36 @@ impl PaintApp {
 
             ui.horizontal_wrapped(|ui| {
                 let mut show_grid = grid.visible;
-                if ui.checkbox(&mut show_grid, "グリッドを表示").changed() {
+                let grid_response = ui
+                    .checkbox(&mut show_grid, "グリッドを表示")
+                    .on_hover_text("キャンバスに方眼を表示します。");
+                if grid_response.changed() {
                     pending_action = Some(AidAction::ToggleGridVisible);
                 }
 
                 let mut snap_grid = grid.snap_enabled;
-                if ui.checkbox(&mut snap_grid, "グリッドに吸着").changed() {
+                let snap_grid_response = ui
+                    .checkbox(&mut snap_grid, "グリッドに吸着")
+                    .on_hover_text("移動やリサイズの位置をグリッドに合わせます。");
+                if snap_grid_response.changed() {
                     pending_action = Some(AidAction::ToggleGridSnap);
                 }
 
                 ui.label(RichText::new(format!("{:.0}px", grid.spacing)).monospace());
-                if ui.small_button("-").clicked() {
+                if ui
+                    .small_button("-")
+                    .on_hover_text("グリッド間隔を細かくします。")
+                    .clicked()
+                {
                     pending_action = Some(AidAction::SetGridSpacing(
                         (grid.spacing - GRID_SPACING_STEP).max(GRID_SPACING_STEP),
                     ));
                 }
-                if ui.small_button("+").clicked() {
+                if ui
+                    .small_button("+")
+                    .on_hover_text("グリッド間隔を広げます。")
+                    .clicked()
+                {
                     pending_action =
                         Some(AidAction::SetGridSpacing(grid.spacing + GRID_SPACING_STEP));
                 }
@@ -531,10 +629,10 @@ impl PaintApp {
                 ui.small("間隔プリセット:");
                 for preset in GRID_SPACING_PRESETS {
                     let is_current = (grid.spacing - preset).abs() < 0.1;
-                    if ui
+                    let response = ui
                         .selectable_label(is_current, format!("{preset:.0}px"))
-                        .clicked()
-                    {
+                        .on_hover_text("グリッド間隔をこの値に切り替えます。");
+                    if response.clicked() {
                         pending_action = Some(AidAction::SetGridSpacing(preset));
                     }
                 }
@@ -544,12 +642,18 @@ impl PaintApp {
 
             ui.horizontal_wrapped(|ui| {
                 let mut show_guides = guides_visible;
-                if ui.checkbox(&mut show_guides, "ガイドを表示").changed() {
+                let guides_response = ui
+                    .checkbox(&mut show_guides, "ガイドを表示")
+                    .on_hover_text("追加した横ガイド / 縦ガイドを表示します。");
+                if guides_response.changed() {
                     pending_action = Some(AidAction::ToggleGuidesVisible);
                 }
 
                 let mut snap_guides = guides_snap;
-                if ui.checkbox(&mut snap_guides, "ガイドに吸着").changed() {
+                let snap_guides_response = ui
+                    .checkbox(&mut snap_guides, "ガイドに吸着")
+                    .on_hover_text("移動やリサイズの位置をガイドに合わせます。");
+                if snap_guides_response.changed() {
                     pending_action = Some(AidAction::ToggleGuidesSnap);
                 }
 
@@ -557,29 +661,36 @@ impl PaintApp {
             });
 
             ui.horizontal(|ui| {
-                if ui.button("横ガイド追加").clicked() {
+                if ui
+                    .button("横ガイド追加")
+                    .on_hover_text("横方向のガイドを 1 本追加します。")
+                    .clicked()
+                {
                     pending_action = Some(AidAction::AddGuide(GuideAxis::Horizontal));
                 }
-                if ui.button("縦ガイド追加").clicked() {
+                if ui
+                    .button("縦ガイド追加")
+                    .on_hover_text("縦方向のガイドを 1 本追加します。")
+                    .clicked()
+                {
                     pending_action = Some(AidAction::AddGuide(GuideAxis::Vertical));
                 }
             });
         });
 
         if has_canvas_interaction {
-            ui.small("編集中はグリッドやガイドの設定を変更できません。");
+            ui.small("編集中は配置補助の切り替えを一時停止します。");
         }
 
         if guides.is_empty() {
-            ui.small(
-                "ガイドはまだありません。追加すると、選択の中心かキャンバス中央に置かれます。",
-            );
+            ui.small("ガイドはまだありません。必要なら追加できます。");
         } else {
             for (index, guide) in guides {
                 ui.horizontal(|ui| {
                     ui.small(format!("{} {:.0}px", guide.axis.label(), guide.position));
                     if ui
                         .add_enabled(!has_canvas_interaction, egui::Button::new("削除"))
+                        .on_hover_text("このガイドを削除します。")
                         .clicked()
                     {
                         pending_action = Some(AidAction::RemoveGuide(index));
@@ -646,20 +757,31 @@ impl PaintApp {
             .map(|layer| (layer.id, layer.name.clone(), layer.visible, layer.locked));
         let mut pending_action = None;
 
-        ui.heading("レイヤー");
-        ui.small("選択と描画の対象は、表示中かつロックされていない現在のレイヤーです。");
-        ui.small(
-            "移動 / 複製は、現在のレイヤーで選択した要素を表示中かつ編集可能なレイヤーへ送ります。",
-        );
+        ui.horizontal(|ui| {
+            ui.heading("レイヤー");
+            let response = help_icon_button(
+                ui,
+                "現在のレイヤーだけ編集できます。非表示は書き出しに含まれず、ロック中は編集できません。",
+            );
+            if response.clicked() {
+                self.set_info("レイヤーでは表示、ロック、順序、レイヤー間の移動 / 複製を管理できます。");
+            }
+        });
+        ui.small("現在のレイヤーだけ描いたり編集したりできます。");
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            if ui.button("レイヤー追加").clicked() {
+            if ui
+                .button("レイヤー追加")
+                .on_hover_text("新しいレイヤーを追加して、作業レイヤーに切り替えます。")
+                .clicked()
+            {
                 pending_action = Some(LayerAction::Add);
             }
 
             if ui
                 .add_enabled(layer_count > 1, egui::Button::new("レイヤー削除"))
+                .on_hover_text("現在のレイヤーを削除します。最低 1 レイヤーは残ります。")
                 .clicked()
             {
                 pending_action = Some(LayerAction::DeleteActive);
@@ -668,10 +790,8 @@ impl PaintApp {
 
         if selection_count > 0 {
             ui.small(format!(
-                "現在のレイヤーで {selection_count} 個選択中です。移動先のレイヤーで「ここへ移動」または「ここへ複製」を使えます。"
+                "{selection_count} 個選択中です。移動先のレイヤーで「ここへ移動」または「ここへ複製」を使えます。"
             ));
-        } else {
-            ui.small("現在のレイヤーで要素を選ぶと、別のレイヤーへ移動したり複製したりできます。");
         }
 
         ui.separator();
@@ -696,7 +816,7 @@ impl PaintApp {
 
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
+                    let active_response = ui
                         .selectable_label(
                             is_active,
                             RichText::new(name.as_str()).strong().size(if is_active {
@@ -705,13 +825,18 @@ impl PaintApp {
                                 14.0
                             }),
                         )
-                        .clicked()
-                    {
+                        .on_hover_text("このレイヤーを作業レイヤーにします。");
+                    if active_response.clicked() {
                         pending_action = Some(LayerAction::SetActive(layer_id));
                     }
 
                     if ui
                         .small_button(if visible { "非表示" } else { "表示" })
+                        .on_hover_text(if visible {
+                            "このレイヤーを隠します。"
+                        } else {
+                            "このレイヤーを再表示します。"
+                        })
                         .clicked()
                     {
                         pending_action = Some(LayerAction::ToggleVisibility(layer_id));
@@ -722,6 +847,11 @@ impl PaintApp {
                             "ロック解除"
                         } else {
                             "ロック"
+                        })
+                        .on_hover_text(if locked {
+                            "このレイヤーを編集できるように戻します。"
+                        } else {
+                            "このレイヤーを表示だけにして編集不可にします。"
                         })
                         .clicked()
                     {
@@ -740,10 +870,18 @@ impl PaintApp {
                         ui.label(RichText::new("ロック中").small());
                     }
                     ui.small(format!("{element_count}個"));
-                    if ui.small_button("上へ").clicked() {
+                    if ui
+                        .small_button("上へ")
+                        .on_hover_text("レイヤー順をひとつ上げます。")
+                        .clicked()
+                    {
                         pending_action = Some(LayerAction::MoveUp(layer_id));
                     }
-                    if ui.small_button("下へ").clicked() {
+                    if ui
+                        .small_button("下へ")
+                        .on_hover_text("レイヤー順をひとつ下げます。")
+                        .clicked()
+                    {
                         pending_action = Some(LayerAction::MoveDown(layer_id));
                     }
                 });
@@ -753,12 +891,14 @@ impl PaintApp {
                         let can_drop_here = visible && !locked;
                         if ui
                             .add_enabled(can_drop_here, egui::Button::new("ここへ移動"))
+                            .on_hover_text("選択中の要素をこのレイヤーへ移します。")
                             .clicked()
                         {
                             pending_action = Some(LayerAction::MoveSelectionTo(layer_id));
                         }
                         if ui
                             .add_enabled(can_drop_here, egui::Button::new("ここへ複製"))
+                            .on_hover_text("選択中の要素をこのレイヤーへ複製します。")
                             .clicked()
                         {
                             pending_action = Some(LayerAction::DuplicateSelectionTo(layer_id));
@@ -780,7 +920,12 @@ impl PaintApp {
         let rename_response = ui.text_edit_singleline(&mut self.layer_name_draft);
         let rename_on_enter =
             rename_response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-        if ui.button("レイヤー名を変更").clicked() || rename_on_enter {
+        if ui
+            .button("レイヤー名を変更")
+            .on_hover_text("現在のレイヤー名を更新します。")
+            .clicked()
+            || rename_on_enter
+        {
             pending_action = Some(LayerAction::RenameActive);
         }
 
@@ -832,6 +977,7 @@ impl PaintApp {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(can_undo, egui::Button::new("元に戻す"))
+                .on_hover_text("ひとつ前の編集に戻します。")
                 .clicked()
             {
                 self.perform_undo();
@@ -839,6 +985,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_redo, egui::Button::new("やり直す"))
+                .on_hover_text("元に戻した編集をもう一度適用します。")
                 .clicked()
             {
                 self.perform_redo();
@@ -846,6 +993,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_clear, egui::Button::new("クリア"))
+                .on_hover_text("作品全体を消去します。")
                 .clicked()
             {
                 self.perform_clear();
@@ -855,6 +1003,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_file_io, egui::Button::new("JSON保存"))
+                .on_hover_text("再編集できる JSON を保存します。")
                 .clicked()
             {
                 self.save_document(ctx);
@@ -862,6 +1011,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_file_io, egui::Button::new("JSONを開く"))
+                .on_hover_text("保存した JSON を開いて続きを編集します。")
                 .clicked()
             {
                 self.load_document(ctx);
@@ -869,6 +1019,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_file_io, egui::Button::new("PNG書き出し"))
+                .on_hover_text("共有しやすい PNG 画像を書き出します。")
                 .clicked()
             {
                 self.export_png(ctx);
@@ -895,6 +1046,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_group, egui::Button::new("グループ化"))
+                .on_hover_text("複数選択をひとまとまりにします。")
                 .clicked()
             {
                 self.apply_group();
@@ -902,6 +1054,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_ungroup, egui::Button::new("グループ解除"))
+                .on_hover_text("選択中のグループを 1 段だけ展開します。")
                 .clicked()
             {
                 self.apply_ungroup();
@@ -936,6 +1089,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_adjust_view, egui::Button::new("-"))
+                .on_hover_text("表示を少し縮小します。")
                 .clicked()
             {
                 self.zoom_out();
@@ -945,6 +1099,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_adjust_view, egui::Button::new("+"))
+                .on_hover_text("表示を少し拡大します。")
                 .clicked()
             {
                 self.zoom_in();
@@ -952,6 +1107,7 @@ impl PaintApp {
 
             if ui
                 .add_enabled(can_adjust_view, egui::Button::new("表示をリセット"))
+                .on_hover_text("ズームと表示位置を初期状態へ戻します。")
                 .clicked()
             {
                 self.reset_view();
@@ -964,6 +1120,7 @@ impl PaintApp {
                 } else {
                     "ヘルプ"
                 })
+                .on_hover_text("操作説明やチュートリアル再表示を開きます。")
                 .clicked()
             {
                 self.show_help = !self.show_help;
@@ -980,28 +1137,121 @@ impl PaintApp {
             return;
         }
 
+        let mut open = self.show_help;
+        let mut reopen_tutorial = false;
         egui::Window::new("かんたんヘルプ")
-            .open(&mut self.show_help)
+            .open(&mut open)
             .resizable(false)
             .default_width(380.0)
             .show(ctx, |ui| {
-                ui.label(RichText::new("最初に").strong());
-                ui.small("描く: ブラシ、四角形、楕円、直線を選んでキャンバスをドラッグします。");
-                ui.small("選択: 選択ツールで要素をクリックします。角ハンドルでサイズ変更、丸いハンドルで回転します。");
-                ui.small("複数選択: Shift+Click またはドラッグ選択。タブレットでは「複数選択モード」をオンにすると、タップで追加 / 解除できます。選び終わったら「選択を保ったまま移動へ」で通常の選択に戻せます。");
-                ui.small("パンとズーム: Space+Drag または中ボタンドラッグでパン。タブレットでは「手のひら」ツールのドラッグ、2本指ドラッグでパン、ピンチでズームできます。Ctrl/Cmd+Wheel か +/- でもズーム、Ctrl/Cmd+0 で表示を戻します。");
-                ui.small("タブレットのコツ: 既定では指はビュー操作と長押し選択寄り、ペンやマウスは描画寄りです。指で描きたいときは左パネルの「指でも描く」をオンにします。");
-                ui.small("ファイル: JSON保存 は再編集用、JSONを開く は復元、PNG書き出し は共有用画像です。");
-                ui.small("レイヤー: 現在のレイヤーに描きます。タブレットでもレイヤー追加、表示切替、ロック、移動 / 複製が使えます。非表示レイヤーは書き出しに含まれません。");
+                ui.label(RichText::new("短く確認する").strong());
+                ui.small("描く: ブラシか図形ツールを選んでドラッグします。");
+                ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
+                ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
+                ui.small("保存: JSON保存は再編集用、PNG書き出しは共有用です。");
+                ui.small("レイヤー: 右側で現在のレイヤー、表示、ロックを切り替えます。");
                 #[cfg(target_arch = "wasm32")]
-                ui.small("Web版: GitHub Pages では JSON保存 と PNG書き出し はダウンロード、JSONを開く はファイル選択になります。");
+                ui.small("Web版: JSON保存 と PNG書き出し はダウンロード、JSONを開く はファイル選択です。");
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("ショートカット").strong());
                 ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
                 ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
                 ui.small("ツール: V 選択 · H 手のひら · B ブラシ · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
+
+                ui.add_space(10.0);
+                if ui.button("チュートリアルをもう一度見る").clicked() {
+                    reopen_tutorial = true;
+                }
             });
+
+        self.show_help = open;
+        if reopen_tutorial {
+            self.open_tutorial();
+        }
+    }
+
+    fn show_tutorial_window(&mut self, ctx: &egui::Context) {
+        if !self.tutorial.visible {
+            return;
+        }
+
+        #[derive(Clone, Copy)]
+        enum TutorialAction {
+            None,
+            Back,
+            Next,
+            Skip,
+            Complete,
+        }
+
+        let step_count = tutorial_step_count();
+        let step_index = self.tutorial.step_index.min(step_count.saturating_sub(1));
+        let step = tutorial_step(step_index);
+        let mut open = self.tutorial.visible;
+        let mut pending_action = TutorialAction::None;
+
+        egui::Window::new("ミニチュートリアル")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(format!("{} / {}", step_index + 1, step_count)).small());
+                ui.heading(step.title);
+                ui.label(step.body);
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.small("次にやること");
+                    ui.label(step.action);
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("スキップ").clicked() {
+                        pending_action = TutorialAction::Skip;
+                    }
+                    if ui
+                        .add_enabled(step_index > 0, egui::Button::new("前へ"))
+                        .clicked()
+                    {
+                        pending_action = TutorialAction::Back;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if step_index + 1 == step_count {
+                            "完了"
+                        } else {
+                            "次へ"
+                        };
+                        if ui.button(label).clicked() {
+                            pending_action = if step_index + 1 == step_count {
+                                TutorialAction::Complete
+                            } else {
+                                TutorialAction::Next
+                            };
+                        }
+                    });
+                });
+            });
+
+        if !open && matches!(pending_action, TutorialAction::None) {
+            pending_action = TutorialAction::Skip;
+        }
+
+        match pending_action {
+            TutorialAction::None => {
+                self.tutorial.visible = open;
+            }
+            TutorialAction::Back => {
+                self.tutorial.step_index = self.tutorial.step_index.saturating_sub(1);
+            }
+            TutorialAction::Next => {
+                self.tutorial.step_index =
+                    (self.tutorial.step_index + 1).min(step_count.saturating_sub(1));
+            }
+            TutorialAction::Skip => self.close_tutorial(false),
+            TutorialAction::Complete => self.close_tutorial(true),
+        }
     }
 
     fn perform_undo(&mut self) {
@@ -1833,7 +2083,7 @@ impl PaintApp {
 }
 
 impl eframe::App for PaintApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_arch = "wasm32")]
         self.poll_web_storage_task();
 
@@ -1883,26 +2133,66 @@ impl eframe::App for PaintApp {
             }
         });
 
+        self.show_tutorial_window(ctx);
         self.show_help_window(ctx);
+        self.persist_ui_state_if_needed(frame);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, APP_UI_STATE_KEY, &self.ui_state);
     }
 }
 
-fn tool_hint(tool: CanvasToolKind) -> &'static str {
+fn on_off_label(value: bool) -> &'static str {
+    if value { "オン" } else { "オフ" }
+}
+
+fn help_icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new("?").small())
+            .min_size(egui::vec2(22.0, 22.0))
+            .frame(false),
+    )
+    .on_hover_text(text)
+}
+
+fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
     match tool {
-        CanvasToolKind::Select => {
-            "現在のレイヤー上でクリックすると選択できます。Shift+Click または複数選択モードで追加 / 解除、空き領域のドラッグで矩形選択です。単体図形はサイズ変更 / 回転、複数選択は移動 / グループ変形 / 整列 / 重なり順変更ができます。タブレットでは選び終わったら「選択を保ったまま移動へ」で通常の移動に戻れます。"
-        }
-        CanvasToolKind::Pan => {
-            "手のひらツールです。キーボードなしでキャンバスをドラッグして移動できます。タブレットでは2本指ドラッグのパンやピンチズームも使えます。"
-        }
-        CanvasToolKind::Brush => {
-            "フリーハンドで線を描くツールです。現在のレイヤー上をドラッグして描きます。タブレットでは既定で指はパンや長押し選択寄りなので、必要なら「指でも描く」をオンにします。"
-        }
-        CanvasToolKind::Eraser => "キャンバス背景色でなぞるフリーハンド消しゴムです。",
-        CanvasToolKind::Rectangle => {
-            "現在のレイヤーで、始点の角から反対側の角までドラッグして四角形を作ります。"
-        }
-        CanvasToolKind::Ellipse => "現在のレイヤーで、外接する枠をドラッグして楕円を作ります。",
-        CanvasToolKind::Line => "現在のレイヤーで、始点から終点までドラッグして直線を作ります。",
+        CanvasToolKind::Select => "選ぶ・動かす・変形するツールです。",
+        CanvasToolKind::Pan => "キャンバスをドラッグして移動します。",
+        CanvasToolKind::Brush => "フリーハンドで描きます。",
+        CanvasToolKind::Eraser => "背景色でなぞって消します。",
+        CanvasToolKind::Rectangle => "四角形の外枠を描きます。",
+        CanvasToolKind::Ellipse => "楕円の外枠を描きます。",
+        CanvasToolKind::Line => "始点から終点まで直線を描きます。",
+    }
+}
+
+fn tutorial_step_count() -> usize {
+    4
+}
+
+fn tutorial_step(step_index: usize) -> TutorialStepContent {
+    match step_index {
+        0 => TutorialStepContent {
+            title: "まずは 1 つ描いてみましょう",
+            body: "ブラシか図形ツールを選んで、キャンバスをドラッグします。最初の 1 本や 1 図形を置くところから始めれば十分です。",
+            action: "左の「ブラシ」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
+        },
+        1 => TutorialStepContent {
+            title: "選んで動かせます",
+            body: "選択ツールに切り替えると、要素をクリックして動かしたり、図形ならサイズ変更や回転もできます。",
+            action: "「選択」に切り替えて、描いた要素をクリックしてみます。ドラッグで移動、ハンドルで変形できます。",
+        },
+        2 => TutorialStepContent {
+            title: "複数選択でまとめて整理できます",
+            body: "Shift+Click やドラッグ選択で複数選べます。タブレットでは「複数選択モード」を使うと、タップだけで追加選択できます。",
+            action: "複数選んだら、整列・等間隔・グループ化やドラッグ移動を試してみます。",
+        },
+        _ => TutorialStepContent {
+            title: "保存方法は 2 つです",
+            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は画像として共有したいとき用です。迷ったらヘルプからもう一度見直せます。",
+            action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」を覚えておけば、ひとまず困りません。",
+        },
     }
 }
