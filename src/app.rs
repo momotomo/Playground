@@ -164,11 +164,11 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready to draw. Pick Brush or a shape tool, then open Help if you want a quick tour.",
+                "描く準備ができました。ブラシや図形ツールを選んで、必要ならヘルプを開いてください。",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
-            layer_name_draft: "Layer 1".to_owned(),
+            layer_name_draft: "レイヤー 1".to_owned(),
             layer_name_draft_for: Some(1),
             show_help: false,
             #[cfg(target_arch = "wasm32")]
@@ -202,7 +202,7 @@ impl PaintApp {
     fn set_active_tool(&mut self, tool: CanvasToolKind, announce: bool) {
         self.active_tool = tool;
         if announce {
-            self.set_info(format!("Switched to {}.", tool.label()));
+            self.set_info(format!("{} に切り替えました。", tool.label()));
         }
     }
 
@@ -233,18 +233,18 @@ impl PaintApp {
 
     fn show_file_summary(&self, ui: &mut egui::Ui) {
         let dirty_suffix = if self.is_dirty() {
-            "Unsaved changes"
+            "未保存の変更あり"
         } else {
-            "Saved"
+            "保存済み"
         };
-        ui.label(RichText::new("Document").strong());
+        ui.label(RichText::new("ドキュメント").strong());
         ui.label(self.document_name.as_str());
         ui.small(dirty_suffix);
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Toolbox");
-        ui.label("Pick a tool, then draw or edit on the active layer.");
+        ui.heading("ツール");
+        ui.label("ツールを選んで、現在のレイヤーに描くか編集します。");
         ui.add_space(8.0);
 
         for tool in [
@@ -259,15 +259,15 @@ impl PaintApp {
         }
 
         ui.add_space(12.0);
-        ui.label("Color");
+        ui.label("色");
         let mut color = color32_from_rgba(self.brush_color);
         if ui.color_edit_button_srgba(&mut color).changed() {
             self.brush_color = rgba_from_color32(color);
-            self.set_info("Drawing color updated.");
+            self.set_info("描画色を変更しました。");
         }
 
         ui.add_space(12.0);
-        ui.label("Stroke Width");
+        ui.label("線幅");
         if ui
             .add(egui::Slider::new(
                 &mut self.brush_width,
@@ -275,52 +275,50 @@ impl PaintApp {
             ))
             .changed()
         {
-            self.set_info(format!("Stroke width set to {:.1}px.", self.brush_width));
+            self.set_info(format!("線幅を {:.1}px に変更しました。", self.brush_width));
         }
         ui.label(format!("{:.1}px", self.brush_width));
 
         ui.separator();
-        ui.label(RichText::new("Current Mode").strong());
+        ui.label(RichText::new("現在のモード").strong());
         ui.small(tool_hint(self.active_tool));
         ui.small(self.canvas.selection_summary(self.document()));
 
         ui.separator();
         self.show_file_summary(ui);
         ui.add_space(8.0);
-        ui.label(RichText::new("Canvas").strong());
+        ui.label(RichText::new("キャンバス").strong());
         ui.label(format!(
             "{:.0} x {:.0}px",
             self.document().canvas_size.width,
             self.document().canvas_size.height
         ));
         ui.label(format!(
-            "Elements: {} total / {} active layer",
+            "要素数: 全体 {} / 現在のレイヤー {}",
             self.document().total_element_count(),
             self.document().element_count()
         ));
-        ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
+        ui.label(format!("ズーム: {}", self.canvas.zoom_label()));
         if let Some(active_layer) = self.document().active_layer() {
-            ui.label(format!("Active Layer: {}", active_layer.name));
+            ui.label(format!("現在のレイヤー: {}", active_layer.name));
         }
-        ui.small("Shapes: corner handles resize, round handle rotates");
-        ui.small("Strokes: single and multi transforms use simple move / scale / rotate");
-        ui.small("Multi-select: Shift + Click or drag a marquee");
-        ui.small(
-            "Multi-edit: move, group, resize / rotate, align, distribute, and change stack order",
-        );
-        ui.small("Pan: Space + Drag or Middle Drag");
-        ui.small("Reset view: Ctrl/Cmd + 0");
-        ui.small("Tips: Shift+Click multi-select, drag guides, Ctrl/Cmd+Wheel zoom");
+        ui.small("図形: 角ハンドルでサイズ変更、丸いハンドルで回転します");
+        ui.small("ストローク: 単体 / 複数変形では簡易的な移動 / 拡大縮小 / 回転を使います");
+        ui.small("複数選択: Shift+Click またはドラッグ選択");
+        ui.small("複数編集: 移動、グループ化、サイズ変更 / 回転、整列、等間隔、重なり順変更");
+        ui.small("パン: Space+Drag または中ボタンドラッグ");
+        ui.small("表示リセット: Ctrl/Cmd + 0");
+        ui.small("ヒント: Shift+Click で複数選択、ガイドはドラッグで移動、Ctrl/Cmd+Wheel でズーム");
 
         ui.separator();
         self.show_canvas_aids(ui);
 
         ui.separator();
-        ui.label(RichText::new("Files & Export").strong());
+        ui.label(RichText::new("保存と書き出し").strong());
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
-        ui.small("Top bar actions: Save JSON, Open JSON, Export PNG, and Help.");
+        ui.small("上部バー: JSON保存 / JSONを開く / PNG書き出し / ヘルプ");
     }
 
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
@@ -353,27 +351,34 @@ impl PaintApp {
             .collect();
         let mut pending_action = None;
 
-        ui.label(RichText::new("Layout Aids").strong());
+        ui.label(RichText::new("配置補助").strong());
         ui.small(format!(
-            "Rulers {} · Grid {:.0}px · Smart Guides {} · {} guide{}.",
-            if rulers_visible { "on" } else { "off" },
+            "ルーラー: {} · グリッド: {:.0}px · スマートガイド: {} · ガイド: {}本",
+            if rulers_visible {
+                "表示"
+            } else {
+                "非表示"
+            },
             grid.spacing,
-            if smart_guides_visible { "on" } else { "off" },
+            if smart_guides_visible {
+                "オン"
+            } else {
+                "オフ"
+            },
             guides.len(),
-            if guides.len() == 1 { "" } else { "s" }
         ));
-        ui.small("Move snapping supports grid, guides, and smart guides. Drag visible guides to reposition them.");
+        ui.small("移動中はグリッド / ガイド / スマートガイドに吸着できます。表示中のガイドはドラッグで動かせます。");
 
         ui.add_enabled_ui(!has_canvas_interaction, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let mut show_rulers = rulers_visible;
-                if ui.checkbox(&mut show_rulers, "Show Rulers").changed() {
+                if ui.checkbox(&mut show_rulers, "ルーラーを表示").changed() {
                     pending_action = Some(AidAction::ToggleRulersVisible);
                 }
 
                 let mut show_smart_guides = smart_guides_visible;
                 if ui
-                    .checkbox(&mut show_smart_guides, "Smart Guides")
+                    .checkbox(&mut show_smart_guides, "スマートガイド")
                     .changed()
                 {
                     pending_action = Some(AidAction::ToggleSmartGuidesVisible);
@@ -384,12 +389,12 @@ impl PaintApp {
 
             ui.horizontal_wrapped(|ui| {
                 let mut show_grid = grid.visible;
-                if ui.checkbox(&mut show_grid, "Show Grid").changed() {
+                if ui.checkbox(&mut show_grid, "グリッドを表示").changed() {
                     pending_action = Some(AidAction::ToggleGridVisible);
                 }
 
                 let mut snap_grid = grid.snap_enabled;
-                if ui.checkbox(&mut snap_grid, "Snap to Grid").changed() {
+                if ui.checkbox(&mut snap_grid, "グリッドに吸着").changed() {
                     pending_action = Some(AidAction::ToggleGridSnap);
                 }
 
@@ -406,7 +411,7 @@ impl PaintApp {
             });
 
             ui.horizontal_wrapped(|ui| {
-                ui.small("Spacing presets:");
+                ui.small("間隔プリセット:");
                 for preset in GRID_SPACING_PRESETS {
                     let is_current = (grid.spacing - preset).abs() < 0.1;
                     if ui
@@ -422,51 +427,42 @@ impl PaintApp {
 
             ui.horizontal_wrapped(|ui| {
                 let mut show_guides = guides_visible;
-                if ui.checkbox(&mut show_guides, "Show Guides").changed() {
+                if ui.checkbox(&mut show_guides, "ガイドを表示").changed() {
                     pending_action = Some(AidAction::ToggleGuidesVisible);
                 }
 
                 let mut snap_guides = guides_snap;
-                if ui.checkbox(&mut snap_guides, "Snap to Guides").changed() {
+                if ui.checkbox(&mut snap_guides, "ガイドに吸着").changed() {
                     pending_action = Some(AidAction::ToggleGuidesSnap);
                 }
 
-                ui.small(format!(
-                    "{} guide{}",
-                    guides.len(),
-                    if guides.len() == 1 { "" } else { "s" }
-                ));
+                ui.small(format!("{}本", guides.len()));
             });
 
             ui.horizontal(|ui| {
-                if ui.button("Add H Guide").clicked() {
+                if ui.button("横ガイド追加").clicked() {
                     pending_action = Some(AidAction::AddGuide(GuideAxis::Horizontal));
                 }
-                if ui.button("Add V Guide").clicked() {
+                if ui.button("縦ガイド追加").clicked() {
                     pending_action = Some(AidAction::AddGuide(GuideAxis::Vertical));
                 }
             });
         });
 
         if has_canvas_interaction {
-            ui.small("Finish the current edit before changing grid or guide settings.");
+            ui.small("編集中はグリッドやガイドの設定を変更できません。");
         }
 
         if guides.is_empty() {
-            ui.small("No guides yet. New guides use the selection center or canvas center.");
+            ui.small(
+                "ガイドはまだありません。追加すると、選択の中心かキャンバス中央に置かれます。",
+            );
         } else {
             for (index, guide) in guides {
                 ui.horizontal(|ui| {
-                    ui.small(format!(
-                        "{} {:.0}px",
-                        match guide.axis {
-                            GuideAxis::Horizontal => "H",
-                            GuideAxis::Vertical => "V",
-                        },
-                        guide.position
-                    ));
+                    ui.small(format!("{} {:.0}px", guide.axis.label(), guide.position));
                     if ui
-                        .add_enabled(!has_canvas_interaction, egui::Button::new("Remove"))
+                        .add_enabled(!has_canvas_interaction, egui::Button::new("削除"))
                         .clicked()
                     {
                         pending_action = Some(AidAction::RemoveGuide(index));
@@ -533,18 +529,20 @@ impl PaintApp {
             .map(|layer| (layer.id, layer.name.clone(), layer.visible, layer.locked));
         let mut pending_action = None;
 
-        ui.heading("Layers");
-        ui.small("Selection and drawing target the active visible, unlocked layer.");
-        ui.small("Move / Duplicate sends the current active-layer selection to a visible, unlocked destination.");
+        ui.heading("レイヤー");
+        ui.small("選択と描画の対象は、表示中かつロックされていない現在のレイヤーです。");
+        ui.small(
+            "移動 / 複製は、現在のレイヤーで選択した要素を表示中かつ編集可能なレイヤーへ送ります。",
+        );
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            if ui.button("Add Layer").clicked() {
+            if ui.button("レイヤー追加").clicked() {
                 pending_action = Some(LayerAction::Add);
             }
 
             if ui
-                .add_enabled(layer_count > 1, egui::Button::new("Delete Layer"))
+                .add_enabled(layer_count > 1, egui::Button::new("レイヤー削除"))
                 .clicked()
             {
                 pending_action = Some(LayerAction::DeleteActive);
@@ -553,12 +551,10 @@ impl PaintApp {
 
         if selection_count > 0 {
             ui.small(format!(
-                "{selection_count} selected on the active layer. Use Move Here / Duplicate Here on a destination layer."
+                "現在のレイヤーで {selection_count} 個選択中です。移動先のレイヤーで「ここへ移動」または「ここへ複製」を使えます。"
             ));
         } else {
-            ui.small(
-                "Select elements on the active layer to move or duplicate them into another layer.",
-            );
+            ui.small("現在のレイヤーで要素を選ぶと、別のレイヤーへ移動したり複製したりできます。");
         }
 
         ui.separator();
@@ -598,14 +594,18 @@ impl PaintApp {
                     }
 
                     if ui
-                        .small_button(if visible { "Hide" } else { "Show" })
+                        .small_button(if visible { "非表示" } else { "表示" })
                         .clicked()
                     {
                         pending_action = Some(LayerAction::ToggleVisibility(layer_id));
                     }
 
                     if ui
-                        .small_button(if locked { "Unlock" } else { "Lock" })
+                        .small_button(if locked {
+                            "ロック解除"
+                        } else {
+                            "ロック"
+                        })
                         .clicked()
                     {
                         pending_action = Some(LayerAction::ToggleLocked(layer_id));
@@ -614,19 +614,19 @@ impl PaintApp {
 
                 ui.horizontal(|ui| {
                     if is_active {
-                        ui.label(RichText::new("ACTIVE").small().strong());
+                        ui.label(RichText::new("作業中").small().strong());
                     }
                     if !visible {
-                        ui.label(RichText::new("HIDDEN").small());
+                        ui.label(RichText::new("非表示").small());
                     }
                     if locked {
-                        ui.label(RichText::new("LOCKED").small());
+                        ui.label(RichText::new("ロック中").small());
                     }
-                    ui.small(format!("{element_count} elements"));
-                    if ui.small_button("Up").clicked() {
+                    ui.small(format!("{element_count}個"));
+                    if ui.small_button("上へ").clicked() {
                         pending_action = Some(LayerAction::MoveUp(layer_id));
                     }
-                    if ui.small_button("Down").clicked() {
+                    if ui.small_button("下へ").clicked() {
                         pending_action = Some(LayerAction::MoveDown(layer_id));
                     }
                 });
@@ -635,13 +635,13 @@ impl PaintApp {
                     ui.horizontal_wrapped(|ui| {
                         let can_drop_here = visible && !locked;
                         if ui
-                            .add_enabled(can_drop_here, egui::Button::new("Move Here"))
+                            .add_enabled(can_drop_here, egui::Button::new("ここへ移動"))
                             .clicked()
                         {
                             pending_action = Some(LayerAction::MoveSelectionTo(layer_id));
                         }
                         if ui
-                            .add_enabled(can_drop_here, egui::Button::new("Duplicate Here"))
+                            .add_enabled(can_drop_here, egui::Button::new("ここへ複製"))
                             .clicked()
                         {
                             pending_action = Some(LayerAction::DuplicateSelectionTo(layer_id));
@@ -650,31 +650,31 @@ impl PaintApp {
                 }
 
                 if index + 1 == total_layers {
-                    ui.small("Topmost");
+                    ui.small("最前面");
                 } else if index == 0 {
-                    ui.small("Bottom");
+                    ui.small("最背面");
                 }
             });
             ui.add_space(4.0);
         }
 
         ui.separator();
-        ui.label(RichText::new("Rename Active").strong());
+        ui.label(RichText::new("現在のレイヤー名").strong());
         let rename_response = ui.text_edit_singleline(&mut self.layer_name_draft);
         let rename_on_enter =
             rename_response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-        if ui.button("Rename Layer").clicked() || rename_on_enter {
+        if ui.button("レイヤー名を変更").clicked() || rename_on_enter {
             pending_action = Some(LayerAction::RenameActive);
         }
 
         if let Some((_, active_name, visible, locked)) = active_layer_state {
             if !visible {
                 ui.small(format!(
-                    "{active_name} is hidden. It will not render or export."
+                    "{active_name} は非表示です。表示も書き出しもされません。"
                 ));
             } else if locked {
                 ui.small(format!(
-                    "{active_name} is locked. It renders but cannot be selected or edited."
+                    "{active_name} はロック中です。表示はされますが、選択や編集はできません。"
                 ));
             }
         }
@@ -714,21 +714,21 @@ impl PaintApp {
 
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(can_undo, egui::Button::new("Undo"))
+                .add_enabled(can_undo, egui::Button::new("元に戻す"))
                 .clicked()
             {
                 self.perform_undo();
             }
 
             if ui
-                .add_enabled(can_redo, egui::Button::new("Redo"))
+                .add_enabled(can_redo, egui::Button::new("やり直す"))
                 .clicked()
             {
                 self.perform_redo();
             }
 
             if ui
-                .add_enabled(can_clear, egui::Button::new("Clear"))
+                .add_enabled(can_clear, egui::Button::new("クリア"))
                 .clicked()
             {
                 self.perform_clear();
@@ -737,21 +737,21 @@ impl PaintApp {
             ui.separator();
 
             if ui
-                .add_enabled(can_file_io, egui::Button::new("Save JSON"))
+                .add_enabled(can_file_io, egui::Button::new("JSON保存"))
                 .clicked()
             {
                 self.save_document(ctx);
             }
 
             if ui
-                .add_enabled(can_file_io, egui::Button::new("Open JSON"))
+                .add_enabled(can_file_io, egui::Button::new("JSONを開く"))
                 .clicked()
             {
                 self.load_document(ctx);
             }
 
             if ui
-                .add_enabled(can_file_io, egui::Button::new("Export PNG"))
+                .add_enabled(can_file_io, egui::Button::new("PNG書き出し"))
                 .clicked()
             {
                 self.export_png(ctx);
@@ -760,7 +760,7 @@ impl PaintApp {
             ui.separator();
 
             ui.add_enabled_ui(can_align, |ui| {
-                ui.menu_button("Align", |ui| {
+                ui.menu_button("整列", |ui| {
                     for alignment in [
                         AlignmentKind::Left,
                         AlignmentKind::HorizontalCenter,
@@ -777,21 +777,21 @@ impl PaintApp {
             });
 
             if ui
-                .add_enabled(can_group, egui::Button::new("Group"))
+                .add_enabled(can_group, egui::Button::new("グループ化"))
                 .clicked()
             {
                 self.apply_group();
             }
 
             if ui
-                .add_enabled(can_ungroup, egui::Button::new("Ungroup"))
+                .add_enabled(can_ungroup, egui::Button::new("グループ解除"))
                 .clicked()
             {
                 self.apply_ungroup();
             }
 
             ui.add_enabled_ui(can_distribute, |ui| {
-                ui.menu_button("Distribute", |ui| {
+                ui.menu_button("等間隔", |ui| {
                     for distribution in [DistributionKind::Horizontal, DistributionKind::Vertical] {
                         if ui.button(distribution.label()).clicked() {
                             self.apply_distribution(distribution);
@@ -801,7 +801,7 @@ impl PaintApp {
             });
 
             ui.add_enabled_ui(can_reorder, |ui| {
-                ui.menu_button("Order", |ui| {
+                ui.menu_button("重なり順", |ui| {
                     for command in [
                         StackOrderCommand::BringToFront,
                         StackOrderCommand::BringForward,
@@ -834,7 +834,7 @@ impl PaintApp {
             }
 
             if ui
-                .add_enabled(can_adjust_view, egui::Button::new("Reset View"))
+                .add_enabled(can_adjust_view, egui::Button::new("表示をリセット"))
                 .clicked()
             {
                 self.reset_view();
@@ -842,14 +842,18 @@ impl PaintApp {
 
             ui.separator();
             if ui
-                .button(if self.show_help { "Hide Help" } else { "Help" })
+                .button(if self.show_help {
+                    "ヘルプを閉じる"
+                } else {
+                    "ヘルプ"
+                })
                 .clicked()
             {
                 self.show_help = !self.show_help;
             }
 
             ui.separator();
-            ui.label(RichText::new("Status").small().strong());
+            ui.label(RichText::new("状態").small().strong());
             ui.label(self.status_message.rich_text());
         });
     }
@@ -859,36 +863,36 @@ impl PaintApp {
             return;
         }
 
-        egui::Window::new("Quick Help")
+        egui::Window::new("かんたんヘルプ")
             .open(&mut self.show_help)
             .resizable(false)
             .default_width(380.0)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Start Here").strong());
-                ui.small("Draw: Pick Brush, Rectangle, Ellipse, or Line, then drag on the canvas.");
-                ui.small("Select: Use Select to click an element. Corner handles resize, the round handle rotates.");
-                ui.small("Multi-select: Shift+Click or drag a marquee. Then move, group, align, distribute, or reorder.");
-                ui.small("Pan & Zoom: Space+Drag or Middle Drag pans. Ctrl/Cmd+Wheel or +/- zooms. Ctrl/Cmd+0 resets.");
-                ui.small("Files: Save JSON keeps editing state, Open JSON restores it, Export PNG creates a shareable image.");
-                ui.small("Layers: Draw on the active visible, unlocked layer. Hidden layers do not export.");
+                ui.label(RichText::new("最初に").strong());
+                ui.small("描く: ブラシ、四角形、楕円、直線を選んでキャンバスをドラッグします。");
+                ui.small("選択: 選択ツールで要素をクリックします。角ハンドルでサイズ変更、丸いハンドルで回転します。");
+                ui.small("複数選択: Shift+Click またはドラッグ選択。移動、グループ化、整列、等間隔、重なり順変更ができます。");
+                ui.small("パンとズーム: Space+Drag または中ボタンドラッグでパン。Ctrl/Cmd+Wheel か +/- でズーム、Ctrl/Cmd+0 で表示を戻します。");
+                ui.small("ファイル: JSON保存 は再編集用、JSONを開く は復元、PNG書き出し は共有用画像です。");
+                ui.small("レイヤー: 現在のレイヤーに描きます。非表示レイヤーは書き出しに含まれません。");
                 #[cfg(target_arch = "wasm32")]
-                ui.small("Web: Save JSON downloads a file, Open JSON opens the picker, and Export PNG downloads an image on GitHub Pages.");
+                ui.small("Web版: GitHub Pages では JSON保存 と PNG書き出し はダウンロード、JSONを開く はファイル選択になります。");
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("Shortcuts").strong());
-                ui.small("Undo: Ctrl/Cmd+Z · Redo: Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y");
-                ui.small("Save JSON: Ctrl/Cmd+S · Open JSON: Ctrl/Cmd+O · Export PNG: Ctrl/Cmd+Shift+E");
-                ui.small("Tools: V Select · B Brush · R Rectangle · O Ellipse · L Line · E Eraser");
+                ui.label(RichText::new("ショートカット").strong());
+                ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
+                ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
+                ui.small("ツール: V 選択 · B ブラシ · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
             });
     }
 
     fn perform_undo(&mut self) {
         if self.canvas.discard_active_interaction() {
-            self.set_info("Discarded the in-progress edit.");
+            self.set_info("進行中の操作を取り消しました。");
         } else if self.history.undo() {
             self.canvas.clear_selection();
             self.sync_layer_name_draft();
-            self.set_info("Undid the last change.");
+            self.set_info("ひとつ前に戻しました。");
         }
     }
 
@@ -896,7 +900,7 @@ impl PaintApp {
         if self.history.redo() {
             self.canvas.clear_selection();
             self.sync_layer_name_draft();
-            self.set_info("Redid the last undone change.");
+            self.set_info("やり直しました。");
         }
     }
 
@@ -905,23 +909,29 @@ impl PaintApp {
         if self.history.clear() {
             self.canvas.clear_selection();
             self.sync_layer_name_draft();
-            self.set_info("Cleared the canvas.");
+            self.set_info("キャンバスをクリアしました。");
         } else if discarded {
-            self.set_info("Discarded the in-progress edit.");
+            self.set_info("進行中の操作を取り消しました。");
         }
     }
 
     fn zoom_in(&mut self) {
         let canvas_size = self.document().canvas_size;
         if self.canvas.zoom_in(canvas_size) {
-            self.set_info(format!("Zoomed in to {}.", self.canvas.zoom_label()));
+            self.set_info(format!(
+                "ズームを {} にしました。",
+                self.canvas.zoom_label()
+            ));
         }
     }
 
     fn zoom_out(&mut self) {
         let canvas_size = self.document().canvas_size;
         if self.canvas.zoom_out(canvas_size) {
-            self.set_info(format!("Zoomed out to {}.", self.canvas.zoom_label()));
+            self.set_info(format!(
+                "ズームを {} にしました。",
+                self.canvas.zoom_label()
+            ));
         }
     }
 
@@ -929,14 +939,14 @@ impl PaintApp {
         let canvas_size = self.document().canvas_size;
         self.canvas.request_view_reset();
         let _ = self.canvas.reset_view(canvas_size);
-        self.set_info("Reset the view to fit the canvas.");
+        self.set_info("表示をキャンバス全体に戻しました。");
     }
 
     fn commit_element(&mut self, element: PaintElement) {
         let label = element.kind_label().to_owned();
         if self.history.commit_element(element) {
             self.canvas.clear_selection();
-            self.set_info(format!("Added {label}."));
+            self.set_info(format!("{label}を追加しました。"));
         }
     }
 
@@ -946,55 +956,41 @@ impl PaintApp {
             self.canvas
                 .set_selection_indices(selection_layer_id, edit.selection_indices);
             let message = match edit.mode {
-                DocumentEditMode::Move => {
-                    if self.canvas.selection_count() > 1 {
-                        "Moved the selected elements."
-                    } else {
-                        "Moved the selected element."
-                    }
-                }
+                DocumentEditMode::Move => "選択中の要素を移動しました。",
                 DocumentEditMode::Resize => {
                     if self.canvas.selection_count() > 1 {
-                        "Resized the selected elements."
+                        "選択中の要素のサイズを変更しました。"
                     } else {
-                        "Resized the selected shape."
+                        "選択中の図形のサイズを変更しました。"
                     }
                 }
                 DocumentEditMode::Rotate => {
                     if self.canvas.selection_count() > 1 {
-                        "Rotated the selected elements."
+                        "選択中の要素を回転しました。"
                     } else {
-                        "Rotated the selected shape."
+                        "選択中の図形を回転しました。"
                     }
                 }
-                DocumentEditMode::Guide => "Moved the guide.",
-                DocumentEditMode::Group => "Grouped the selected elements.",
-                DocumentEditMode::Ungroup => "Ungrouped the selected elements.",
+                DocumentEditMode::Guide => "ガイドを移動しました。",
+                DocumentEditMode::Group => "選択中の要素をグループ化しました。",
+                DocumentEditMode::Ungroup => "選択中のグループを解除しました。",
                 DocumentEditMode::Align(alignment) => match alignment {
-                    AlignmentKind::Left => "Aligned the selection to the left edge.",
-                    AlignmentKind::HorizontalCenter => {
-                        "Aligned the selection to the horizontal center."
-                    }
-                    AlignmentKind::Right => "Aligned the selection to the right edge.",
-                    AlignmentKind::Top => "Aligned the selection to the top edge.",
-                    AlignmentKind::VerticalCenter => {
-                        "Aligned the selection to the vertical center."
-                    }
-                    AlignmentKind::Bottom => "Aligned the selection to the bottom edge.",
+                    AlignmentKind::Left => "左揃えにしました。",
+                    AlignmentKind::HorizontalCenter => "横中央揃えにしました。",
+                    AlignmentKind::Right => "右揃えにしました。",
+                    AlignmentKind::Top => "上揃えにしました。",
+                    AlignmentKind::VerticalCenter => "縦中央揃えにしました。",
+                    AlignmentKind::Bottom => "下揃えにしました。",
                 },
                 DocumentEditMode::Distribute(distribution) => match distribution {
-                    DistributionKind::Horizontal => {
-                        "Distributed the selection evenly across the horizontal axis."
-                    }
-                    DistributionKind::Vertical => {
-                        "Distributed the selection evenly across the vertical axis."
-                    }
+                    DistributionKind::Horizontal => "横方向に等間隔配置しました。",
+                    DistributionKind::Vertical => "縦方向に等間隔配置しました。",
                 },
                 DocumentEditMode::Reorder(command) => match command {
-                    StackOrderCommand::BringToFront => "Moved the selection to the front.",
-                    StackOrderCommand::SendToBack => "Moved the selection to the back.",
-                    StackOrderCommand::BringForward => "Moved the selection forward.",
-                    StackOrderCommand::SendBackward => "Moved the selection backward.",
+                    StackOrderCommand::BringToFront => "選択中の要素を最前面へ移動しました。",
+                    StackOrderCommand::SendToBack => "選択中の要素を最背面へ移動しました。",
+                    StackOrderCommand::BringForward => "選択中の要素を一つ前面へ移動しました。",
+                    StackOrderCommand::SendBackward => "選択中の要素を一つ背面へ移動しました。",
                 },
             };
             self.set_info(message);
@@ -1080,7 +1076,7 @@ impl PaintApp {
             self.canvas.clear_selection();
             self.sync_layer_name_draft();
             if let Some(layer) = self.document().active_layer() {
-                self.set_info(format!("Switched to {}.", layer.name));
+                self.set_info(format!("作業レイヤーを {} に切り替えました。", layer.name));
             }
         }
     }
@@ -1091,8 +1087,8 @@ impl PaintApp {
         let layer_name = next
             .layer(layer_id)
             .map(|layer| layer.name.clone())
-            .unwrap_or_else(|| "New Layer".to_owned());
-        self.apply_layer_document_change(next, format!("Added {layer_name}."));
+            .unwrap_or_else(|| "新しいレイヤー".to_owned());
+        self.apply_layer_document_change(next, format!("{layer_name} を追加しました。"));
     }
 
     fn delete_active_layer(&mut self) {
@@ -1101,10 +1097,10 @@ impl PaintApp {
             let next_name = next
                 .layer(next_active)
                 .map(|layer| layer.name.clone())
-                .unwrap_or_else(|| "remaining layer".to_owned());
+                .unwrap_or_else(|| "残りのレイヤー".to_owned());
             self.apply_layer_document_change(
                 next,
-                format!("Deleted the active layer. {next_name} is now active."),
+                format!("現在のレイヤーを削除しました。{next_name} が作業レイヤーです。"),
             );
         }
     }
@@ -1118,7 +1114,10 @@ impl PaintApp {
         {
             self.apply_layer_document_change(
                 next,
-                format!("Renamed the layer to {}.", self.layer_name_draft.trim()),
+                format!(
+                    "レイヤー名を {} に変更しました。",
+                    self.layer_name_draft.trim()
+                ),
             );
         }
     }
@@ -1126,72 +1125,84 @@ impl PaintApp {
     fn toggle_layer_visibility(&mut self, layer_id: LayerId) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_layer_visibility_document(layer_id) {
-            let state = next
+            let message = next
                 .layer(layer_id)
-                .map(|layer| if layer.visible { "visible" } else { "hidden" })
-                .unwrap_or("updated");
-            self.apply_layer_document_change(next, format!("Set the layer to {state}."));
+                .map(|layer| {
+                    if layer.visible {
+                        format!("{} を表示しました。", layer.name)
+                    } else {
+                        format!("{} を非表示にしました。", layer.name)
+                    }
+                })
+                .unwrap_or_else(|| "レイヤーの表示状態を変更しました。".to_owned());
+            self.apply_layer_document_change(next, message);
         }
     }
 
     fn toggle_layer_locked(&mut self, layer_id: LayerId) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_layer_locked_document(layer_id) {
-            let state = next
+            let message = next
                 .layer(layer_id)
-                .map(|layer| if layer.locked { "locked" } else { "unlocked" })
-                .unwrap_or("updated");
-            self.apply_layer_document_change(next, format!("Set the layer to {state}."));
+                .map(|layer| {
+                    if layer.locked {
+                        format!("{} をロックしました。", layer.name)
+                    } else {
+                        format!("{} のロックを解除しました。", layer.name)
+                    }
+                })
+                .unwrap_or_else(|| "レイヤーのロック状態を変更しました。".to_owned());
+            self.apply_layer_document_change(next, message);
         }
     }
 
     fn move_layer_up(&mut self, layer_id: LayerId) {
         let document = self.document().clone();
         if let Some(next) = document.moved_layer_up_document(layer_id) {
-            self.apply_layer_document_change(next, "Moved the layer up.");
+            self.apply_layer_document_change(next, "レイヤーを上へ移動しました。");
         }
     }
 
     fn move_layer_down(&mut self, layer_id: LayerId) {
         let document = self.document().clone();
         if let Some(next) = document.moved_layer_down_document(layer_id) {
-            self.apply_layer_document_change(next, "Moved the layer down.");
+            self.apply_layer_document_change(next, "レイヤーを下へ移動しました。");
         }
     }
 
     fn toggle_rulers_visibility(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_rulers_visibility_document() {
-            let state = if next.rulers().visible {
-                "visible"
+            let message = if next.rulers().visible {
+                "ルーラーを表示しました。"
             } else {
-                "hidden"
+                "ルーラーを非表示にしました。"
             };
-            self.apply_document_configuration_change(next, format!("Set rulers to {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
     fn toggle_grid_visibility(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_grid_visibility_document() {
-            let state = if next.grid().visible {
-                "visible"
+            let message = if next.grid().visible {
+                "グリッドを表示しました。"
             } else {
-                "hidden"
+                "グリッドを非表示にしました。"
             };
-            self.apply_document_configuration_change(next, format!("Set the grid to {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
     fn toggle_grid_snap(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_grid_snap_document() {
-            let state = if next.grid().snap_enabled {
-                "enabled"
+            let message = if next.grid().snap_enabled {
+                "グリッド吸着をオンにしました。"
             } else {
-                "disabled"
+                "グリッド吸着をオフにしました。"
             };
-            self.apply_document_configuration_change(next, format!("Grid snap {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
@@ -1201,7 +1212,7 @@ impl PaintApp {
             let applied_spacing = next.grid().spacing;
             self.apply_document_configuration_change(
                 next,
-                format!("Set grid spacing to {:.0}px.", applied_spacing),
+                format!("グリッド間隔を {:.0}px に設定しました。", applied_spacing),
             );
         }
     }
@@ -1209,36 +1220,36 @@ impl PaintApp {
     fn toggle_smart_guides_visibility(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_smart_guides_visibility_document() {
-            let state = if next.smart_guides().visible {
-                "enabled"
+            let message = if next.smart_guides().visible {
+                "スマートガイドをオンにしました。"
             } else {
-                "disabled"
+                "スマートガイドをオフにしました。"
             };
-            self.apply_document_configuration_change(next, format!("Smart guides {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
     fn toggle_guides_visibility(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_guides_visibility_document() {
-            let state = if next.guides().visible {
-                "visible"
+            let message = if next.guides().visible {
+                "ガイドを表示しました。"
             } else {
-                "hidden"
+                "ガイドを非表示にしました。"
             };
-            self.apply_document_configuration_change(next, format!("Set guides to {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
     fn toggle_guides_snap(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_guides_snap_document() {
-            let state = if next.guides().snap_enabled {
-                "enabled"
+            let message = if next.guides().snap_enabled {
+                "ガイド吸着をオンにしました。"
             } else {
-                "disabled"
+                "ガイド吸着をオフにしました。"
             };
-            self.apply_document_configuration_change(next, format!("Guide snap {state}."));
+            self.apply_document_configuration_change(next, message);
         }
     }
 
@@ -1249,8 +1260,8 @@ impl PaintApp {
             self.apply_document_configuration_change(
                 next,
                 format!(
-                    "Added {} guide at {:.0}px.",
-                    axis.label().to_lowercase(),
+                    "{}ガイドを {:.0}px に追加しました。",
+                    axis.label(),
                     position
                 ),
             );
@@ -1266,8 +1277,8 @@ impl PaintApp {
             self.apply_document_configuration_change(
                 next,
                 format!(
-                    "Removed {} guide at {:.0}px.",
-                    guide.axis.label().to_lowercase(),
+                    "{}ガイド（{:.0}px）を削除しました。",
+                    guide.axis.label(),
                     guide.position
                 ),
             );
@@ -1305,7 +1316,7 @@ impl PaintApp {
         };
         if !destination.is_editable() {
             self.set_error(format!(
-                "{} must be visible and unlocked before it can receive moved elements.",
+                "{} は表示中かつロック解除されていないと、要素を移動できません。",
                 destination.name
             ));
             return;
@@ -1318,11 +1329,11 @@ impl PaintApp {
             let destination_name = next
                 .layer(layer_id)
                 .map(|layer| layer.name.clone())
-                .unwrap_or_else(|| "destination layer".to_owned());
+                .unwrap_or_else(|| "移動先レイヤー".to_owned());
             let message = if moved_count == 1 {
-                format!("Moved the selected element to {destination_name}.")
+                format!("選択中の要素を {destination_name} へ移動しました。")
             } else {
-                format!("Moved {moved_count} selected elements to {destination_name}.")
+                format!("選択中の {moved_count} 個の要素を {destination_name} へ移動しました。")
             };
             self.apply_layer_selection_document_change(next, layer_id, next_selection, message);
         }
@@ -1343,7 +1354,7 @@ impl PaintApp {
         };
         if !destination.is_editable() {
             self.set_error(format!(
-                "{} must be visible and unlocked before it can receive duplicated elements.",
+                "{} は表示中かつロック解除されていないと、要素を複製できません。",
                 destination.name
             ));
             return;
@@ -1356,11 +1367,13 @@ impl PaintApp {
             let destination_name = next
                 .layer(layer_id)
                 .map(|layer| layer.name.clone())
-                .unwrap_or_else(|| "destination layer".to_owned());
+                .unwrap_or_else(|| "複製先レイヤー".to_owned());
             let message = if duplicated_count == 1 {
-                format!("Duplicated the selected element into {destination_name}.")
+                format!("選択中の要素を {destination_name} へ複製しました。")
             } else {
-                format!("Duplicated {duplicated_count} selected elements into {destination_name}.")
+                format!(
+                    "選択中の {duplicated_count} 個の要素を {destination_name} へ複製しました。"
+                )
             };
             self.apply_layer_selection_document_change(next, layer_id, next_selection, message);
         }
@@ -1369,7 +1382,10 @@ impl PaintApp {
     fn finish_save(&mut self, saved: SavedDocument) {
         self.document_name = saved.file_name;
         self.saved_snapshot = self.document().clone();
-        self.set_info(format!("Saved editable JSON as {}.", self.document_name));
+        self.set_info(format!(
+            "再編集用の JSON を {} として保存しました。",
+            self.document_name
+        ));
     }
 
     fn finish_load(&mut self, loaded: LoadedDocument) {
@@ -1380,55 +1396,64 @@ impl PaintApp {
         self.document_name = loaded.file_name;
         self.saved_snapshot = loaded.document;
         self.sync_layer_name_draft();
-        self.set_info(format!("Opened {}.", self.document_name));
+        self.set_info(format!("{} を開きました。", self.document_name));
     }
 
     fn finish_export(&mut self, exported: ExportedImage) {
-        self.set_info(format!("Exported PNG as {}.", exported.file_name));
+        self.set_info(format!(
+            "PNG を {} として書き出しました。",
+            exported.file_name
+        ));
     }
 
     fn storage_action_title(action: &'static str) -> &'static str {
         match action {
-            "save" => "Save JSON",
-            "load" => "Open JSON",
-            "export" => "Export PNG",
-            _ => "File action",
+            "save" => "JSON保存",
+            "load" => "JSONを開く",
+            "export" => "PNG書き出し",
+            _ => "ファイル操作",
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     fn storage_pending_message(action: &'static str) -> &'static str {
         match action {
-            "save" => "Browser save flow opened. Pick where to save the editable JSON.",
-            "load" => "Browser file picker opened. Choose a .paint.json document.",
-            "export" => "Preparing the PNG download in the browser...",
-            _ => "Waiting for the browser file flow...",
+            "save" => {
+                "ブラウザの保存ダイアログを開きました。再編集用 JSON の保存先を選んでください。"
+            }
+            "load" => "ブラウザのファイル選択を開きました。.paint.json を選んでください。",
+            "export" => "ブラウザで PNG ダウンロードを準備しています...",
+            _ => "ブラウザのファイル操作を待っています...",
         }
     }
 
     fn storage_error_message(action: &'static str, error: &StorageError) -> String {
         let label = Self::storage_action_title(action);
         match error {
-            StorageError::Cancelled => format!("{label} canceled."),
+            StorageError::Cancelled => format!("{label}をキャンセルしました。"),
             StorageError::EmptyFile => {
-                format!("{label} failed. The selected file was empty.")
+                format!("{label}できませんでした。選択したファイルは空です。")
             }
             StorageError::UnsupportedFormat(_) => {
-                format!("{label} failed. Pick a .paint.json document from this app.")
+                format!(
+                    "{label}できませんでした。このアプリの .paint.json ファイルを選んでください。"
+                )
             }
             StorageError::UnsupportedVersion(_) => {
-                format!("{label} failed. This document version is not supported here yet.")
+                format!(
+                    "{label}できませんでした。このドキュメントのバージョンにはまだ対応していません。"
+                )
             }
             StorageError::Deserialize(_) => {
-                format!("{label} failed. The file could not be read as a paint document.")
+                format!("{label}できませんでした。お絵かきドキュメントとして読み込めませんでした。")
             }
             StorageError::Serialize(_) => {
-                format!("{label} failed while preparing the file.")
+                format!("{label}できませんでした。ファイルの準備中に失敗しました。")
             }
             StorageError::Render(_) => {
-                format!("{label} failed while rendering the canvas.")
+                format!("{label}できませんでした。キャンバスの描画中に失敗しました。")
             }
-            StorageError::Io(details) => format!("{label} failed: {details}"),
+            StorageError::Io(details) => format!("{label}できませんでした: {details}"),
         }
     }
 
@@ -1624,7 +1649,7 @@ impl PaintApp {
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
             && self.canvas.discard_active_interaction()
         {
-            self.set_info("Cancelled the in-progress edit.");
+            self.set_info("進行中の操作をキャンセルしました。");
         }
 
         if !has_canvas_interaction {
@@ -1736,20 +1761,16 @@ impl eframe::App for PaintApp {
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => {
-            "Click to select on the active layer. Shift+Click adds or removes. Drag empty space for marquee select. Single shapes resize/rotate; multi-select can move, group-resize, rotate, align, and reorder."
+            "現在のレイヤー上でクリックすると選択できます。Shift+Click で追加 / 解除、空き領域のドラッグで矩形選択です。単体図形はサイズ変更 / 回転、複数選択は移動 / グループ変形 / 整列 / 重なり順変更ができます。"
         }
         CanvasToolKind::Brush => {
-            "Freehand drawing tool. Drag to draw a stroke on the active layer."
+            "フリーハンドで線を描くツールです。現在のレイヤー上をドラッグして描きます。"
         }
-        CanvasToolKind::Eraser => {
-            "Freehand eraser that paints with the canvas background on the active layer."
-        }
+        CanvasToolKind::Eraser => "キャンバス背景色でなぞるフリーハンド消しゴムです。",
         CanvasToolKind::Rectangle => {
-            "Drag from one corner to the opposite corner on the active layer."
+            "現在のレイヤーで、始点の角から反対側の角までドラッグして四角形を作ります。"
         }
-        CanvasToolKind::Ellipse => {
-            "Drag a bounding box to create an ellipse outline on the active layer."
-        }
-        CanvasToolKind::Line => "Drag from a start point to an end point on the active layer.",
+        CanvasToolKind::Ellipse => "現在のレイヤーで、外接する枠をドラッグして楕円を作ります。",
+        CanvasToolKind::Line => "現在のレイヤーで、始点から終点までドラッグして直線を作ります。",
     }
 }

@@ -38,8 +38,8 @@ pub enum GuideAxis {
 impl GuideAxis {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Horizontal => "Horizontal",
-            Self::Vertical => "Vertical",
+            Self::Horizontal => "横",
+            Self::Vertical => "縦",
         }
     }
 }
@@ -320,8 +320,8 @@ pub enum ToolKind {
 impl ToolKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Brush => "Brush",
-            Self::Eraser => "Eraser",
+            Self::Brush => "線",
+            Self::Eraser => "消しゴム",
         }
     }
 }
@@ -337,9 +337,9 @@ pub enum ShapeKind {
 impl ShapeKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Rectangle => "Rectangle",
-            Self::Ellipse => "Ellipse",
-            Self::Line => "Line",
+            Self::Rectangle => "四角形",
+            Self::Ellipse => "楕円",
+            Self::Line => "直線",
         }
     }
 }
@@ -357,12 +357,12 @@ pub enum AlignmentKind {
 impl AlignmentKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Left => "Align Left",
-            Self::HorizontalCenter => "Align Center Horizontally",
-            Self::Right => "Align Right",
-            Self::Top => "Align Top",
-            Self::VerticalCenter => "Align Center Vertically",
-            Self::Bottom => "Align Bottom",
+            Self::Left => "左揃え",
+            Self::HorizontalCenter => "横中央揃え",
+            Self::Right => "右揃え",
+            Self::Top => "上揃え",
+            Self::VerticalCenter => "縦中央揃え",
+            Self::Bottom => "下揃え",
         }
     }
 }
@@ -378,10 +378,10 @@ pub enum StackOrderCommand {
 impl StackOrderCommand {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::BringToFront => "Bring to Front",
-            Self::SendToBack => "Send to Back",
-            Self::BringForward => "Bring Forward",
-            Self::SendBackward => "Send Backward",
+            Self::BringToFront => "最前面へ",
+            Self::SendToBack => "最背面へ",
+            Self::BringForward => "一つ前面へ",
+            Self::SendBackward => "一つ背面へ",
         }
     }
 }
@@ -395,8 +395,8 @@ pub enum DistributionKind {
 impl DistributionKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Horizontal => "Distribute Horizontally",
-            Self::Vertical => "Distribute Vertically",
+            Self::Horizontal => "横方向に等間隔",
+            Self::Vertical => "縦方向に等間隔",
         }
     }
 }
@@ -899,7 +899,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.tool.label(),
             Self::Shape(shape) => shape.kind.label(),
-            Self::Group(_) => "Group",
+            Self::Group(_) => "グループ",
         }
     }
 
@@ -1024,7 +1024,7 @@ impl Default for PaintDocument {
 
 impl PaintDocument {
     fn default_layers() -> Vec<PaintLayer> {
-        vec![PaintLayer::new(DEFAULT_LAYER_ID, "Layer 1")]
+        vec![PaintLayer::new(DEFAULT_LAYER_ID, "レイヤー 1")]
     }
 
     pub fn from_flat_elements(
@@ -1041,7 +1041,7 @@ impl PaintDocument {
             rulers: RulerSettings::default(),
             layers: vec![PaintLayer {
                 id: DEFAULT_LAYER_ID,
-                name: "Layer 1".to_owned(),
+                name: "レイヤー 1".to_owned(),
                 visible: true,
                 locked: false,
                 elements,
@@ -1205,7 +1205,7 @@ impl PaintDocument {
                 .unwrap_or(DEFAULT_LAYER_ID)
                 + 1,
         );
-        let layer_name = format!("Layer {}", next.layers.len() + 1);
+        let layer_name = format!("レイヤー {}", next.layers.len() + 1);
         next.layers.push(PaintLayer::new(new_id, layer_name));
         next.active_layer_id = new_id;
         next.next_layer_id = new_id + 1;
