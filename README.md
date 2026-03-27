@@ -115,6 +115,9 @@ trunk build --release
 - 最小レイヤー実装では、選択と描画の対象は `active layer` のみです
 - `visible = false` のレイヤーは描画、選択、PNG 出力に含まれません
 - `locked = true` のレイヤーは表示されますが、選択や編集の対象になりません
+- 選択中要素は `Move Here` / `Duplicate Here` で別レイヤーへ送れます
+- 移動先 / 複製先には `visible = true` かつ `locked = false` のレイヤーだけを使えます
+- レイヤー間移動 / 複製の完了後は、移動先レイヤーが active になり、新しい要素群の選択を維持します
 - `Shift + Click` で選択に追加 / 解除できます
 - 空き領域をドラッグすると矩形選択できます
 - `Shift` を押したまま矩形選択すると、既存選択へ追加できます
@@ -173,6 +176,9 @@ trunk build --release
 - レイヤー名は `Rename Layer` で変更できます
 - `Show` / `Hide` で表示切替、`Lock` / `Unlock` で編集可否を切り替えます
 - `Up` / `Down` でレイヤー順を並び替えます
+- active layer は強調表示され、`ACTIVE` / `HIDDEN` / `LOCKED` と要素数をレイヤーカード上に表示します
+- 選択があると、他の編集可能レイヤーに `Move Here` / `Duplicate Here` を表示します
+- レイヤー間移動と複製は、移動先レイヤーの末尾へ追加する単純なルールです
 - 要素の重なり順は「同一レイヤー内」で維持され、レイヤー順はその外側の描画順として効きます
 
 ### ズーム / パン
@@ -230,6 +236,7 @@ trunk build --release
   - `rotation_radians`
 - 要素の並び順は各レイヤー内の `elements[]` 順として保持され、重なり順としてそのまま復元されます
 - レイヤーの並び順も保存され、描画順としてそのまま復元されます
+- レイヤー間移動 / 複製の結果も、最終的な各レイヤーの `elements[]` 構成としてそのまま保存されます
 - 旧 shape JSON に `rotation_radians` がない場合は `0` として読み込みます
 
 ### PNG 出力
@@ -261,6 +268,7 @@ trunk build --release
 - 水平方向 / 垂直方向の等間隔配置
 - Bring to Front / Send to Back / Bring Forward / Send Backward
 - レイヤーの追加 / 削除 / 名前変更 / 表示切替 / ロック / 並び替え
+- 選択要素のレイヤー間移動 / 複製
 
 未対応:
 - リサイズ中のスナップ
@@ -308,6 +316,7 @@ trunk build --release
 - 塗り、角丸矩形、矢印付き線
 - スナップ、グリッド
 - レイヤー opacity / blend mode
+- レイヤー間ドラッグ移動
 - ストロークの専用変形ハンドル
 - 保存形式 migration
 - ペン / タッチ入力最適化

@@ -7,17 +7,19 @@
 - active layer の切り替え
 - active layer への新規要素追加
 - visible / locked 状態を反映した選択 / 描画 / PNG 出力
+- 選択要素のレイヤー間移動
+- 選択要素のレイヤー間複製
+- active layer 強調、状態表示、要素数表示を含むレイヤー UI 改善
 - レイヤー順と同一レイヤー内の重なり順の分離
 - `format.version = 4` の JSON 保存
 - `v3 / v2 / v1` の読込互換を維持した migration
 - レイヤー変更を含む Undo / Redo
-- layer round-trip、hidden / locked、layer add/delete のテスト
+- layer round-trip、hidden / locked、layer add/delete、layer transfer のテスト
 
 ## 今回あえて入れなかった範囲
 
 - layer opacity / blend mode
 - レイヤー間ドラッグ移動
-- レイヤー間での要素コピー / 貼り付け
 - 複数レイヤー横断の同時選択 / 一括編集
 - 単一選択ストロークの専用リサイズ / 回転ハンドル
 - 塗り
@@ -32,7 +34,6 @@
 
 - layer opacity / blend mode
 - レイヤー間ドラッグ移動
-- レイヤー間の要素移送 UI
 - 複数レイヤー横断の選択 / 整列
 - group 内部編集とネスト可視化
 - 単一選択ストロークの専用変形 UI
