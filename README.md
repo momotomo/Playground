@@ -94,6 +94,15 @@ trunk build --release
 - 出力は `dist/`
 - GitHub Pages へ載せる静的成果物になります
 
+## 最初の使い方
+
+1. `Brush`、`Rectangle`、`Ellipse`、`Line` のどれかを選び、canvas をドラッグして 1 つ描きます。
+2. `Select` に切り替えてクリックすると、移動や再編集ができます。
+3. `Shift + Click` または空き領域ドラッグで複数選択できます。
+4. `Space + Drag` または中ボタンドラッグでパン、`Ctrl/Cmd + Wheel` か `+ / -` でズームします。
+5. 編集を続けるなら `Save JSON`、共有するなら `Export PNG` を使います。
+6. 操作に迷ったら上部の `Help` を開くと、最小ヘルプとショートカットを確認できます。
+
 ## 操作方法
 
 ### ツール
@@ -165,8 +174,8 @@ trunk build --release
 - `Undo`: 直前の編集を戻します
 - `Redo`: `Undo` した編集を戻します
 - `Clear`: 作品全体を消去します
-- `Save`: 再編集用 JSON を保存します
-- `Load`: JSON から再編集状態を復元します
+- `Save JSON`: 再編集用 JSON を保存します
+- `Open JSON`: JSON から再編集状態を復元します
 - `Export PNG`: 背景と全要素を含む共有用 PNG を書き出します
 
 ### レイヤー
@@ -302,13 +311,14 @@ trunk build --release
 ## native / web の違い
 
 - native
-  - `Save` / `Load` は OS のファイルダイアログを使います
+  - `Save JSON` / `Open JSON` は OS のファイルダイアログを使います
   - `Export PNG` は OS ダイアログから `.png` を保存します
 - web
-  - `Save` はブラウザダウンロードとして JSON を保存します
-  - `Load` はブラウザのファイル選択を使います
+  - `Save JSON` はブラウザダウンロードとして JSON を保存します
+  - `Open JSON` はブラウザのファイル選択を使います
   - `Export PNG` はブラウザダウンロードとして保存します
   - GitHub Pages 上ではブラウザ制約のため、native のような継続的ファイルハンドル保持はしません
+- 上部の `Help` と空状態の案内は native / web の両方で同じです
 - 選択 / 矩形選択 / Group / Ungroup / 一括リサイズ / 一括回転 / 整列 / 等間隔配置 / 重なり順変更 / 図形再編集 / レイヤー操作 / グリッド / ガイド / ズーム / パンの基本操作は native / web で同じです
 
 ## GitHub Pages デプロイ手順
