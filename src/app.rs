@@ -303,6 +303,7 @@ impl PaintApp {
         );
         ui.small("Pan: Space + Drag or Middle Drag");
         ui.small("Reset view: Ctrl/Cmd + 0");
+        ui.small("Tips: Shift+Click multi-select, drag guides, Ctrl/Cmd+Wheel zoom");
 
         ui.separator();
         self.show_canvas_aids(ui);
@@ -318,9 +319,11 @@ impl PaintApp {
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
         #[derive(Clone, Copy)]
         enum AidAction {
+            ToggleRulersVisible,
             ToggleGridVisible,
             ToggleGridSnap,
             SetGridSpacing(f32),
+            ToggleSmartGuidesVisible,
             ToggleGuidesVisible,
             ToggleGuidesSnap,
             AddGuide(GuideAxis),
@@ -329,6 +332,8 @@ impl PaintApp {
 
         let has_canvas_interaction = self.canvas.has_active_interaction();
         let grid = self.document().grid();
+        let rulers_visible = self.document().rulers().visible;
+        let smart_guides_visible = self.document().smart_guides().visible;
         let guides_visible = self.document().guides().visible;
         let guides_snap = self.document().guides().snap_enabled;
         let guides: Vec<_> = self
@@ -341,16 +346,35 @@ impl PaintApp {
             .collect();
         let mut pending_action = None;
 
-        ui.label(RichText::new("Grid & Guides").strong());
+        ui.label(RichText::new("Layout Aids").strong());
         ui.small(format!(
-            "Grid {:.0}px · {} guide{} · snap supports move, shape creation, and single / multi resize.",
+            "Rulers {} · Grid {:.0}px · Smart Guides {} · {} guide{}.",
+            if rulers_visible { "on" } else { "off" },
             grid.spacing,
+            if smart_guides_visible { "on" } else { "off" },
             guides.len(),
             if guides.len() == 1 { "" } else { "s" }
         ));
-        ui.small("Drag visible guide lines on the canvas to reposition them.");
+        ui.small("Move snapping supports grid, guides, and smart guides. Drag visible guides to reposition them.");
 
         ui.add_enabled_ui(!has_canvas_interaction, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut show_rulers = rulers_visible;
+                if ui.checkbox(&mut show_rulers, "Show Rulers").changed() {
+                    pending_action = Some(AidAction::ToggleRulersVisible);
+                }
+
+                let mut show_smart_guides = smart_guides_visible;
+                if ui
+                    .checkbox(&mut show_smart_guides, "Smart Guides")
+                    .changed()
+                {
+                    pending_action = Some(AidAction::ToggleSmartGuidesVisible);
+                }
+            });
+
+            ui.add_space(6.0);
+
             ui.horizontal_wrapped(|ui| {
                 let mut show_grid = grid.visible;
                 if ui.checkbox(&mut show_grid, "Show Grid").changed() {
@@ -446,9 +470,11 @@ impl PaintApp {
 
         if let Some(action) = pending_action {
             match action {
+                AidAction::ToggleRulersVisible => self.toggle_rulers_visibility(),
                 AidAction::ToggleGridVisible => self.toggle_grid_visibility(),
                 AidAction::ToggleGridSnap => self.toggle_grid_snap(),
                 AidAction::SetGridSpacing(spacing) => self.set_grid_spacing(spacing),
+                AidAction::ToggleSmartGuidesVisible => self.toggle_smart_guides_visibility(),
                 AidAction::ToggleGuidesVisible => self.toggle_guides_visibility(),
                 AidAction::ToggleGuidesSnap => self.toggle_guides_snap(),
                 AidAction::AddGuide(axis) => self.add_guide(axis),
@@ -1089,6 +1115,18 @@ impl PaintApp {
         }
     }
 
+    fn toggle_rulers_visibility(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_rulers_visibility_document() {
+            let state = if next.rulers().visible {
+                "visible"
+            } else {
+                "hidden"
+            };
+            self.apply_document_configuration_change(next, format!("Set rulers to {state}."));
+        }
+    }
+
     fn toggle_grid_visibility(&mut self) {
         let document = self.document().clone();
         if let Some(next) = document.toggled_grid_visibility_document() {
@@ -1121,6 +1159,18 @@ impl PaintApp {
                 next,
                 format!("Set grid spacing to {:.0}px.", applied_spacing),
             );
+        }
+    }
+
+    fn toggle_smart_guides_visibility(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_smart_guides_visibility_document() {
+            let state = if next.smart_guides().visible {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.apply_document_configuration_change(next, format!("Smart guides {state}."));
         }
     }
 
