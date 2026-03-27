@@ -1,16 +1,24 @@
 # Rust Paint Foundation
 
-`egui + eframe` だけで構成した、Rust オンリーのお絵かきツール基盤です。  
+`egui + eframe` だけで構成した、Rust オンリーのお絵かきツールです。  
 同じコードベースから native 実行と WebAssembly 実行を扱い、GitHub Pages へ静的配信できます。  
-このフェーズでは、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集`、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`Group / Ungroup`、`整列 / 等間隔配置`、`重なり順操作`、`最小レイヤー機能`、`グリッド / ガイド / スナップ` に加えて、`スマートガイド` と `ルーラー UI` を追加しています。
+MVP 完成版として、再編集用 JSON 保存、`PNG 出力`、`ズーム / パン`、`図形再編集`、`ドラッグ矩形選択`、`複数選択の一括リサイズ / 回転`、`Group / Ungroup`、`整列 / 等間隔配置`、`重なり順操作`、`レイヤー`、`グリッド / ガイド / スナップ`、`スマートガイド`、`ルーラー UI` までをまとめています。
 
-## プロジェクト概要
+## Web デモ
+
+- 公開 URL: [https://momotomo.github.io/Playground/](https://momotomo.github.io/Playground/)
+
+## アプリ概要
 
 - Rust だけで UI とアプリケーション本体を構築
 - `egui` による即時モード UI
 - `eframe` による native / web 共通アプリ基盤
+- GitHub Pages でそのまま試せる Web 版
+
+## 主な機能
+
 - フリーハンド描画、消しゴム、`Undo`、`Redo`、`Clear`
-- 編集用 JSON 形式での `Save` / `Load`
+- 編集用 JSON 形式での `Save JSON` / `Open JSON`
 - 共有用 `Export PNG`
 - キャンバスのズーム、パン、表示リセット
 - 単一選択と複数選択
@@ -74,6 +82,12 @@ cargo fetch
 cargo run
 ```
 
+## native 版の使い方
+
+- 起動したら `Brush` か図形ツールを選んでドラッグすると描けます
+- 編集を続けるなら `Save JSON`、共有するなら `Export PNG` を使います
+- `Open JSON` は OS のファイルダイアログから再編集用データを開きます
+
 ## web 起動手順
 
 ### ローカル開発サーバー
@@ -93,6 +107,13 @@ trunk build --release
 
 - 出力は `dist/`
 - GitHub Pages へ載せる静的成果物になります
+
+## Web 版の使い方
+
+- 公開 URL か `trunk serve` のローカル URL をブラウザで開きます
+- 上部の `Help` を開くと、描く / 選択 / 複数選択 / パン / 保存の最小説明を確認できます
+- `Save JSON` はブラウザダウンロード、`Open JSON` はファイル選択、`Export PNG` は PNG ダウンロードです
+- GitHub Pages 上でも描画、選択、変形、レイヤー、グリッド / ガイドはそのまま使えます
 
 ## 最初の使い方
 
@@ -222,8 +243,8 @@ trunk build --release
 - `Ctrl/Cmd + Z`: Undo
 - `Ctrl/Cmd + Shift + Z`: Redo
 - `Ctrl/Cmd + Y`: Redo の代替
-- `Ctrl/Cmd + S`: Save
-- `Ctrl/Cmd + O`: Load
+- `Ctrl/Cmd + S`: Save JSON
+- `Ctrl/Cmd + O`: Open JSON
 - `Ctrl/Cmd + Shift + E`: Export PNG
 - `Ctrl/Cmd + G`: Group
 - `Ctrl/Cmd + Shift + G`: Ungroup
@@ -328,6 +349,7 @@ trunk build --release
 - GitHub Free で使う場合は、リポジトリを `public` にするのが基本です
 - private repo では、プラン次第で GitHub Pages が使えないことがあります
 - このリポジトリには `.github/workflows/pages.yml` を追加済みです
+- 公開後の URL は project pages なら `https://<owner>.github.io/<repo>/` になります
 
 ### GitHub 側設定
 
@@ -335,6 +357,7 @@ trunk build --release
 2. `Settings` -> `Pages` を開く
 3. `Build and deployment` の `Source` を `GitHub Actions` にする
 4. `master` へ push すると Pages workflow が走る
+5. Actions 完了後、公開 URL を開いて web 版を確認する
 
 ## ドキュメント
 
@@ -367,7 +390,7 @@ trunk build --release
 ## GitHub Pages 上の制約
 
 - Pages は静的配信なので、保存はブラウザダウンロードになります
-- web 版の `Load` はユーザーが毎回ファイルを選択する形です
+- web 版の `Open JSON` はユーザーが毎回ファイルを選択する形です
 - サーバー保存、認証、DB は使っていません
 
 ## Trunk の色設定エラーを避けるメモ
