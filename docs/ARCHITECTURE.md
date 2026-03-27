@@ -116,6 +116,7 @@
   - `SingleRotate`
   - `MultiResize`
   - `MultiRotate`
+  - `GuideMove`
   - `Marquee`
 - `SelectionSession` は preview 用だけに使い、確定時にだけ履歴へ流す
 - 単一選択時は既存のハンドル編集を使い、複数選択時は group bbox ハンドルへ切り替える
@@ -175,9 +176,12 @@
   - `lines`
 - guide は `GuideLine { axis, position }` で保持する
 - グリッドとガイドは作品補助情報として document に保存し、view state とは分離する
+- grid spacing は document 側の設定として保持し、UI ではプリセットと step ボタンから変更する
+- visible な guide は canvas 上で直接ドラッグ移動できる
 - スナップ対象は最低限 bbox の `min / center / max` とドラッグ中ハンドルに限定している
 - move は選択全体の bounds を使って x/y を独立にスナップする
 - 図形作成と resize はドラッグ中 pointer をグリッド / ガイドへ寄せて preview を更新する
+- guide drag は preview 中だけ `GuideMove` を持ち、リリース時にだけ document へ反映する
 - grid / guides の表示は canvas UI 専用で、PNG render には含めない
 
 ## リサイズ / 回転操作の設計
@@ -269,7 +273,7 @@
 - 新規 stroke / 図形作成は `commit_element`
 - 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
 - 複数要素の Move / Resize / Rotate / Group / Ungroup / Align / Distribute / Reorder も `replace_document` を 1 回だけ積む
-- layer Add / Delete / Rename / Visibility / Lock / Move、selection の layer transfer、grid / guides 設定変更も `replace_document` を 1 回だけ積む
+- layer Add / Delete / Rename / Visibility / Lock / Move、selection の layer transfer、grid / guides 設定変更、guide drag も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -277,7 +281,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、layer add/delete/rename/visible/locked/order、selection の layer move / duplicate、grid / guides toggle / add / remove、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、Group / Ungroup、整列、等間隔配置、重なり順変更、layer add/delete/rename/visible/locked/order、selection の layer move / duplicate、grid / guides toggle / spacing change / add / remove / move、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -294,6 +298,7 @@
 - レイヤー内重なり順は `layer.elements[]` の配列順として保存する
 - レイヤー間移動 / 複製の結果も追加メタデータなしでそのまま保存できるため、format version は `4` のまま維持している
 - grid / guides も `document` に直接保存するため、同じ `format.version = 4` のまま後方互換を保てる
+- spacing や guide position の変更も追加 migration なしで保存できる
 
 ## PNG 出力の責務
 
