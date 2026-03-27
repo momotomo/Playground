@@ -143,6 +143,7 @@ pub struct PaintApp {
     storage: StorageFacade,
     active_tool: CanvasToolKind,
     multi_select_mode: bool,
+    finger_draw_enabled: bool,
     brush_color: RgbaColor,
     brush_width: f32,
     status_message: StatusMessage,
@@ -165,6 +166,7 @@ impl Default for PaintApp {
             storage,
             active_tool: CanvasToolKind::Brush,
             multi_select_mode: false,
+            finger_draw_enabled: false,
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
@@ -217,6 +219,7 @@ impl PaintApp {
             color: self.brush_color,
             width: self.brush_width,
             multi_select_mode: self.multi_select_mode,
+            finger_draw_enabled: self.finger_draw_enabled,
         }
     }
 
@@ -242,6 +245,21 @@ impl PaintApp {
         self.set_info(
             "複数選択を保ったまま通常の選択に戻しました。ドラッグでまとめて移動できます。",
         );
+    }
+
+    fn set_finger_draw_enabled(&mut self, enabled: bool) {
+        if self.finger_draw_enabled == enabled {
+            return;
+        }
+
+        self.finger_draw_enabled = enabled;
+        if enabled {
+            self.set_info(
+                "指でも描画できるようにしました。タブレットでは必要に応じてオフに戻せます。",
+            );
+        } else {
+            self.set_info("指の既定動作をビュー操作と長押し選択に戻しました。ペンやマウスはそのまま描画できます。");
+        }
     }
 
     fn sync_layer_name_draft(&mut self) {
@@ -302,6 +320,18 @@ impl PaintApp {
                 "選び終わったらこのボタンで通常の選択に戻り、そのままドラッグで移動できます。",
             );
         }
+        if ui
+            .add_sized(
+                [ui.available_width(), TOOL_BUTTON_HEIGHT],
+                egui::Button::new("指でも描く").selected(self.finger_draw_enabled),
+            )
+            .clicked()
+        {
+            self.set_finger_draw_enabled(!self.finger_draw_enabled);
+        }
+        ui.small(
+            "オフのときは、指はパン / 長押し選択寄り、ペンやマウスは描画寄りの挙動になります。",
+        );
         ui.small("タブレットではピンチでズーム、2本指ドラッグでパンできます。");
         ui.add_space(8.0);
 
@@ -359,6 +389,14 @@ impl PaintApp {
                 "オフ"
             }
         ));
+        ui.small(format!(
+            "指でも描く: {}",
+            if self.finger_draw_enabled {
+                "オン"
+            } else {
+                "オフ"
+            }
+        ));
         ui.small(self.canvas.selection_summary(self.document()));
 
         ui.separator();
@@ -385,6 +423,7 @@ impl PaintApp {
         ui.small("複数編集: 移動、グループ化、サイズ変更 / 回転、整列、等間隔、重なり順変更");
         ui.small("パン: 手のひらツール、Space+Drag、または中ボタンドラッグ");
         ui.small("タブレット: ピンチでズーム、2本指ドラッグでパン");
+        ui.small("タブレット: 指は長押しで選択に入りやすく、必要なら「指でも描く」で描画に切り替えられます");
         ui.small("表示リセット: Ctrl/Cmd + 0");
         ui.small("ヒント: タブレットでは複数選択モード、手のひらツール、ピンチズームが便利です。");
 
@@ -951,6 +990,7 @@ impl PaintApp {
                 ui.small("選択: 選択ツールで要素をクリックします。角ハンドルでサイズ変更、丸いハンドルで回転します。");
                 ui.small("複数選択: Shift+Click またはドラッグ選択。タブレットでは「複数選択モード」をオンにすると、タップで追加 / 解除できます。選び終わったら「選択を保ったまま移動へ」で通常の選択に戻せます。");
                 ui.small("パンとズーム: Space+Drag または中ボタンドラッグでパン。タブレットでは「手のひら」ツールのドラッグ、2本指ドラッグでパン、ピンチでズームできます。Ctrl/Cmd+Wheel か +/- でもズーム、Ctrl/Cmd+0 で表示を戻します。");
+                ui.small("タブレットのコツ: 既定では指はビュー操作と長押し選択寄り、ペンやマウスは描画寄りです。指で描きたいときは左パネルの「指でも描く」をオンにします。");
                 ui.small("ファイル: JSON保存 は再編集用、JSONを開く は復元、PNG書き出し は共有用画像です。");
                 ui.small("レイヤー: 現在のレイヤーに描きます。タブレットでもレイヤー追加、表示切替、ロック、移動 / 複製が使えます。非表示レイヤーは書き出しに含まれません。");
                 #[cfg(target_arch = "wasm32")]
@@ -1825,6 +1865,15 @@ impl eframe::App for PaintApp {
                 ctx.request_repaint();
             }
 
+            if let Some(tool) = output.requested_tool
+                && self.active_tool != tool
+            {
+                self.active_tool = tool;
+                self.set_info(
+                    "長押しから選択に入りました。続けてドラッグして移動や編集ができます。",
+                );
+            }
+
             if let Some(edit) = output.committed_edit {
                 self.apply_document_edit(edit);
             }
@@ -1847,7 +1896,7 @@ fn tool_hint(tool: CanvasToolKind) -> &'static str {
             "手のひらツールです。キーボードなしでキャンバスをドラッグして移動できます。タブレットでは2本指ドラッグのパンやピンチズームも使えます。"
         }
         CanvasToolKind::Brush => {
-            "フリーハンドで線を描くツールです。現在のレイヤー上をドラッグして描きます。"
+            "フリーハンドで線を描くツールです。現在のレイヤー上をドラッグして描きます。タブレットでは既定で指はパンや長押し選択寄りなので、必要なら「指でも描く」をオンにします。"
         }
         CanvasToolKind::Eraser => "キャンバス背景色でなぞるフリーハンド消しゴムです。",
         CanvasToolKind::Rectangle => {
