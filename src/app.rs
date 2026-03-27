@@ -247,9 +247,16 @@ impl PaintApp {
     }
 
     fn set_active_tool(&mut self, tool: CanvasToolKind, announce: bool) {
+        if self.active_tool == tool {
+            return;
+        }
+
+        if tool != CanvasToolKind::Select && self.multi_select_mode {
+            self.multi_select_mode = false;
+        }
         self.active_tool = tool;
         if announce {
-            self.set_info(format!("{} に切り替えました。", tool.label()));
+            self.set_info(tool_switch_message(tool));
         }
     }
 
@@ -271,9 +278,7 @@ impl PaintApp {
         self.multi_select_mode = enabled;
         if enabled {
             self.active_tool = CanvasToolKind::Select;
-            self.set_info(
-                "複数選択モードをオンにしました。タップで追加 / 解除できます。選び終わったら「選択を保ったまま移動へ」で通常操作へ戻れます。",
-            );
+            self.set_info("複数選択モードをオンにしました。タップで追加や解除ができます。");
         } else {
             self.set_info("複数選択モードをオフにしました。通常の選択と移動に戻ります。");
         }
@@ -282,9 +287,7 @@ impl PaintApp {
     fn exit_multi_select_mode_for_editing(&mut self) {
         self.multi_select_mode = false;
         self.active_tool = CanvasToolKind::Select;
-        self.set_info(
-            "複数選択を保ったまま通常の選択に戻しました。ドラッグでまとめて移動できます。",
-        );
+        self.set_info("複数選択を保ったまま通常の移動に戻しました。");
     }
 
     fn set_finger_draw_enabled(&mut self, enabled: bool) {
@@ -346,6 +349,14 @@ impl PaintApp {
         } else {
             "チュートリアルをスキップしました。必要ならヘルプから開けます。"
         });
+    }
+
+    fn apply_tool_button_selection(&mut self, tool: CanvasToolKind) {
+        if tool == CanvasToolKind::Select && self.multi_select_mode {
+            self.exit_multi_select_mode_for_editing();
+        } else {
+            self.set_active_tool(tool, true);
+        }
     }
 
     fn show_file_summary(&self, ui: &mut egui::Ui) {
@@ -432,9 +443,10 @@ impl PaintApp {
                     egui::Button::new(tool.label()).selected(is_selected),
                 )
                 .on_hover_text(tool_button_tooltip(tool));
-            if response.clicked() && !is_selected {
-                self.active_tool = tool;
-                self.set_info(format!("{}: {}", tool.label(), tool_button_tooltip(tool)));
+            let can_activate =
+                !is_selected || (tool == CanvasToolKind::Select && self.multi_select_mode);
+            if response.clicked() && can_activate {
+                self.apply_tool_button_selection(tool);
             }
         }
 
@@ -974,161 +986,170 @@ impl PaintApp {
             !has_canvas_interaction && self.canvas.selection_contains_group(self.document());
         let can_distribute = !has_canvas_interaction && selection_count >= 3;
 
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(can_undo, egui::Button::new("元に戻す"))
-                .on_hover_text("ひとつ前の編集に戻します。")
-                .clicked()
-            {
-                self.perform_undo();
-            }
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("元に戻す"))
+                    .on_hover_text("ひとつ前の編集に戻します。")
+                    .clicked()
+                {
+                    self.perform_undo();
+                }
 
-            if ui
-                .add_enabled(can_redo, egui::Button::new("やり直す"))
-                .on_hover_text("元に戻した編集をもう一度適用します。")
-                .clicked()
-            {
-                self.perform_redo();
-            }
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("やり直す"))
+                    .on_hover_text("元に戻した編集をもう一度適用します。")
+                    .clicked()
+                {
+                    self.perform_redo();
+                }
 
-            if ui
-                .add_enabled(can_clear, egui::Button::new("クリア"))
-                .on_hover_text("作品全体を消去します。")
-                .clicked()
-            {
-                self.perform_clear();
-            }
+                if ui
+                    .add_enabled(can_clear, egui::Button::new("クリア"))
+                    .on_hover_text("作品全体を消去します。")
+                    .clicked()
+                {
+                    self.perform_clear();
+                }
 
-            ui.separator();
+                ui.separator();
 
-            if ui
-                .add_enabled(can_file_io, egui::Button::new("JSON保存"))
-                .on_hover_text("再編集できる JSON を保存します。")
-                .clicked()
-            {
-                self.save_document(ctx);
-            }
+                if ui
+                    .add_enabled(can_file_io, egui::Button::new("JSON保存"))
+                    .on_hover_text("再編集できる JSON を保存します。")
+                    .clicked()
+                {
+                    self.save_document(ctx);
+                }
 
-            if ui
-                .add_enabled(can_file_io, egui::Button::new("JSONを開く"))
-                .on_hover_text("保存した JSON を開いて続きを編集します。")
-                .clicked()
-            {
-                self.load_document(ctx);
-            }
+                if ui
+                    .add_enabled(can_file_io, egui::Button::new("JSONを開く"))
+                    .on_hover_text("保存した JSON を開いて続きを編集します。")
+                    .clicked()
+                {
+                    self.load_document(ctx);
+                }
 
-            if ui
-                .add_enabled(can_file_io, egui::Button::new("PNG書き出し"))
-                .on_hover_text("共有しやすい PNG 画像を書き出します。")
-                .clicked()
-            {
-                self.export_png(ctx);
-            }
+                if ui
+                    .add_enabled(can_file_io, egui::Button::new("PNG書き出し"))
+                    .on_hover_text("共有しやすい PNG 画像を書き出します。")
+                    .clicked()
+                {
+                    self.export_png(ctx);
+                }
 
-            ui.separator();
+                ui.separator();
 
-            ui.add_enabled_ui(can_align, |ui| {
-                ui.menu_button("整列", |ui| {
-                    for alignment in [
-                        AlignmentKind::Left,
-                        AlignmentKind::HorizontalCenter,
-                        AlignmentKind::Right,
-                        AlignmentKind::Top,
-                        AlignmentKind::VerticalCenter,
-                        AlignmentKind::Bottom,
-                    ] {
-                        if ui.button(alignment.label()).clicked() {
-                            self.apply_alignment(alignment);
+                ui.add_enabled_ui(can_align, |ui| {
+                    ui.menu_button("整列", |ui| {
+                        for alignment in [
+                            AlignmentKind::Left,
+                            AlignmentKind::HorizontalCenter,
+                            AlignmentKind::Right,
+                            AlignmentKind::Top,
+                            AlignmentKind::VerticalCenter,
+                            AlignmentKind::Bottom,
+                        ] {
+                            if ui.button(alignment.label()).clicked() {
+                                self.apply_alignment(alignment);
+                            }
                         }
-                    }
+                    });
                 });
+
+                if ui
+                    .add_enabled(can_group, egui::Button::new("グループ化"))
+                    .on_hover_text("複数選択をひとまとまりにします。")
+                    .clicked()
+                {
+                    self.apply_group();
+                }
+
+                if ui
+                    .add_enabled(can_ungroup, egui::Button::new("グループ解除"))
+                    .on_hover_text("選択中のグループを 1 段だけ展開します。")
+                    .clicked()
+                {
+                    self.apply_ungroup();
+                }
+
+                ui.add_enabled_ui(can_distribute, |ui| {
+                    ui.menu_button("等間隔", |ui| {
+                        for distribution in
+                            [DistributionKind::Horizontal, DistributionKind::Vertical]
+                        {
+                            if ui.button(distribution.label()).clicked() {
+                                self.apply_distribution(distribution);
+                            }
+                        }
+                    });
+                });
+
+                ui.add_enabled_ui(can_reorder, |ui| {
+                    ui.menu_button("重なり順", |ui| {
+                        for command in [
+                            StackOrderCommand::BringToFront,
+                            StackOrderCommand::BringForward,
+                            StackOrderCommand::SendBackward,
+                            StackOrderCommand::SendToBack,
+                        ] {
+                            if ui.button(command.label()).clicked() {
+                                self.apply_stack_order(command);
+                            }
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                if ui
+                    .add_enabled(can_adjust_view, egui::Button::new("-"))
+                    .on_hover_text("表示を少し縮小します。")
+                    .clicked()
+                {
+                    self.zoom_out();
+                }
+
+                ui.label(RichText::new(self.canvas.zoom_label()).monospace());
+
+                if ui
+                    .add_enabled(can_adjust_view, egui::Button::new("+"))
+                    .on_hover_text("表示を少し拡大します。")
+                    .clicked()
+                {
+                    self.zoom_in();
+                }
+
+                if ui
+                    .add_enabled(can_adjust_view, egui::Button::new("表示をリセット"))
+                    .on_hover_text("ズームと表示位置を初期状態へ戻します。")
+                    .clicked()
+                {
+                    self.reset_view();
+                }
+
+                ui.separator();
+                if ui
+                    .button(if self.show_help {
+                        "ヘルプを閉じる"
+                    } else {
+                        "ヘルプ"
+                    })
+                    .on_hover_text("操作説明やチュートリアル再表示を開きます。")
+                    .clicked()
+                {
+                    self.show_help = !self.show_help;
+                }
             });
 
-            if ui
-                .add_enabled(can_group, egui::Button::new("グループ化"))
-                .on_hover_text("複数選択をひとまとまりにします。")
-                .clicked()
-            {
-                self.apply_group();
-            }
-
-            if ui
-                .add_enabled(can_ungroup, egui::Button::new("グループ解除"))
-                .on_hover_text("選択中のグループを 1 段だけ展開します。")
-                .clicked()
-            {
-                self.apply_ungroup();
-            }
-
-            ui.add_enabled_ui(can_distribute, |ui| {
-                ui.menu_button("等間隔", |ui| {
-                    for distribution in [DistributionKind::Horizontal, DistributionKind::Vertical] {
-                        if ui.button(distribution.label()).clicked() {
-                            self.apply_distribution(distribution);
-                        }
-                    }
-                });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("状態").small().strong());
+                ui.add_sized(
+                    [ui.available_width(), 18.0],
+                    egui::Label::new(self.status_message.rich_text()).truncate(),
+                );
             });
-
-            ui.add_enabled_ui(can_reorder, |ui| {
-                ui.menu_button("重なり順", |ui| {
-                    for command in [
-                        StackOrderCommand::BringToFront,
-                        StackOrderCommand::BringForward,
-                        StackOrderCommand::SendBackward,
-                        StackOrderCommand::SendToBack,
-                    ] {
-                        if ui.button(command.label()).clicked() {
-                            self.apply_stack_order(command);
-                        }
-                    }
-                });
-            });
-
-            ui.separator();
-
-            if ui
-                .add_enabled(can_adjust_view, egui::Button::new("-"))
-                .on_hover_text("表示を少し縮小します。")
-                .clicked()
-            {
-                self.zoom_out();
-            }
-
-            ui.label(RichText::new(self.canvas.zoom_label()).monospace());
-
-            if ui
-                .add_enabled(can_adjust_view, egui::Button::new("+"))
-                .on_hover_text("表示を少し拡大します。")
-                .clicked()
-            {
-                self.zoom_in();
-            }
-
-            if ui
-                .add_enabled(can_adjust_view, egui::Button::new("表示をリセット"))
-                .on_hover_text("ズームと表示位置を初期状態へ戻します。")
-                .clicked()
-            {
-                self.reset_view();
-            }
-
-            ui.separator();
-            if ui
-                .button(if self.show_help {
-                    "ヘルプを閉じる"
-                } else {
-                    "ヘルプ"
-                })
-                .on_hover_text("操作説明やチュートリアル再表示を開きます。")
-                .clicked()
-            {
-                self.show_help = !self.show_help;
-            }
-
-            ui.separator();
-            ui.label(RichText::new("状態").small().strong());
-            ui.label(self.status_message.rich_text());
         });
     }
 
@@ -2027,7 +2048,7 @@ impl PaintApp {
 
     fn handle_tool_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::V)) {
-            self.set_active_tool(CanvasToolKind::Select, true);
+            self.apply_tool_button_selection(CanvasToolKind::Select);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::H)) {
             self.set_active_tool(CanvasToolKind::Pan, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::B)) {
@@ -2147,6 +2168,14 @@ fn on_off_label(value: bool) -> &'static str {
     if value { "オン" } else { "オフ" }
 }
 
+fn tool_switch_message(tool: CanvasToolKind) -> String {
+    format!(
+        "{} に切り替えました。{}",
+        tool.label(),
+        tool_button_tooltip(tool)
+    )
+}
+
 fn help_icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new("?").small())
@@ -2194,5 +2223,43 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
             body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は画像として共有したいとき用です。迷ったらヘルプからもう一度見直せます。",
             action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」を覚えておけば、ひとまず困りません。",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CanvasToolKind, PaintApp};
+
+    #[test]
+    fn multi_select_mode_switches_to_select_tool() {
+        let mut app = PaintApp::default();
+        app.set_active_tool(CanvasToolKind::Brush, false);
+
+        app.set_multi_select_mode(true);
+
+        assert!(app.multi_select_mode);
+        assert_eq!(app.active_tool, CanvasToolKind::Select);
+    }
+
+    #[test]
+    fn switching_to_non_select_tool_turns_off_multi_select_mode() {
+        let mut app = PaintApp::default();
+        app.set_multi_select_mode(true);
+
+        app.set_active_tool(CanvasToolKind::Brush, false);
+
+        assert!(!app.multi_select_mode);
+        assert_eq!(app.active_tool, CanvasToolKind::Brush);
+    }
+
+    #[test]
+    fn select_button_path_exits_multi_select_mode() {
+        let mut app = PaintApp::default();
+        app.set_multi_select_mode(true);
+
+        app.apply_tool_button_selection(CanvasToolKind::Select);
+
+        assert!(!app.multi_select_mode);
+        assert_eq!(app.active_tool, CanvasToolKind::Select);
     }
 }
