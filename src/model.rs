@@ -3,11 +3,17 @@ use serde::{Deserialize, Serialize};
 const HIT_TOLERANCE_MIN: f32 = 2.5;
 const MIN_SHAPE_HALF_EXTENT: f32 = 0.5;
 const DEFAULT_LAYER_ID: u64 = 1;
+const DEFAULT_GRID_SPACING: f32 = 48.0;
+const MIN_GRID_SPACING: f32 = 8.0;
 
 pub type LayerId = u64;
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_active_layer_id() -> LayerId {
@@ -16,6 +22,78 @@ fn default_active_layer_id() -> LayerId {
 
 fn default_next_layer_id() -> LayerId {
     DEFAULT_LAYER_ID + 1
+}
+
+fn default_grid_spacing() -> f32 {
+    DEFAULT_GRID_SPACING
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuideAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl GuideAxis {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Horizontal",
+            Self::Vertical => "Vertical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GuideLine {
+    pub axis: GuideAxis,
+    pub position: f32,
+}
+
+impl GuideLine {
+    pub fn new(axis: GuideAxis, position: f32) -> Self {
+        Self { axis, position }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GridSettings {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_false")]
+    pub snap_enabled: bool,
+    #[serde(default = "default_grid_spacing")]
+    pub spacing: f32,
+}
+
+impl Default for GridSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            snap_enabled: false,
+            spacing: DEFAULT_GRID_SPACING,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuideSettings {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_true")]
+    pub snap_enabled: bool,
+    #[serde(default)]
+    pub lines: Vec<GuideLine>,
+}
+
+impl Default for GuideSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            snap_enabled: true,
+            lines: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -888,6 +966,10 @@ pub struct PaintDocument {
     pub canvas_size: CanvasSize,
     #[serde(default = "RgbaColor::white")]
     pub background: RgbaColor,
+    #[serde(default)]
+    pub grid: GridSettings,
+    #[serde(default)]
+    pub guides: GuideSettings,
     #[serde(default = "PaintDocument::default_layers")]
     pub layers: Vec<PaintLayer>,
     #[serde(default = "default_active_layer_id")]
@@ -901,6 +983,8 @@ impl Default for PaintDocument {
         Self {
             canvas_size: CanvasSize::default(),
             background: RgbaColor::white(),
+            grid: GridSettings::default(),
+            guides: GuideSettings::default(),
             layers: Self::default_layers(),
             active_layer_id: default_active_layer_id(),
             next_layer_id: default_next_layer_id(),
@@ -921,6 +1005,8 @@ impl PaintDocument {
         Self {
             canvas_size,
             background,
+            grid: GridSettings::default(),
+            guides: GuideSettings::default(),
             layers: vec![PaintLayer {
                 id: DEFAULT_LAYER_ID,
                 name: "Layer 1".to_owned(),
@@ -942,6 +1028,20 @@ impl PaintDocument {
         if self.layers.is_empty() {
             self.layers = Self::default_layers();
         }
+
+        self.grid.spacing = self.grid.spacing.max(MIN_GRID_SPACING);
+        for guide in &mut self.guides.lines {
+            guide.position = clamp_guide_position(self.canvas_size, *guide);
+        }
+        self.guides.lines.sort_by(|left, right| {
+            guide_sort_key(*left)
+                .cmp(&guide_sort_key(*right))
+                .then_with(|| {
+                    left.position
+                        .partial_cmp(&right.position)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
 
         let max_id = self
             .layers
@@ -973,6 +1073,14 @@ impl PaintDocument {
 
     pub fn has_strokes(&self) -> bool {
         self.has_elements()
+    }
+
+    pub fn grid(&self) -> GridSettings {
+        self.grid
+    }
+
+    pub fn guides(&self) -> &GuideSettings {
+        &self.guides
     }
 
     pub fn element_count(&self) -> usize {
@@ -1124,6 +1232,57 @@ impl PaintDocument {
             return None;
         }
         next.layers.swap(index - 1, index);
+        Some(next)
+    }
+
+    pub fn toggled_grid_visibility_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.grid.visible = !next.grid.visible;
+        (next.grid.visible != self.grid.visible).then_some(next)
+    }
+
+    pub fn toggled_grid_snap_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.grid.snap_enabled = !next.grid.snap_enabled;
+        (next.grid.snap_enabled != self.grid.snap_enabled).then_some(next)
+    }
+
+    pub fn toggled_guides_visibility_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.guides.visible = !next.guides.visible;
+        (next.guides.visible != self.guides.visible).then_some(next)
+    }
+
+    pub fn toggled_guides_snap_document(&self) -> Option<Self> {
+        let mut next = self.clone();
+        next.guides.snap_enabled = !next.guides.snap_enabled;
+        (next.guides.snap_enabled != self.guides.snap_enabled).then_some(next)
+    }
+
+    pub fn add_guide_document(&self, axis: GuideAxis, position: f32) -> Option<Self> {
+        let position = clamp_guide_position(self.canvas_size, GuideLine::new(axis, position));
+        if self
+            .guides
+            .lines
+            .iter()
+            .any(|guide| guide.axis == axis && (guide.position - position).abs() < 0.1)
+        {
+            return None;
+        }
+
+        let mut next = self.clone();
+        next.guides.lines.push(GuideLine::new(axis, position));
+        next.sanitize_in_place();
+        Some(next)
+    }
+
+    pub fn remove_guide_document(&self, index: usize) -> Option<Self> {
+        if index >= self.guides.lines.len() {
+            return None;
+        }
+
+        let mut next = self.clone();
+        next.guides.lines.remove(index);
         Some(next)
     }
 
@@ -1896,6 +2055,21 @@ fn clamp_resized_axis(value: f32, anchor: f32, sign: f32) -> f32 {
     }
 }
 
+fn guide_sort_key(guide: GuideLine) -> (u8, i32) {
+    let axis = match guide.axis {
+        GuideAxis::Horizontal => 0,
+        GuideAxis::Vertical => 1,
+    };
+    (axis, (guide.position * 100.0).round() as i32)
+}
+
+fn clamp_guide_position(canvas_size: CanvasSize, guide: GuideLine) -> f32 {
+    match guide.axis {
+        GuideAxis::Horizontal => guide.position.clamp(0.0, canvas_size.height),
+        GuideAxis::Vertical => guide.position.clamp(0.0, canvas_size.width),
+    }
+}
+
 fn normalize_indices(indices: &[usize], len: usize) -> Vec<usize> {
     let mut normalized: Vec<_> = indices
         .iter()
@@ -1966,8 +2140,8 @@ fn alignment_delta(
 mod tests {
     use super::{
         AlignmentKind, CanvasSize, DistributionKind, DocumentHistory, ElementBounds, GroupElement,
-        LayerId, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement,
-        ShapeHandle, ShapeKind, StackOrderCommand, Stroke, ToolKind,
+        GuideAxis, LayerId, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor,
+        ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand, Stroke, ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -2588,5 +2762,32 @@ mod tests {
                 .duplicated_selection_to_layer_document(&[0], destination_layer_id)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn guide_and_grid_settings_track_undo_redo() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+
+        let with_grid_hidden = history
+            .current()
+            .toggled_grid_visibility_document()
+            .expect("toggle grid visibility");
+        assert!(history.replace_document(with_grid_hidden.clone()));
+        assert!(!history.current().grid.visible);
+        assert!(history.undo());
+        assert!(history.current().grid.visible);
+        assert!(history.redo());
+        assert!(!history.current().grid.visible);
+
+        let with_guide = history
+            .current()
+            .add_guide_document(GuideAxis::Vertical, 128.0)
+            .expect("add guide");
+        assert!(history.replace_document(with_guide.clone()));
+        assert_eq!(history.current().guides.lines.len(), 1);
+        assert!(history.undo());
+        assert!(history.current().guides.lines.is_empty());
+        assert!(history.redo());
+        assert_eq!(history.current().guides.lines.len(), 1);
     }
 }

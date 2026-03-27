@@ -9,8 +9,8 @@ use crate::canvas::{
     color32_from_rgba, rgba_from_color32,
 };
 use crate::model::{
-    AlignmentKind, DistributionKind, DocumentHistory, LayerId, PaintDocument, PaintElement,
-    RgbaColor, StackOrderCommand,
+    AlignmentKind, DistributionKind, DocumentHistory, GuideAxis, LayerId, PaintDocument,
+    PaintElement, RgbaColor, StackOrderCommand,
 };
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
@@ -303,11 +303,115 @@ impl PaintApp {
         ui.small("Reset view: Ctrl/Cmd + 0");
 
         ui.separator();
+        self.show_canvas_aids(ui);
+
+        ui.separator();
         ui.label(RichText::new("Storage").strong());
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
         ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG, Group, Ungroup");
+    }
+
+    fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
+        #[derive(Clone, Copy)]
+        enum AidAction {
+            ToggleGridVisible,
+            ToggleGridSnap,
+            ToggleGuidesVisible,
+            ToggleGuidesSnap,
+            AddGuide(GuideAxis),
+            RemoveGuide(usize),
+        }
+
+        let has_canvas_interaction = self.canvas.has_active_interaction();
+        let grid = self.document().grid();
+        let guides_visible = self.document().guides().visible;
+        let guides_snap = self.document().guides().snap_enabled;
+        let guides: Vec<_> = self
+            .document()
+            .guides()
+            .lines
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let mut pending_action = None;
+
+        ui.label(RichText::new("Grid & Guides").strong());
+        ui.small("Snap supports move, shape creation, and single / multi resize.");
+
+        ui.add_enabled_ui(!has_canvas_interaction, |ui| {
+            let mut show_grid = grid.visible;
+            if ui.checkbox(&mut show_grid, "Show Grid").changed() {
+                pending_action = Some(AidAction::ToggleGridVisible);
+            }
+
+            let mut snap_grid = grid.snap_enabled;
+            if ui.checkbox(&mut snap_grid, "Snap to Grid").changed() {
+                pending_action = Some(AidAction::ToggleGridSnap);
+            }
+
+            ui.small(format!("Grid spacing: {:.0}px", grid.spacing));
+            ui.add_space(6.0);
+
+            let mut show_guides = guides_visible;
+            if ui.checkbox(&mut show_guides, "Show Guides").changed() {
+                pending_action = Some(AidAction::ToggleGuidesVisible);
+            }
+
+            let mut snap_guides = guides_snap;
+            if ui.checkbox(&mut snap_guides, "Snap to Guides").changed() {
+                pending_action = Some(AidAction::ToggleGuidesSnap);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Add H Guide").clicked() {
+                    pending_action = Some(AidAction::AddGuide(GuideAxis::Horizontal));
+                }
+                if ui.button("Add V Guide").clicked() {
+                    pending_action = Some(AidAction::AddGuide(GuideAxis::Vertical));
+                }
+            });
+        });
+
+        if has_canvas_interaction {
+            ui.small("Finish the current edit before changing grid or guide settings.");
+        }
+
+        if guides.is_empty() {
+            ui.small("No guides yet. New guides use the selection center or canvas center.");
+        } else {
+            for (index, guide) in guides {
+                ui.horizontal(|ui| {
+                    ui.small(format!(
+                        "{} {:.0}px",
+                        match guide.axis {
+                            GuideAxis::Horizontal => "H",
+                            GuideAxis::Vertical => "V",
+                        },
+                        guide.position
+                    ));
+                    if ui
+                        .add_enabled(!has_canvas_interaction, egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        pending_action = Some(AidAction::RemoveGuide(index));
+                    }
+                });
+            }
+        }
+
+        if let Some(action) = pending_action {
+            match action {
+                AidAction::ToggleGridVisible => self.toggle_grid_visibility(),
+                AidAction::ToggleGridSnap => self.toggle_grid_snap(),
+                AidAction::ToggleGuidesVisible => self.toggle_guides_visibility(),
+                AidAction::ToggleGuidesSnap => self.toggle_guides_snap(),
+                AidAction::AddGuide(axis) => self.add_guide(axis),
+                AidAction::RemoveGuide(index) => self.remove_guide(index),
+            }
+        }
     }
 
     fn show_layers(&mut self, ui: &mut egui::Ui) {
@@ -828,6 +932,18 @@ impl PaintApp {
         }
     }
 
+    fn apply_document_configuration_change(
+        &mut self,
+        document: PaintDocument,
+        message: impl Into<String>,
+    ) {
+        if self.history.replace_document(document) {
+            self.canvas.discard_active_interaction();
+            self.sync_layer_name_draft();
+            self.set_info(message);
+        }
+    }
+
     fn apply_layer_selection_document_change(
         &mut self,
         document: PaintDocument,
@@ -926,6 +1042,102 @@ impl PaintApp {
         let document = self.document().clone();
         if let Some(next) = document.moved_layer_down_document(layer_id) {
             self.apply_layer_document_change(next, "Moved the layer down.");
+        }
+    }
+
+    fn toggle_grid_visibility(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_grid_visibility_document() {
+            let state = if next.grid().visible {
+                "visible"
+            } else {
+                "hidden"
+            };
+            self.apply_document_configuration_change(next, format!("Set the grid to {state}."));
+        }
+    }
+
+    fn toggle_grid_snap(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_grid_snap_document() {
+            let state = if next.grid().snap_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.apply_document_configuration_change(next, format!("Grid snap {state}."));
+        }
+    }
+
+    fn toggle_guides_visibility(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_guides_visibility_document() {
+            let state = if next.guides().visible {
+                "visible"
+            } else {
+                "hidden"
+            };
+            self.apply_document_configuration_change(next, format!("Set guides to {state}."));
+        }
+    }
+
+    fn toggle_guides_snap(&mut self) {
+        let document = self.document().clone();
+        if let Some(next) = document.toggled_guides_snap_document() {
+            let state = if next.guides().snap_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.apply_document_configuration_change(next, format!("Guide snap {state}."));
+        }
+    }
+
+    fn add_guide(&mut self, axis: GuideAxis) {
+        let document = self.document().clone();
+        let position = self.suggested_guide_position(axis);
+        if let Some(next) = document.add_guide_document(axis, position) {
+            self.apply_document_configuration_change(
+                next,
+                format!(
+                    "Added {} guide at {:.0}px.",
+                    axis.label().to_lowercase(),
+                    position
+                ),
+            );
+        }
+    }
+
+    fn remove_guide(&mut self, index: usize) {
+        let document = self.document().clone();
+        let Some(guide) = document.guides().lines.get(index).copied() else {
+            return;
+        };
+        if let Some(next) = document.remove_guide_document(index) {
+            self.apply_document_configuration_change(
+                next,
+                format!(
+                    "Removed {} guide at {:.0}px.",
+                    guide.axis.label().to_lowercase(),
+                    guide.position
+                ),
+            );
+        }
+    }
+
+    fn suggested_guide_position(&self, axis: GuideAxis) -> f32 {
+        let selection_indices = self.canvas.selection_indices();
+        let selection_center = self
+            .document()
+            .selection_bounds(selection_indices)
+            .map(|bounds| bounds.center());
+        match axis {
+            GuideAxis::Horizontal => selection_center
+                .map(|center| center.y)
+                .unwrap_or(self.document().canvas_size.height * 0.5),
+            GuideAxis::Vertical => selection_center
+                .map(|center| center.x)
+                .unwrap_or(self.document().canvas_size.width * 0.5),
         }
     }
 

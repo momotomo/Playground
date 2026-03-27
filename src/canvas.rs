@@ -4,7 +4,7 @@ use eframe::egui::{
 };
 
 use crate::model::{
-    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, LayerId, PaintDocument,
+    AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, LayerId, PaintDocument,
     PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
     StackOrderCommand, Stroke, ToolKind,
 };
@@ -18,6 +18,8 @@ const HANDLE_HIT_RADIUS: f32 = 12.0;
 const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 28.0;
 const MIN_SELECTION_TRANSFORM_EXTENT: f32 = 4.0;
 const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
+const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
+const MIN_GRID_VISIBLE_SPACING_SCREEN: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
@@ -477,6 +479,8 @@ impl CanvasController {
 
         paint_workspace(&painter, viewport);
         paint_background(&painter, canvas_rect, document.background);
+        paint_grid(&painter, canvas_rect, self.view.zoom, document);
+        paint_guides(&painter, canvas_rect, self.view.zoom, document);
         paint_document(
             &painter,
             canvas_rect,
@@ -856,7 +860,7 @@ impl CanvasController {
                         document.canvas_size,
                         position,
                     );
-                    self.update_active_preview(world);
+                    self.update_active_preview(document, world);
                     output.needs_repaint = true;
                 }
 
@@ -881,12 +885,7 @@ impl CanvasController {
                 if pointer.primary_down()
                     && let Some(position) = pointer.interact_pos()
                 {
-                    self.update_selection_session(
-                        viewport,
-                        document.canvas_size,
-                        canvas_rect,
-                        position,
-                    );
+                    self.update_selection_session(viewport, document, canvas_rect, position);
                     output.needs_repaint = true;
                 }
 
@@ -1073,6 +1072,7 @@ impl CanvasController {
         let Some(kind) = tool_settings.tool.shape_kind() else {
             return;
         };
+        let start = snap_point_for_document(document, self.view.zoom, start);
 
         self.active_preview = Some(ActivePreview::Shape(ShapeElement::new(
             kind,
@@ -1084,10 +1084,11 @@ impl CanvasController {
         self.interaction_mode = InteractionMode::Drawing;
     }
 
-    fn update_active_preview(&mut self, world: PaintPoint) {
+    fn update_active_preview(&mut self, document: &PaintDocument, world: PaintPoint) {
+        let snapped_world = snap_point_for_document(document, self.view.zoom, world);
         match self.active_preview.as_mut() {
             Some(ActivePreview::Stroke(stroke)) => stroke.push_point(world),
-            Some(ActivePreview::Shape(shape)) => shape.end = world,
+            Some(ActivePreview::Shape(shape)) => shape.end = snapped_world,
             None => {}
         }
     }
@@ -1105,28 +1106,32 @@ impl CanvasController {
     fn update_selection_session(
         &mut self,
         viewport: Rect,
-        canvas_size: CanvasSize,
+        document: &PaintDocument,
         canvas_rect: Rect,
         pointer_screen: Pos2,
     ) {
+        let zoom = self.view.zoom;
         let pointer_world = screen_to_canvas_unclamped(
             viewport,
             self.view.pan,
-            self.view.zoom,
-            canvas_size,
+            zoom,
+            document.canvas_size,
             pointer_screen,
         );
 
         match self.selection_session.as_mut() {
             Some(SelectionSession::Move {
+                base_elements,
                 drag_origin,
                 preview_delta,
                 ..
             }) => {
-                *preview_delta = PaintVector::new(
+                let raw_delta = PaintVector::new(
                     pointer_world.x - drag_origin.x,
                     pointer_world.y - drag_origin.y,
                 );
+                *preview_delta =
+                    snap_move_delta_for_document(document, zoom, base_elements, raw_delta);
             }
             Some(SelectionSession::SingleResize {
                 base_shape,
@@ -1134,7 +1139,8 @@ impl CanvasController {
                 preview_shape,
                 ..
             }) => {
-                if let Some(next) = base_shape.resized_by_handle(*handle, pointer_world) {
+                let snapped_world = snap_point_for_document(document, zoom, pointer_world);
+                if let Some(next) = base_shape.resized_by_handle(*handle, snapped_world) {
                     *preview_shape = next;
                 }
             }
@@ -1146,7 +1152,7 @@ impl CanvasController {
             }) => {
                 let current_angle = pointer_screen_angle(
                     canvas_rect,
-                    self.view.zoom,
+                    zoom,
                     base_shape.rotation_center(),
                     pointer_screen,
                 );
@@ -1159,8 +1165,9 @@ impl CanvasController {
                 preview_elements,
                 ..
             }) => {
+                let snapped_world = snap_point_for_document(document, zoom, pointer_world);
                 if let Some((anchor, scale_x, scale_y)) =
-                    group_resize_transform(*base_bounds, *handle, pointer_world)
+                    group_resize_transform(*base_bounds, *handle, snapped_world)
                 {
                     *preview_elements = transformed_preview_elements(base_elements, |element| {
                         element.scaled_from(anchor, scale_x, scale_y)
@@ -1174,12 +1181,8 @@ impl CanvasController {
                 preview_elements,
                 ..
             }) => {
-                let current_angle = pointer_screen_angle(
-                    canvas_rect,
-                    self.view.zoom,
-                    *group_center,
-                    pointer_screen,
-                );
+                let current_angle =
+                    pointer_screen_angle(canvas_rect, zoom, *group_center, pointer_screen);
                 let delta = current_angle - *start_pointer_angle;
                 *preview_elements = transformed_preview_elements(base_elements, |element| {
                     element.rotated_around(*group_center, delta)
@@ -1517,6 +1520,60 @@ fn paint_background(painter: &Painter, rect: Rect, background: RgbaColor) {
         EguiStroke::new(1.0, Color32::from_gray(150)),
         egui::StrokeKind::Outside,
     );
+}
+
+fn paint_grid(painter: &Painter, rect: Rect, zoom: f32, document: &PaintDocument) {
+    let grid = document.grid();
+    if !grid.visible || grid.spacing * zoom < MIN_GRID_VISIBLE_SPACING_SCREEN {
+        return;
+    }
+
+    let spacing = grid.spacing.max(8.0) * zoom;
+    let stroke = EguiStroke::new(1.0, Color32::from_rgba_unmultiplied(80, 92, 118, 48));
+
+    let mut x = rect.left();
+    while x <= rect.right() {
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            stroke,
+        );
+        x += spacing;
+    }
+
+    let mut y = rect.top();
+    while y <= rect.bottom() {
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            stroke,
+        );
+        y += spacing;
+    }
+}
+
+fn paint_guides(painter: &Painter, rect: Rect, zoom: f32, document: &PaintDocument) {
+    if !document.guides().visible {
+        return;
+    }
+
+    let stroke = EguiStroke::new(1.5, Color32::from_rgba_unmultiplied(200, 96, 32, 180));
+    for guide in &document.guides().lines {
+        match guide.axis {
+            GuideAxis::Horizontal => {
+                let y = rect.top() + guide.position * zoom;
+                painter.line_segment(
+                    [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                    stroke,
+                );
+            }
+            GuideAxis::Vertical => {
+                let x = rect.left() + guide.position * zoom;
+                painter.line_segment(
+                    [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                    stroke,
+                );
+            }
+        }
+    }
 }
 
 fn paint_document(
@@ -2109,6 +2166,115 @@ fn canvas_to_screen(rect: Rect, zoom: f32, point: PaintPoint) -> Pos2 {
     Pos2::new(rect.min.x + point.x * zoom, rect.min.y + point.y * zoom)
 }
 
+fn snap_tolerance_world(zoom: f32) -> f32 {
+    SNAP_TOLERANCE_SCREEN / zoom.max(MIN_ZOOM)
+}
+
+fn snap_point_for_document(document: &PaintDocument, zoom: f32, point: PaintPoint) -> PaintPoint {
+    PaintPoint::new(
+        snap_axis_value_for_document(document, zoom, GuideAxis::Vertical, point.x),
+        snap_axis_value_for_document(document, zoom, GuideAxis::Horizontal, point.y),
+    )
+}
+
+fn snap_move_delta_for_document(
+    document: &PaintDocument,
+    zoom: f32,
+    base_elements: &[(usize, PaintElement)],
+    raw_delta: PaintVector,
+) -> PaintVector {
+    if raw_delta.is_zero() {
+        return raw_delta;
+    }
+
+    let transformed =
+        transformed_preview_elements(base_elements, |element| element.translated(raw_delta));
+    let Some(bounds) = selection_bounds_from_elements(&transformed) else {
+        return raw_delta;
+    };
+
+    let snap_delta = snap_delta_for_bounds(document, zoom, bounds);
+    PaintVector::new(raw_delta.dx + snap_delta.dx, raw_delta.dy + snap_delta.dy)
+}
+
+fn snap_delta_for_bounds(
+    document: &PaintDocument,
+    zoom: f32,
+    bounds: ElementBounds,
+) -> PaintVector {
+    let x = snap_axis_delta_for_document(
+        document,
+        zoom,
+        GuideAxis::Vertical,
+        &[bounds.min.x, bounds.center().x, bounds.max.x],
+    )
+    .unwrap_or(0.0);
+    let y = snap_axis_delta_for_document(
+        document,
+        zoom,
+        GuideAxis::Horizontal,
+        &[bounds.min.y, bounds.center().y, bounds.max.y],
+    )
+    .unwrap_or(0.0);
+    PaintVector::new(x, y)
+}
+
+fn snap_axis_value_for_document(
+    document: &PaintDocument,
+    zoom: f32,
+    axis: GuideAxis,
+    value: f32,
+) -> f32 {
+    value + snap_axis_delta_for_document(document, zoom, axis, &[value]).unwrap_or(0.0)
+}
+
+fn snap_axis_delta_for_document(
+    document: &PaintDocument,
+    zoom: f32,
+    axis: GuideAxis,
+    candidates: &[f32],
+) -> Option<f32> {
+    let tolerance = snap_tolerance_world(zoom);
+    let limit = match axis {
+        GuideAxis::Horizontal => document.canvas_size.height,
+        GuideAxis::Vertical => document.canvas_size.width,
+    };
+    let mut best_delta = None;
+
+    if document.grid().snap_enabled {
+        let spacing = document.grid().spacing.max(8.0);
+        for candidate in candidates {
+            let target = (*candidate / spacing).round() * spacing;
+            let target = target.clamp(0.0, limit);
+            let delta = target - *candidate;
+            if delta.abs() <= tolerance
+                && best_delta.is_none_or(|best: f32| delta.abs() < best.abs())
+            {
+                best_delta = Some(delta);
+            }
+        }
+    }
+
+    if document.guides().snap_enabled {
+        for guide in &document.guides().lines {
+            if guide.axis != axis {
+                continue;
+            }
+
+            for candidate in candidates {
+                let delta = guide.position - *candidate;
+                if delta.abs() <= tolerance
+                    && best_delta.is_none_or(|best: f32| delta.abs() < best.abs())
+                {
+                    best_delta = Some(delta);
+                }
+            }
+        }
+    }
+
+    best_delta
+}
+
 fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
     let cos = angle_radians.cos();
     let sin = angle_radians.sin();
@@ -2128,10 +2294,11 @@ mod tests {
     use super::{
         CanvasViewState, bounds_from_points, canvas_rect, group_resize_transform,
         marquee_rect_is_visible, normalize_selection_indices, screen_to_canvas,
-        shape_rotation_handle_screen,
+        shape_rotation_handle_screen, snap_axis_value_for_document, snap_point_for_document,
     };
     use crate::model::{
-        CanvasSize, ElementBounds, PaintPoint, RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
+        CanvasSize, ElementBounds, GuideAxis, PaintDocument, PaintPoint, RgbaColor, ShapeElement,
+        ShapeHandle, ShapeKind,
     };
     use eframe::egui::{Pos2, Rect, Vec2};
 
@@ -2250,5 +2417,30 @@ mod tests {
         assert_eq!(anchor, PaintPoint::new(80.0, 80.0));
         assert!(scale_x > 0.0);
         assert!(scale_y > 0.0);
+    }
+
+    #[test]
+    fn snap_axis_value_uses_grid_when_close() {
+        let document = PaintDocument::default()
+            .toggled_grid_snap_document()
+            .expect("enable grid snap");
+
+        let snapped = snap_axis_value_for_document(&document, 1.0, GuideAxis::Vertical, 51.0);
+        assert_eq!(snapped, 48.0);
+    }
+
+    #[test]
+    fn snap_point_uses_guides_when_close() {
+        let mut document = PaintDocument::default()
+            .add_guide_document(GuideAxis::Vertical, 120.0)
+            .expect("add guide");
+        if !document.guides().snap_enabled {
+            document = document
+                .toggled_guides_snap_document()
+                .expect("enable guide snap");
+        }
+
+        let snapped = snap_point_for_document(&document, 1.0, PaintPoint::new(126.0, 32.0));
+        assert_eq!(snapped.x, 120.0);
     }
 }
