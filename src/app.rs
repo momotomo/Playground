@@ -5,10 +5,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::canvas::{
-    CanvasController, CanvasToolKind, CommittedSelectionEdit, SelectionEditMode, ToolSettings,
+    CanvasController, CanvasToolKind, CommittedDocumentEdit, DocumentEditMode, ToolSettings,
     color32_from_rgba, rgba_from_color32,
 };
-use crate::model::{DocumentHistory, PaintDocument, PaintElement, RgbaColor};
+use crate::model::{
+    AlignmentKind, DocumentHistory, PaintDocument, PaintElement, RgbaColor, StackOrderCommand,
+};
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
@@ -142,7 +144,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Select shapes to move, resize, or rotate. Save JSON to keep edits.",
+                "Ready. Shift+Click to multi-select, then move, align, or reorder elements.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -250,6 +252,8 @@ impl PaintApp {
         ui.label(format!("Zoom: {}", self.canvas.zoom_label()));
         ui.small("Shapes: corner handles resize, round handle rotates");
         ui.small("Strokes: move only in this phase");
+        ui.small("Multi-select: Shift + Click adds or removes elements");
+        ui.small("Multi-edit: move together, align, and change stack order");
         ui.small("Pan: Space + Drag or Middle Drag");
         ui.small("Reset view: Ctrl/Cmd + 0");
 
@@ -263,11 +267,14 @@ impl PaintApp {
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let has_canvas_interaction = self.canvas.has_active_interaction();
+        let selection_count = self.canvas.selection_count();
         let can_undo = has_canvas_interaction || self.history.can_undo();
         let can_redo = !has_canvas_interaction && self.history.can_redo();
         let can_clear = has_canvas_interaction || self.document().has_elements();
         let can_file_io = !has_canvas_interaction && !self.has_pending_storage_task();
         let can_adjust_view = !has_canvas_interaction;
+        let can_reorder = !has_canvas_interaction && selection_count >= 1;
+        let can_align = !has_canvas_interaction && selection_count >= 2;
 
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -313,6 +320,40 @@ impl PaintApp {
             {
                 self.export_png(ctx);
             }
+
+            ui.separator();
+
+            ui.add_enabled_ui(can_align, |ui| {
+                ui.menu_button("Align", |ui| {
+                    for alignment in [
+                        AlignmentKind::Left,
+                        AlignmentKind::HorizontalCenter,
+                        AlignmentKind::Right,
+                        AlignmentKind::Top,
+                        AlignmentKind::VerticalCenter,
+                        AlignmentKind::Bottom,
+                    ] {
+                        if ui.button(alignment.label()).clicked() {
+                            self.apply_alignment(alignment);
+                        }
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(can_reorder, |ui| {
+                ui.menu_button("Order", |ui| {
+                    for command in [
+                        StackOrderCommand::BringToFront,
+                        StackOrderCommand::BringForward,
+                        StackOrderCommand::SendBackward,
+                        StackOrderCommand::SendToBack,
+                    ] {
+                        if ui.button(command.label()).clicked() {
+                            self.apply_stack_order(command);
+                        }
+                    }
+                });
+            });
 
             ui.separator();
 
@@ -399,14 +440,53 @@ impl PaintApp {
         }
     }
 
-    fn apply_selection_edit(&mut self, edit: CommittedSelectionEdit) {
-        if self.history.replace_element(edit.index, edit.element) {
+    fn apply_document_edit(&mut self, edit: CommittedDocumentEdit) {
+        if self.history.replace_document(edit.document) {
+            self.canvas.set_selection_indices(edit.selection_indices);
             let message = match edit.mode {
-                SelectionEditMode::Move => "Moved the selected element.",
-                SelectionEditMode::Resize => "Resized the selected shape.",
-                SelectionEditMode::Rotate => "Rotated the selected shape.",
+                DocumentEditMode::Move => {
+                    if self.canvas.selection_count() > 1 {
+                        "Moved the selected elements."
+                    } else {
+                        "Moved the selected element."
+                    }
+                }
+                DocumentEditMode::Resize => "Resized the selected shape.",
+                DocumentEditMode::Rotate => "Rotated the selected shape.",
+                DocumentEditMode::Align(alignment) => match alignment {
+                    AlignmentKind::Left => "Aligned the selection to the left edge.",
+                    AlignmentKind::HorizontalCenter => {
+                        "Aligned the selection to the horizontal center."
+                    }
+                    AlignmentKind::Right => "Aligned the selection to the right edge.",
+                    AlignmentKind::Top => "Aligned the selection to the top edge.",
+                    AlignmentKind::VerticalCenter => {
+                        "Aligned the selection to the vertical center."
+                    }
+                    AlignmentKind::Bottom => "Aligned the selection to the bottom edge.",
+                },
+                DocumentEditMode::Reorder(command) => match command {
+                    StackOrderCommand::BringToFront => "Moved the selection to the front.",
+                    StackOrderCommand::SendToBack => "Moved the selection to the back.",
+                    StackOrderCommand::BringForward => "Moved the selection forward.",
+                    StackOrderCommand::SendBackward => "Moved the selection backward.",
+                },
             };
             self.set_info(message);
+        }
+    }
+
+    fn apply_alignment(&mut self, alignment: AlignmentKind) {
+        let document = self.document().clone();
+        if let Some(edit) = self.canvas.apply_alignment(&document, alignment) {
+            self.apply_document_edit(edit);
+        }
+    }
+
+    fn apply_stack_order(&mut self, command: StackOrderCommand) {
+        let document = self.document().clone();
+        if let Some(edit) = self.canvas.apply_stack_order(&document, command) {
+            self.apply_document_edit(edit);
         }
     }
 
@@ -697,7 +777,7 @@ impl eframe::App for PaintApp {
             }
 
             if let Some(edit) = output.committed_edit {
-                self.apply_selection_edit(edit);
+                self.apply_document_edit(edit);
             }
 
             if let Some(element) = output.committed_element {
@@ -710,7 +790,7 @@ impl eframe::App for PaintApp {
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => {
-            "Click an element to select it. Shapes can move, resize, and rotate."
+            "Click to select. Shift+Click adds or removes. Single shapes resize/rotate; multi-select moves, aligns, and reorders."
         }
         CanvasToolKind::Brush => "Freehand drawing tool. Drag to draw a stroke.",
         CanvasToolKind::Eraser => "Freehand eraser that paints with the canvas background.",

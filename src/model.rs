@@ -170,6 +170,13 @@ impl ElementBounds {
             (self.min.y + self.max.y) * 0.5,
         )
     }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: PaintPoint::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y)),
+            max: PaintPoint::new(self.max.x.max(other.max.x), self.max.y.max(other.max.y)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +209,48 @@ impl ShapeKind {
             Self::Rectangle => "Rectangle",
             Self::Ellipse => "Ellipse",
             Self::Line => "Line",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignmentKind {
+    Left,
+    HorizontalCenter,
+    Right,
+    Top,
+    VerticalCenter,
+    Bottom,
+}
+
+impl AlignmentKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Align Left",
+            Self::HorizontalCenter => "Align Center Horizontally",
+            Self::Right => "Align Right",
+            Self::Top => "Align Top",
+            Self::VerticalCenter => "Align Center Vertically",
+            Self::Bottom => "Align Bottom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackOrderCommand {
+    BringToFront,
+    SendToBack,
+    BringForward,
+    SendBackward,
+}
+
+impl StackOrderCommand {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::BringToFront => "Bring to Front",
+            Self::SendToBack => "Send to Back",
+            Self::BringForward => "Bring Forward",
+            Self::SendBackward => "Send Backward",
         }
     }
 }
@@ -681,6 +730,169 @@ impl PaintDocument {
         true
     }
 
+    pub fn translate_elements(&mut self, indices: &[usize], delta: PaintVector) -> bool {
+        if delta.is_zero() {
+            return false;
+        }
+
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.is_empty() {
+            return false;
+        }
+
+        for index in indices {
+            let element = self
+                .elements
+                .get(index)
+                .cloned()
+                .expect("normalized indices should stay in bounds");
+            self.elements[index] = element.translated(delta);
+        }
+
+        true
+    }
+
+    pub fn selection_bounds(&self, indices: &[usize]) -> Option<ElementBounds> {
+        let mut bounds = normalize_indices(indices, self.elements.len())
+            .into_iter()
+            .filter_map(|index| self.elements[index].bounds());
+        let first = bounds.next()?;
+        Some(bounds.fold(first, ElementBounds::union))
+    }
+
+    pub fn aligned_document(&self, indices: &[usize], alignment: AlignmentKind) -> Option<Self> {
+        let indices = normalize_indices(indices, self.elements.len());
+        if indices.len() < 2 {
+            return None;
+        }
+
+        let selection_bounds = self.selection_bounds(&indices)?;
+        let mut next = self.clone();
+        let mut changed = false;
+
+        for index in indices {
+            let Some(bounds) = self.element(index).and_then(PaintElement::bounds) else {
+                continue;
+            };
+
+            let delta = alignment_delta(bounds, selection_bounds, alignment);
+            if delta.is_zero() {
+                continue;
+            }
+
+            if next.translate_element(index, delta) {
+                changed = true;
+            }
+        }
+
+        changed.then_some(next)
+    }
+
+    pub fn reordered_document(
+        &self,
+        indices: &[usize],
+        command: StackOrderCommand,
+    ) -> Option<(Self, Vec<usize>)> {
+        let selected_indices = normalize_indices(indices, self.elements.len());
+        if selected_indices.is_empty() {
+            return None;
+        }
+
+        let mut next_elements = self.elements.clone();
+        let mut changed = false;
+        match command {
+            StackOrderCommand::BringToFront => {
+                let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+                let selected: Vec<_> = next_elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| selected_flags[*index])
+                    .map(|(_, element)| element.clone())
+                    .collect();
+                let unselected: Vec<_> = next_elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !selected_flags[*index])
+                    .map(|(_, element)| element.clone())
+                    .collect();
+                let split = unselected.len();
+                next_elements = unselected;
+                next_elements.extend(selected);
+                let next_selected: Vec<usize> = (split..split + selected_indices.len()).collect();
+                changed = next_selected != selected_indices;
+                return changed.then_some((
+                    Self {
+                        canvas_size: self.canvas_size,
+                        background: self.background,
+                        elements: next_elements,
+                    },
+                    next_selected,
+                ));
+            }
+            StackOrderCommand::SendToBack => {
+                let selected_flags = selection_flags(self.elements.len(), &selected_indices);
+                let selected: Vec<_> = next_elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| selected_flags[*index])
+                    .map(|(_, element)| element.clone())
+                    .collect();
+                let unselected: Vec<_> = next_elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !selected_flags[*index])
+                    .map(|(_, element)| element.clone())
+                    .collect();
+                next_elements = selected;
+                next_elements.extend(unselected);
+                let next_selected: Vec<usize> = (0..selected_indices.len()).collect();
+                changed = next_selected != selected_indices;
+                return changed.then_some((
+                    Self {
+                        canvas_size: self.canvas_size,
+                        background: self.background,
+                        elements: next_elements,
+                    },
+                    next_selected,
+                ));
+            }
+            StackOrderCommand::BringForward | StackOrderCommand::SendBackward => {}
+        }
+
+        let mut selected_flags = selection_flags(next_elements.len(), &selected_indices);
+        match command {
+            StackOrderCommand::BringForward => {
+                for index in (0..next_elements.len().saturating_sub(1)).rev() {
+                    if selected_flags[index] && !selected_flags[index + 1] {
+                        next_elements.swap(index, index + 1);
+                        selected_flags.swap(index, index + 1);
+                        changed = true;
+                    }
+                }
+            }
+            StackOrderCommand::SendBackward => {
+                for index in 1..next_elements.len() {
+                    if selected_flags[index] && !selected_flags[index - 1] {
+                        next_elements.swap(index - 1, index);
+                        selected_flags.swap(index - 1, index);
+                        changed = true;
+                    }
+                }
+            }
+            StackOrderCommand::BringToFront | StackOrderCommand::SendToBack => unreachable!(),
+        }
+
+        let next_selected = selected_flags_to_indices(&selected_flags);
+        changed.then_some((
+            Self {
+                canvas_size: self.canvas_size,
+                background: self.background,
+                elements: next_elements,
+            },
+            next_selected,
+        ))
+    }
+
     pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> Option<usize> {
         self.elements
             .iter()
@@ -780,6 +992,10 @@ impl DocumentHistory {
     }
 
     pub fn replace_document(&mut self, document: PaintDocument) -> bool {
+        if self.current == document {
+            return false;
+        }
+
         self.push_undo_snapshot();
         self.current = document;
         self.redo_stack.clear();
@@ -904,11 +1120,64 @@ fn clamp_resized_axis(value: f32, anchor: f32, sign: f32) -> f32 {
     }
 }
 
+fn normalize_indices(indices: &[usize], len: usize) -> Vec<usize> {
+    let mut normalized: Vec<_> = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < len)
+        .collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
+}
+
+fn selection_flags(len: usize, indices: &[usize]) -> Vec<bool> {
+    let mut flags = vec![false; len];
+    for index in indices {
+        if let Some(slot) = flags.get_mut(*index) {
+            *slot = true;
+        }
+    }
+    flags
+}
+
+fn selected_flags_to_indices(flags: &[bool]) -> Vec<usize> {
+    flags
+        .iter()
+        .enumerate()
+        .filter_map(|(index, selected)| selected.then_some(index))
+        .collect()
+}
+
+fn alignment_delta(
+    element_bounds: ElementBounds,
+    selection_bounds: ElementBounds,
+    alignment: AlignmentKind,
+) -> PaintVector {
+    match alignment {
+        AlignmentKind::Left => PaintVector::new(selection_bounds.min.x - element_bounds.min.x, 0.0),
+        AlignmentKind::HorizontalCenter => {
+            PaintVector::new(selection_bounds.center().x - element_bounds.center().x, 0.0)
+        }
+        AlignmentKind::Right => {
+            PaintVector::new(selection_bounds.max.x - element_bounds.max.x, 0.0)
+        }
+        AlignmentKind::Top => PaintVector::new(0.0, selection_bounds.min.y - element_bounds.min.y),
+        AlignmentKind::VerticalCenter => {
+            PaintVector::new(0.0, selection_bounds.center().y - element_bounds.center().y)
+        }
+        AlignmentKind::Bottom => {
+            PaintVector::new(0.0, selection_bounds.max.y - element_bounds.max.y)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasSize, DocumentHistory, PaintDocument, PaintElement, PaintPoint, PaintVector,
-        RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
+        AlignmentKind, CanvasSize, DocumentHistory, PaintDocument, PaintElement, PaintPoint,
+        PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind, StackOrderCommand, Stroke,
+        ToolKind,
     };
 
     fn sample_stroke() -> Stroke {
@@ -1052,8 +1321,127 @@ mod tests {
         assert!(history.undo());
         assert!(history.can_redo());
 
-        history.replace_document(PaintDocument::default());
+        let mut replacement = PaintDocument::default();
+        replacement.push_shape(sample_shape());
+        assert!(history.replace_document(replacement));
 
         assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn selection_bounds_union_multiple_elements() {
+        let mut document = PaintDocument::default();
+        document.push_shape(sample_shape());
+        document.push_stroke(sample_stroke());
+
+        let bounds = document
+            .selection_bounds(&[0, 1])
+            .expect("selection bounds should exist");
+
+        assert!(bounds.min.x <= 10.0);
+        assert!(bounds.max.x >= 140.0);
+    }
+
+    #[test]
+    fn align_left_moves_selection_to_group_edge() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(80.0, 20.0),
+            PaintPoint::new(120.0, 40.0),
+        ));
+
+        let aligned = document
+            .aligned_document(&[0, 1], AlignmentKind::Left)
+            .expect("alignment should change the document");
+
+        let left_a = aligned
+            .element(0)
+            .and_then(PaintElement::bounds)
+            .expect("element bounds");
+        let left_b = aligned
+            .element(1)
+            .and_then(PaintElement::bounds)
+            .expect("element bounds");
+        assert!((left_a.min.x - left_b.min.x).abs() < 0.001);
+    }
+
+    #[test]
+    fn bring_to_front_preserves_relative_order() {
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(200, 0, 0, 255),
+            2.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(30.0, 30.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(0, 200, 0, 255),
+            2.0,
+            PaintPoint::new(15.0, 15.0),
+            PaintPoint::new(35.0, 35.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(0, 0, 200, 255),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+
+        let (reordered, indices) = document
+            .reordered_document(&[0, 1], StackOrderCommand::BringToFront)
+            .expect("reorder should succeed");
+
+        let colors: Vec<_> = reordered
+            .elements
+            .iter()
+            .map(|element| match element {
+                PaintElement::Shape(shape) => shape.color,
+                PaintElement::Stroke(_) => RgbaColor::white(),
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            vec![
+                RgbaColor::new(0, 0, 200, 255),
+                RgbaColor::new(200, 0, 0, 255),
+                RgbaColor::new(0, 200, 0, 255),
+            ]
+        );
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn history_replace_document_supports_multi_move_undo_redo() {
+        let mut history = DocumentHistory::new(PaintDocument::default());
+        history.commit_shape(sample_shape());
+        history.commit_stroke(sample_stroke());
+
+        let mut moved = history.current().clone();
+        assert!(moved.translate_elements(&[0, 1], PaintVector::new(12.0, -8.0)));
+        assert!(history.replace_document(moved.clone()));
+        assert_eq!(history.current(), &moved);
+        assert!(history.undo());
+        assert!(history.redo());
+        assert_eq!(history.current(), &moved);
+    }
+
+    #[test]
+    fn replace_document_skips_identical_state() {
+        let document = PaintDocument::default();
+        let mut history = DocumentHistory::new(document.clone());
+        assert!(!history.replace_document(document));
     }
 }

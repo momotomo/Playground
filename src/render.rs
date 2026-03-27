@@ -252,4 +252,36 @@ mod tests {
         assert_eq!(decoded.width(), 64);
         assert_eq!(decoded.height(), 64);
     }
+
+    #[test]
+    fn render_respects_element_stack_order() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(48.0, 48.0),
+            background: RgbaColor::white(),
+            elements: Vec::new(),
+        };
+
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(220, 64, 64, 255),
+            10.0,
+            PaintPoint::new(8.0, 8.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(64, 96, 220, 255),
+            10.0,
+            PaintPoint::new(8.0, 8.0),
+            PaintPoint::new(40.0, 40.0),
+        ));
+
+        let pixmap = render_document_pixmap(&document).expect("document should render");
+        let pixel = pixmap
+            .pixel(8, 24)
+            .expect("overlapping pixel should exist")
+            .demultiply();
+
+        assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (64, 96, 220));
+    }
 }
