@@ -8,7 +8,8 @@ use crate::render::render_document_png;
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
-const EDITABLE_FORMAT_VERSION: u32 = 2;
+const EDITABLE_FORMAT_VERSION: u32 = 3;
+const PREVIOUS_EDITABLE_FORMAT_VERSION: u32 = 2;
 const LEGACY_EDITABLE_FORMAT_VERSION: u32 = 1;
 const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
 const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
@@ -106,7 +107,7 @@ impl StorageFacade {
         }
 
         match header.format.version {
-            EDITABLE_FORMAT_VERSION => {
+            EDITABLE_FORMAT_VERSION | PREVIOUS_EDITABLE_FORMAT_VERSION => {
                 let payload: EditablePaintFile = serde_json::from_slice(bytes)
                     .map_err(|error| StorageError::Deserialize(error.to_string()))?;
                 Ok(payload.document)
@@ -133,7 +134,7 @@ impl StorageFacade {
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
-        "Editable JSON envelope v2 (.paint.json)"
+        "Editable JSON envelope v3 (.paint.json)"
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
@@ -418,7 +419,8 @@ fn normalize_file_name(file_name: String, fallback: &str) -> String {
 mod tests {
     use super::{StorageError, StorageFacade};
     use crate::model::{
-        CanvasSize, PaintDocument, PaintPoint, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
+        CanvasSize, GroupElement, PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement,
+        ShapeKind, Stroke, ToolKind,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -446,6 +448,31 @@ mod tests {
         document
     }
 
+    fn grouped_document() -> PaintDocument {
+        PaintDocument {
+            canvas_size: CanvasSize::new(96.0, 64.0),
+            background: RgbaColor::white(),
+            elements: vec![PaintElement::Group(GroupElement {
+                elements: vec![
+                    PaintElement::Stroke({
+                        let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::charcoal(), 6.0);
+                        stroke.push_point(PaintPoint::new(10.0, 10.0));
+                        stroke.push_point(PaintPoint::new(30.0, 24.0));
+                        stroke
+                    }),
+                    PaintElement::Shape(ShapeElement::with_rotation(
+                        ShapeKind::Ellipse,
+                        RgbaColor::new(220, 64, 64, 255),
+                        4.0,
+                        PaintPoint::new(38.0, 12.0),
+                        PaintPoint::new(68.0, 40.0),
+                        0.35,
+                    )),
+                ],
+            })],
+        }
+    }
+
     #[test]
     fn serialize_round_trip_preserves_document() {
         let storage = StorageFacade::new();
@@ -469,6 +496,17 @@ mod tests {
         };
 
         assert!((shape.rotation_radians - 0.45).abs() < 0.0001);
+    }
+
+    #[test]
+    fn group_round_trip_preserves_nested_elements() {
+        let storage = StorageFacade::new();
+        let encoded = storage
+            .encode_document(&grouped_document())
+            .expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, grouped_document());
     }
 
     #[test]
@@ -525,6 +563,36 @@ mod tests {
     }
 
     #[test]
+    fn decode_previous_v2_document_without_groups() {
+        let storage = StorageFacade::new();
+        let previous = br#"{
+          "format":{"id":"rust-paint-foundation/document","version":2},
+          "metadata":{},
+          "document":{
+            "canvas_size":{"width":64.0,"height":32.0},
+            "background":{"r":255,"g":255,"b":255,"a":255},
+            "elements":[
+              {
+                "element_type":"shape",
+                "kind":"rectangle",
+                "color":{"r":220,"g":64,"b":64,"a":255},
+                "width":3.0,
+                "start":{"x":12.0,"y":8.0},
+                "end":{"x":40.0,"y":24.0},
+                "rotation_radians":0.2
+              }
+            ]
+          }
+        }"#;
+
+        let decoded = storage
+            .decode_document(previous)
+            .expect("previous version should decode");
+
+        assert_eq!(decoded.element_count(), 1);
+    }
+
+    #[test]
     fn export_png_bytes_can_be_decoded() {
         let storage = StorageFacade::new();
         let bytes = storage
@@ -556,6 +624,23 @@ mod tests {
         });
 
         assert!(found_shape_pixel, "expected a non-background shape pixel");
+    }
+
+    #[test]
+    fn grouped_document_can_render_to_png() {
+        let storage = StorageFacade::new();
+        let png = storage
+            .export_png_bytes(&grouped_document())
+            .expect("group png export should succeed");
+        let pixmap = Pixmap::decode_png(&png).expect("png should decode");
+        let found_non_background = (0..pixmap.width()).any(|x| {
+            (0..pixmap.height()).any(|y| {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist").demultiply();
+                (pixel.red(), pixel.green(), pixel.blue()) != (255, 255, 255)
+            })
+        });
+
+        assert!(found_non_background, "group should render into png export");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

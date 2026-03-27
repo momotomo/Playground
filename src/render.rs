@@ -4,8 +4,8 @@ use std::fmt::{self, Display, Formatter};
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke as TinyStroke, Transform};
 
 use crate::model::{
-    PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeKind,
-    Stroke, ToolKind,
+    GroupElement, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement,
+    ShapeKind, Stroke, ToolKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +61,13 @@ fn render_element(pixmap: &mut Pixmap, element: &PaintElement, background: RgbaC
     match element {
         PaintElement::Stroke(stroke) => render_stroke(pixmap, stroke, background),
         PaintElement::Shape(shape) => render_shape(pixmap, shape),
+        PaintElement::Group(group) => render_group(pixmap, group, background),
+    }
+}
+
+fn render_group(pixmap: &mut Pixmap, group: &GroupElement, background: RgbaColor) {
+    for element in &group.elements {
+        render_element(pixmap, element, background);
     }
 }
 
@@ -190,7 +197,8 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{render_document_pixmap, render_document_png};
     use crate::model::{
-        CanvasSize, PaintDocument, PaintPoint, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
+        CanvasSize, GroupElement, PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement,
+        ShapeKind, Stroke, ToolKind,
     };
     use tiny_skia::Pixmap;
 
@@ -283,5 +291,45 @@ mod tests {
             .demultiply();
 
         assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (64, 96, 220));
+    }
+
+    #[test]
+    fn render_group_elements_into_png() {
+        let document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 64.0),
+            background: RgbaColor::white(),
+            elements: vec![PaintElement::Group(GroupElement {
+                elements: vec![
+                    PaintElement::Shape(ShapeElement::new(
+                        ShapeKind::Rectangle,
+                        RgbaColor::new(220, 64, 64, 255),
+                        5.0,
+                        PaintPoint::new(10.0, 10.0),
+                        PaintPoint::new(28.0, 28.0),
+                    )),
+                    PaintElement::Shape(ShapeElement::new(
+                        ShapeKind::Line,
+                        RgbaColor::new(32, 80, 220, 255),
+                        4.0,
+                        PaintPoint::new(8.0, 40.0),
+                        PaintPoint::new(40.0, 52.0),
+                    )),
+                ],
+            })],
+        };
+
+        let png = render_document_png(&document).expect("grouped document should render");
+        let decoded = Pixmap::decode_png(&png).expect("group png should decode");
+        let colored_pixels = (0..decoded.width()).any(|x| {
+            (0..decoded.height()).any(|y| {
+                let pixel = decoded
+                    .pixel(x, y)
+                    .expect("pixel should exist")
+                    .demultiply();
+                (pixel.red(), pixel.green(), pixel.blue()) != (255, 255, 255)
+            })
+        });
+
+        assert!(colored_pixels, "group rendering should contribute pixels");
     }
 }

@@ -9,7 +9,8 @@ use crate::canvas::{
     color32_from_rgba, rgba_from_color32,
 };
 use crate::model::{
-    AlignmentKind, DocumentHistory, PaintDocument, PaintElement, RgbaColor, StackOrderCommand,
+    AlignmentKind, DistributionKind, DocumentHistory, PaintDocument, PaintElement, RgbaColor,
+    StackOrderCommand,
 };
 use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
 
@@ -49,6 +50,20 @@ fn shortcut_export_png() -> KeyboardShortcut {
             ..Modifiers::COMMAND
         },
         Key::E,
+    )
+}
+
+fn shortcut_group() -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::G)
+}
+
+fn shortcut_ungroup() -> KeyboardShortcut {
+    KeyboardShortcut::new(
+        Modifiers {
+            shift: true,
+            ..Modifiers::COMMAND
+        },
+        Key::G,
     )
 }
 
@@ -144,7 +159,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready. Shift+Click or drag a marquee to multi-select, then transform or arrange elements.",
+                "Ready. Shift+Click or drag a marquee to multi-select, then group, transform, or arrange elements.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -253,7 +268,9 @@ impl PaintApp {
         ui.small("Shapes: corner handles resize, round handle rotates");
         ui.small("Strokes: single and multi transforms use simple move / scale / rotate");
         ui.small("Multi-select: Shift + Click or drag a marquee");
-        ui.small("Multi-edit: move, group resize / rotate, align, and change stack order");
+        ui.small(
+            "Multi-edit: move, group, resize / rotate, align, distribute, and change stack order",
+        );
         ui.small("Pan: Space + Drag or Middle Drag");
         ui.small("Reset view: Ctrl/Cmd + 0");
 
@@ -262,7 +279,7 @@ impl PaintApp {
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
-        ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG");
+        ui.small("Shortcuts: Undo, Redo, Save, Load, Export PNG, Group, Ungroup");
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -275,6 +292,10 @@ impl PaintApp {
         let can_adjust_view = !has_canvas_interaction;
         let can_reorder = !has_canvas_interaction && selection_count >= 1;
         let can_align = !has_canvas_interaction && selection_count >= 2;
+        let can_group = !has_canvas_interaction && selection_count >= 2;
+        let can_ungroup =
+            !has_canvas_interaction && self.canvas.selection_contains_group(self.document());
+        let can_distribute = !has_canvas_interaction && selection_count >= 3;
 
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -335,6 +356,30 @@ impl PaintApp {
                     ] {
                         if ui.button(alignment.label()).clicked() {
                             self.apply_alignment(alignment);
+                        }
+                    }
+                });
+            });
+
+            if ui
+                .add_enabled(can_group, egui::Button::new("Group"))
+                .clicked()
+            {
+                self.apply_group();
+            }
+
+            if ui
+                .add_enabled(can_ungroup, egui::Button::new("Ungroup"))
+                .clicked()
+            {
+                self.apply_ungroup();
+            }
+
+            ui.add_enabled_ui(can_distribute, |ui| {
+                ui.menu_button("Distribute", |ui| {
+                    for distribution in [DistributionKind::Horizontal, DistributionKind::Vertical] {
+                        if ui.button(distribution.label()).clicked() {
+                            self.apply_distribution(distribution);
                         }
                     }
                 });
@@ -465,6 +510,8 @@ impl PaintApp {
                         "Rotated the selected shape."
                     }
                 }
+                DocumentEditMode::Group => "Grouped the selected elements.",
+                DocumentEditMode::Ungroup => "Ungrouped the selected elements.",
                 DocumentEditMode::Align(alignment) => match alignment {
                     AlignmentKind::Left => "Aligned the selection to the left edge.",
                     AlignmentKind::HorizontalCenter => {
@@ -476,6 +523,14 @@ impl PaintApp {
                         "Aligned the selection to the vertical center."
                     }
                     AlignmentKind::Bottom => "Aligned the selection to the bottom edge.",
+                },
+                DocumentEditMode::Distribute(distribution) => match distribution {
+                    DistributionKind::Horizontal => {
+                        "Distributed the selection evenly across the horizontal axis."
+                    }
+                    DistributionKind::Vertical => {
+                        "Distributed the selection evenly across the vertical axis."
+                    }
                 },
                 DocumentEditMode::Reorder(command) => match command {
                     StackOrderCommand::BringToFront => "Moved the selection to the front.",
@@ -491,6 +546,27 @@ impl PaintApp {
     fn apply_alignment(&mut self, alignment: AlignmentKind) {
         let document = self.document().clone();
         if let Some(edit) = self.canvas.apply_alignment(&document, alignment) {
+            self.apply_document_edit(edit);
+        }
+    }
+
+    fn apply_group(&mut self) {
+        let document = self.document().clone();
+        if let Some(edit) = self.canvas.apply_group(&document) {
+            self.apply_document_edit(edit);
+        }
+    }
+
+    fn apply_ungroup(&mut self) {
+        let document = self.document().clone();
+        if let Some(edit) = self.canvas.apply_ungroup(&document) {
+            self.apply_document_edit(edit);
+        }
+    }
+
+    fn apply_distribution(&mut self, distribution: DistributionKind) {
+        let document = self.document().clone();
+        if let Some(edit) = self.canvas.apply_distribution(&document, distribution) {
             self.apply_document_edit(edit);
         }
     }
@@ -677,6 +753,20 @@ impl PaintApp {
             && !self.has_pending_storage_task()
         {
             self.export_png(ctx);
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_group()))
+            && !has_canvas_interaction
+            && self.canvas.selection_count() >= 2
+        {
+            self.apply_group();
+        }
+
+        if ctx.input_mut(|input| input.consume_shortcut(&shortcut_ungroup()))
+            && !has_canvas_interaction
+            && self.canvas.selection_contains_group(self.document())
+        {
+            self.apply_ungroup();
         }
 
         let zoom_in_pressed = ctx.input_mut(|input| input.consume_shortcut(&shortcut_zoom_in()))
