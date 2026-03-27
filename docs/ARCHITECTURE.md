@@ -87,24 +87,31 @@
   - `selected indices`
 - 編集中一時状態は `SelectionSession`
   - `Move`
-  - `Resize`
-  - `Rotate`
+  - `SingleResize`
+  - `SingleRotate`
+  - `MultiResize`
+  - `MultiRotate`
+  - `Marquee`
 - `SelectionSession` は preview 用だけに使い、確定時にだけ履歴へ流す
-- 単一選択時は既存のハンドル編集を使い、複数選択時は move / align / reorder に限定する
+- 単一選択時は既存のハンドル編集を使い、複数選択時は group bbox ハンドルへ切り替える
 
 ## 選択モデルの拡張内容
 
 - 選択は `Vec<usize>` ベースで保持し、作品データには保存しない
 - 選択の追加 / 解除は `Shift + Click`
+- 空き領域ドラッグで矩形選択を行う
+- `Shift` 付き矩形選択は既存選択へ加算する
 - 単一選択
   - 要素固有の再編集に使う
   - shape なら move / resize / rotate
   - stroke なら move
 - 複数選択
   - 一括移動
+  - 一括リサイズ
+  - 一括回転
   - 整列
   - 重なり順変更
-- リサイズ / 回転ハンドルは単一選択 shape のみ表示し、複数選択 UI とは明確に分離する
+- 単一選択では shape ハンドル、複数選択では group bbox ハンドルを表示する
 
 ## リサイズ / 回転操作の設計
 
@@ -120,7 +127,21 @@
   - endpoint ハンドルで長さと向きを編集する
   - 回転ハンドルは線分中心を回転中心にする
 - ストローク
-  - このフェーズでは移動のみ対応し、リサイズ / 回転は未対応
+  - 単一選択では移動のみ
+  - 複数選択の group transform では簡易スケール / 回転対象に含める
+
+## 複数選択変形の考え方
+
+- group bbox は選択要素全体の union bounds から作る
+- 一括リサイズ
+  - group bbox の対角ハンドルを使う
+  - 反対側の角を anchor にして scale 値を求める
+  - 各要素は anchor 基準のワールド座標変換で preview する
+- 一括回転
+  - group center を pivot にする
+  - pointer 角度差から回転量を求める
+  - 各要素は pivot 回りに回転して preview する
+- 単一選択の shape 編集は従来どおり shape 専用ロジックを使う
 
 ## バウンディングとヒットテストの考え方
 
@@ -135,8 +156,11 @@
 - 複数選択
   - 各要素の個別 bounds をハイライト表示する
   - 選択全体の union bounds をグループ bbox として表示する
+- 矩形選択
+  - 要素 bounds と marquee rect の交差で選択する
 - クリック優先順位は次の通り
   - 単一選択 shape のハンドル
+  - 複数選択 group のハンドル
   - 選択済み要素本体
   - 未選択要素本体
   - 背景
@@ -163,7 +187,7 @@
 
 - 新規 stroke / 図形作成は `commit_element`
 - 単一要素の Move / Resize / Rotate は `replace_document` ベースで 1 回だけ確定する
-- 複数要素の Move / Align / Reorder も `replace_document` を 1 回だけ積む
+- 複数要素の Move / Resize / Rotate / Align / Reorder も `replace_document` を 1 回だけ積む
 - preview 中は `SelectionSession` の中だけで状態を持つ
 - リリース時にだけ 1 回の編集として履歴へ積む
 - 選択状態やビュー状態は履歴に積まない
@@ -171,7 +195,7 @@
 ## Undo / Redo とビュー操作の関係
 
 - `DocumentHistory` が `current`, `undo_stack`, `redo_stack` を保持する
-- 新規作成、移動、リサイズ、回転、複数移動、整列、重なり順変更、`Clear`、`Load` は編集履歴に入る
+- 新規作成、移動、単一 / 複数リサイズ、単一 / 複数回転、整列、重なり順変更、`Clear`、`Load` は編集履歴に入る
 - `Undo` 後に新規編集を行った場合、`redo_stack` は破棄する
 - ズーム / パン / Reset View は view state の変更として扱い、編集履歴には影響させない
 
@@ -190,7 +214,7 @@
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
-- 整列や重なり順変更も作品データどおりに反映する
+- 整列、group transform、重なり順変更も作品データどおりに反映する
 - 選択枠やハンドルは出力に含めない
 
 ## 将来の拡張方針
@@ -198,11 +222,9 @@
 - レイヤー
   - `PaintDocument` に layer 配列を導入し、各 layer が `PaintElement` 配列を持つ形へ拡張
 - 複数選択強化
-  - ドラッグ矩形選択
-  - 複数要素の一括リサイズ / 回転
   - グループ化
 - ストローク変形
-  - bbox ベースの簡易スケールや回転を追加
+  - 単一選択でも扱える専用ハンドルや変形 UI を追加
 - 図形編集強化
   - 塗り、角丸矩形、矢印、スナップ、等間隔配置などを追加
 - 保存形式 migration
