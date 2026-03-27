@@ -19,6 +19,7 @@ const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
 const GRID_SPACING_PRESETS: [f32; 6] = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
 const GRID_SPACING_STEP: f32 = 8.0;
+const TOOL_BUTTON_HEIGHT: f32 = 36.0;
 
 fn shortcut_undo() -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
@@ -141,6 +142,7 @@ pub struct PaintApp {
     canvas: CanvasController,
     storage: StorageFacade,
     active_tool: CanvasToolKind,
+    multi_select_mode: bool,
     brush_color: RgbaColor,
     brush_width: f32,
     status_message: StatusMessage,
@@ -162,6 +164,7 @@ impl Default for PaintApp {
             canvas: CanvasController::default(),
             storage,
             active_tool: CanvasToolKind::Brush,
+            multi_select_mode: false,
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
@@ -213,6 +216,23 @@ impl PaintApp {
             tool: self.active_tool,
             color: self.brush_color,
             width: self.brush_width,
+            multi_select_mode: self.multi_select_mode,
+        }
+    }
+
+    fn set_multi_select_mode(&mut self, enabled: bool) {
+        if self.multi_select_mode == enabled {
+            return;
+        }
+
+        self.multi_select_mode = enabled;
+        if enabled {
+            self.active_tool = CanvasToolKind::Select;
+            self.set_info(
+                "複数選択モードをオンにしました。タップで追加 / 解除できます。移動するときはオフにしてください。",
+            );
+        } else {
+            self.set_info("複数選択モードをオフにしました。通常の選択と移動に戻ります。");
         }
     }
 
@@ -249,15 +269,39 @@ impl PaintApp {
         ui.label("ツールを選んで、現在のレイヤーに描くか編集します。");
         ui.add_space(8.0);
 
+        ui.label(RichText::new("タブレット向け").strong());
+        if ui
+            .add_sized(
+                [ui.available_width(), TOOL_BUTTON_HEIGHT],
+                egui::Button::new("複数選択モード").selected(self.multi_select_mode),
+            )
+            .clicked()
+        {
+            self.set_multi_select_mode(!self.multi_select_mode);
+        }
+        ui.small("オンの間は、選択ツールでタップすると追加選択 / 解除できます。");
+        ui.add_space(8.0);
+
         for tool in [
             CanvasToolKind::Select,
+            CanvasToolKind::Pan,
             CanvasToolKind::Brush,
             CanvasToolKind::Rectangle,
             CanvasToolKind::Ellipse,
             CanvasToolKind::Line,
             CanvasToolKind::Eraser,
         ] {
-            ui.selectable_value(&mut self.active_tool, tool, tool.label());
+            let is_selected = self.active_tool == tool;
+            if ui
+                .add_sized(
+                    [ui.available_width(), TOOL_BUTTON_HEIGHT],
+                    egui::Button::new(tool.label()).selected(is_selected),
+                )
+                .clicked()
+                && !is_selected
+            {
+                self.set_active_tool(tool, false);
+            }
         }
 
         ui.add_space(12.0);
@@ -284,6 +328,14 @@ impl PaintApp {
         ui.separator();
         ui.label(RichText::new("現在のモード").strong());
         ui.small(tool_hint(self.active_tool));
+        ui.small(format!(
+            "複数選択モード: {}",
+            if self.multi_select_mode {
+                "オン"
+            } else {
+                "オフ"
+            }
+        ));
         ui.small(self.canvas.selection_summary(self.document()));
 
         ui.separator();
@@ -306,11 +358,11 @@ impl PaintApp {
         }
         ui.small("図形: 角ハンドルでサイズ変更、丸いハンドルで回転します");
         ui.small("ストローク: 単体 / 複数変形では簡易的な移動 / 拡大縮小 / 回転を使います");
-        ui.small("複数選択: Shift+Click またはドラッグ選択");
+        ui.small("複数選択: Shift+Click、複数選択モード、またはドラッグ選択");
         ui.small("複数編集: 移動、グループ化、サイズ変更 / 回転、整列、等間隔、重なり順変更");
-        ui.small("パン: Space+Drag または中ボタンドラッグ");
+        ui.small("パン: 手のひらツール、Space+Drag、または中ボタンドラッグ");
         ui.small("表示リセット: Ctrl/Cmd + 0");
-        ui.small("ヒント: Shift+Click で複数選択、ガイドはドラッグで移動、Ctrl/Cmd+Wheel でズーム");
+        ui.small("ヒント: タブレットでは複数選択モードと手のひらツールが便利です。");
 
         ui.separator();
         self.show_canvas_aids(ui);
@@ -873,10 +925,10 @@ impl PaintApp {
                 ui.label(RichText::new("最初に").strong());
                 ui.small("描く: ブラシ、四角形、楕円、直線を選んでキャンバスをドラッグします。");
                 ui.small("選択: 選択ツールで要素をクリックします。角ハンドルでサイズ変更、丸いハンドルで回転します。");
-                ui.small("複数選択: Shift+Click またはドラッグ選択。移動、グループ化、整列、等間隔、重なり順変更ができます。");
-                ui.small("パンとズーム: Space+Drag または中ボタンドラッグでパン。Ctrl/Cmd+Wheel か +/- でズーム、Ctrl/Cmd+0 で表示を戻します。");
+                ui.small("複数選択: Shift+Click またはドラッグ選択。タブレットでは「複数選択モード」をオンにすると、タップで追加 / 解除できます。");
+                ui.small("パンとズーム: Space+Drag または中ボタンドラッグでパン。タブレットでは「手のひら」ツールでドラッグして移動できます。Ctrl/Cmd+Wheel か +/- でズーム、Ctrl/Cmd+0 で表示を戻します。");
                 ui.small("ファイル: JSON保存 は再編集用、JSONを開く は復元、PNG書き出し は共有用画像です。");
-                ui.small("レイヤー: 現在のレイヤーに描きます。非表示レイヤーは書き出しに含まれません。");
+                ui.small("レイヤー: 現在のレイヤーに描きます。タブレットでもレイヤー追加、表示切替、ロック、移動 / 複製が使えます。非表示レイヤーは書き出しに含まれません。");
                 #[cfg(target_arch = "wasm32")]
                 ui.small("Web版: GitHub Pages では JSON保存 と PNG書き出し はダウンロード、JSONを開く はファイル選択になります。");
 
@@ -884,7 +936,7 @@ impl PaintApp {
                 ui.label(RichText::new("ショートカット").strong());
                 ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
                 ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
-                ui.small("ツール: V 選択 · B ブラシ · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
+                ui.small("ツール: V 選択 · H 手のひら · B ブラシ · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
             });
     }
 
@@ -1662,6 +1714,8 @@ impl PaintApp {
     fn handle_tool_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::V)) {
             self.set_active_tool(CanvasToolKind::Select, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::H)) {
+            self.set_active_tool(CanvasToolKind::Pan, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::B)) {
             self.set_active_tool(CanvasToolKind::Brush, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::R)) {
@@ -1763,7 +1817,10 @@ impl eframe::App for PaintApp {
 fn tool_hint(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => {
-            "現在のレイヤー上でクリックすると選択できます。Shift+Click で追加 / 解除、空き領域のドラッグで矩形選択です。単体図形はサイズ変更 / 回転、複数選択は移動 / グループ変形 / 整列 / 重なり順変更ができます。"
+            "現在のレイヤー上でクリックすると選択できます。Shift+Click または複数選択モードで追加 / 解除、空き領域のドラッグで矩形選択です。単体図形はサイズ変更 / 回転、複数選択は移動 / グループ変形 / 整列 / 重なり順変更ができます。"
+        }
+        CanvasToolKind::Pan => {
+            "手のひらツールです。キーボードなしでキャンバスをドラッグして移動できます。"
         }
         CanvasToolKind::Brush => {
             "フリーハンドで線を描くツールです。現在のレイヤー上をドラッグして描きます。"
