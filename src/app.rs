@@ -164,7 +164,7 @@ impl Default for PaintApp {
             brush_color: RgbaColor::charcoal(),
             brush_width: 6.0,
             status_message: StatusMessage::info(
-                "Ready to draw. Open Help for the basics, then drag with Brush or a shape tool.",
+                "Ready to draw. Pick Brush or a shape tool, then open Help if you want a quick tour.",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -320,7 +320,7 @@ impl PaintApp {
         ui.small(self.storage.storage_strategy_summary());
         ui.small(self.storage.editable_format_label());
         ui.small(self.storage.planned_export_format());
-        ui.small("Top bar: Save JSON, Open JSON, Export PNG, Help");
+        ui.small("Top bar actions: Save JSON, Open JSON, Export PNG, and Help.");
     }
 
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
@@ -872,7 +872,7 @@ impl PaintApp {
                 ui.small("Files: Save JSON keeps editing state, Open JSON restores it, Export PNG creates a shareable image.");
                 ui.small("Layers: Draw on the active visible, unlocked layer. Hidden layers do not export.");
                 #[cfg(target_arch = "wasm32")]
-                ui.small("Web: Save/Open/Export uses browser download or file picker flows on GitHub Pages.");
+                ui.small("Web: Save JSON downloads a file, Open JSON opens the picker, and Export PNG downloads an image on GitHub Pages.");
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("Shortcuts").strong());
