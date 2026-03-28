@@ -22,6 +22,7 @@
   - パネル構成
   - ツール状態
   - 線色 / 塗り色 / 不透明度の保持
+  - 最近使った色と簡易パレット
   - ボタン操作
   - ショートカット処理
   - ステータスメッセージ管理
@@ -48,6 +49,7 @@
   - `ShapeElement`
   - `GroupElement`
   - 色、点列、キャンバスサイズ
+  - ブラシ種別ごとの基本スタイル係数
   - バウンディング / ヒットテスト
   - 図形のリサイズ / 回転ロジック
   - group 化 / group 解除 / 等間隔配置
@@ -57,6 +59,7 @@
   - 表示倍率に依存しない作品基準のラスタライズ
   - 通常 PNG と透過 PNG の背景モード切り替え
   - スポイト用のキャンバス色サンプリング
+  - freehand stroke の tool 種別ごとの見た目差の反映
   - 将来の SVG export を足しやすい export 分岐の土台
 - `src/storage.rs`
   - JSON encode / decode
@@ -78,6 +81,9 @@
   - `Stroke`
   - `Shape`
   - `Group`
+- `Stroke`
+  - `tool` は `pen / pencil / marker / eraser` を表せる
+  - tool ごとに最小限の幅係数 / alpha 係数を持ち、重いブラシエンジンなしで描き味の差を出す
 - `GroupElement`
   - `elements: Vec<PaintElement>` を持つ
   - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う

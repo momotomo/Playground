@@ -162,6 +162,11 @@ impl RgbaColor {
     pub const fn charcoal() -> Self {
         Self::new(37, 37, 41, 255)
     }
+
+    pub fn with_alpha_scaled(self, factor: f32) -> Self {
+        let alpha = ((self.a as f32) * factor).round().clamp(0.0, 255.0) as u8;
+        Self::from_rgba(self.r, self.g, self.b, alpha)
+    }
 }
 
 impl Default for RgbaColor {
@@ -314,14 +319,45 @@ impl ElementBounds {
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
     Brush,
+    Pencil,
+    Marker,
     Eraser,
 }
 
 impl ToolKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Brush => "線",
+            Self::Brush => "ペン",
+            Self::Pencil => "えんぴつ",
+            Self::Marker => "マーカー",
             Self::Eraser => "消しゴム",
+        }
+    }
+
+    pub const fn width_scale(self) -> f32 {
+        match self {
+            Self::Brush => 1.0,
+            Self::Pencil => 0.85,
+            Self::Marker => 1.35,
+            Self::Eraser => 1.0,
+        }
+    }
+
+    pub const fn alpha_scale(self) -> f32 {
+        match self {
+            Self::Brush => 1.0,
+            Self::Pencil => 0.72,
+            Self::Marker => 0.48,
+            Self::Eraser => 1.0,
+        }
+    }
+
+    pub fn styled_color(self, color: RgbaColor) -> RgbaColor {
+        match self {
+            Self::Brush | Self::Pencil | Self::Marker => {
+                color.with_alpha_scaled(self.alpha_scale())
+            }
+            Self::Eraser => color,
         }
     }
 }
@@ -459,6 +495,10 @@ impl Stroke {
         self.points.push(point);
     }
 
+    pub fn effective_width(&self) -> f32 {
+        (self.width * self.tool.width_scale()).max(1.0)
+    }
+
     pub fn translated(&self, delta: PaintVector) -> Self {
         let mut translated = self.clone();
         for point in &mut translated.points {
@@ -484,7 +524,7 @@ impl Stroke {
     }
 
     pub fn bounds(&self) -> Option<ElementBounds> {
-        ElementBounds::from_points(&self.points, self.width.max(1.0) * 0.5)
+        ElementBounds::from_points(&self.points, self.effective_width() * 0.5)
     }
 
     pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> bool {
@@ -492,9 +532,9 @@ impl Stroke {
 
         match self.points.as_slice() {
             [] => false,
-            [only] => only.distance_to(point) <= (self.width * 0.5 + tolerance),
+            [only] => only.distance_to(point) <= (self.effective_width() * 0.5 + tolerance),
             [first, rest @ ..] => {
-                let radius = self.width * 0.5 + tolerance;
+                let radius = self.effective_width() * 0.5 + tolerance;
                 let radius_sq = radius * radius;
                 let mut previous = *first;
 
@@ -2271,6 +2311,20 @@ mod tests {
         let stroke = sample_stroke();
         assert!(stroke.hit_test(PaintPoint::new(20.0, 12.5), 2.0));
         assert!(!stroke.hit_test(PaintPoint::new(20.0, 30.0), 2.0));
+    }
+
+    #[test]
+    fn tool_kinds_adjust_stroke_width_and_alpha() {
+        let color = RgbaColor::from_rgba(120, 80, 40, 200);
+        let pen = Stroke::new(ToolKind::Brush, color, 10.0);
+        let pencil = Stroke::new(ToolKind::Pencil, color, 10.0);
+        let marker = Stroke::new(ToolKind::Marker, color, 10.0);
+
+        assert_eq!(pen.effective_width(), 10.0);
+        assert!(pencil.effective_width() < pen.effective_width());
+        assert!(marker.effective_width() > pen.effective_width());
+        assert!(ToolKind::Pencil.styled_color(color).a < color.a);
+        assert!(ToolKind::Marker.styled_color(color).a < ToolKind::Pencil.styled_color(color).a);
     }
 
     #[test]

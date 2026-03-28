@@ -138,12 +138,10 @@ fn render_stroke(
         ..Paint::default()
     };
     match stroke.tool {
-        ToolKind::Brush => paint.set_color_rgba8(
-            stroke.color.r,
-            stroke.color.g,
-            stroke.color.b,
-            stroke.color.a,
-        ),
+        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
+            let color = stroke.tool.styled_color(stroke.color);
+            paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        }
         ToolKind::Eraser => match raster_background {
             RasterBackground::Opaque => {
                 paint.set_color_rgba8(background.r, background.g, background.b, background.a);
@@ -157,7 +155,9 @@ fn render_stroke(
     match stroke.points.as_slice() {
         [] => {}
         [point] => {
-            if let Some(path) = PathBuilder::from_circle(point.x, point.y, stroke.width * 0.5) {
+            if let Some(path) =
+                PathBuilder::from_circle(point.x, point.y, stroke.effective_width() * 0.5)
+            {
                 pixmap.fill_path(
                     &path,
                     &paint,
@@ -178,7 +178,7 @@ fn render_stroke(
                 pixmap.stroke_path(
                     &path,
                     &paint,
-                    &stroke_style(stroke.width),
+                    &stroke_style(stroke.effective_width()),
                     Transform::identity(),
                     None,
                 );
@@ -546,5 +546,26 @@ mod tests {
         let sampled =
             sample_document_color(&document, PaintPoint::new(24.0, 24.0)).expect("sampled color");
         assert_eq!(sampled, RgbaColor::new(90, 180, 120, 255));
+    }
+
+    #[test]
+    fn marker_stroke_keeps_partial_alpha_on_transparent_export() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(32.0, 32.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        let mut stroke = Stroke::new(ToolKind::Marker, RgbaColor::new(24, 80, 200, 255), 8.0);
+        stroke.push_point(PaintPoint::new(4.0, 16.0));
+        stroke.push_point(PaintPoint::new(28.0, 16.0));
+        document.push_stroke(stroke);
+
+        let pixmap =
+            render_document_pixmap_with_background(&document, RasterBackground::Transparent)
+                .expect("transparent render should succeed");
+        let pixel = pixmap.pixel(16, 16).expect("marker pixel");
+
+        assert!(pixel.alpha() > 0);
+        assert!(pixel.alpha() < 255);
     }
 }

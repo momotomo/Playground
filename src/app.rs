@@ -22,8 +22,25 @@ const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
 const GRID_SPACING_PRESETS: [f32; 6] = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
 const GRID_SPACING_STEP: f32 = 8.0;
-const TOOL_BUTTON_HEIGHT: f32 = 36.0;
+const TOOL_BUTTON_HEIGHT: f32 = 40.0;
+const COLOR_SWATCH_SIZE: f32 = 32.0;
+const RECENT_COLOR_LIMIT: usize = 12;
 const APP_UI_STATE_KEY: &str = "paint_app_ui_state";
+
+const QUICK_PALETTE: [RgbaColor; 12] = [
+    RgbaColor::from_rgba(37, 37, 41, 255),
+    RgbaColor::from_rgba(255, 255, 255, 255),
+    RgbaColor::from_rgba(220, 64, 64, 255),
+    RgbaColor::from_rgba(255, 143, 0, 255),
+    RgbaColor::from_rgba(255, 199, 64, 255),
+    RgbaColor::from_rgba(76, 175, 80, 255),
+    RgbaColor::from_rgba(0, 150, 136, 255),
+    RgbaColor::from_rgba(33, 150, 243, 255),
+    RgbaColor::from_rgba(63, 81, 181, 255),
+    RgbaColor::from_rgba(156, 39, 176, 255),
+    RgbaColor::from_rgba(121, 85, 72, 255),
+    RgbaColor::from_rgba(96, 125, 139, 255),
+];
 
 fn shortcut_undo() -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
@@ -148,6 +165,7 @@ enum WebStorageResult {
 #[serde(default)]
 struct UiStatePersistence {
     tutorial_dismissed: bool,
+    recent_colors: Vec<RgbaColor>,
 }
 
 #[derive(Clone, Default)]
@@ -207,7 +225,7 @@ struct ToolColorSettings {
     stroke_color: RgbaColor,
     fill_color: RgbaColor,
     fill_enabled: bool,
-    eyedropper_target: ColorTarget,
+    quick_color_target: ColorTarget,
 }
 
 impl Default for ToolColorSettings {
@@ -216,7 +234,7 @@ impl Default for ToolColorSettings {
             stroke_color: RgbaColor::charcoal(),
             fill_color: RgbaColor::from_rgba(255, 199, 64, 180),
             fill_enabled: false,
-            eyedropper_target: ColorTarget::Stroke,
+            quick_color_target: ColorTarget::Stroke,
         }
     }
 }
@@ -259,7 +277,7 @@ impl Default for PaintApp {
             tool_colors: ToolColorSettings::default(),
             tool_widths: ToolWidthSettings::default(),
             status_message: StatusMessage::info(
-                "描く準備ができました。ブラシや図形ツールを選んで、必要ならヘルプを開いてください。",
+                "描く準備ができました。ペンや図形ツールを選んで、必要ならヘルプを開いてください。",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -287,6 +305,7 @@ impl PaintApp {
             ui_state,
             ..Self::default()
         };
+        app.ui_state.recent_colors.truncate(RECENT_COLOR_LIMIT);
         app.tutorial.visible = !app.ui_state.tutorial_dismissed;
         if app.tutorial.visible {
             app.status_message =
@@ -353,25 +372,52 @@ impl PaintApp {
         )
     }
 
-    fn apply_picked_color(&mut self, color: RgbaColor) {
-        match self.tool_colors.eyedropper_target {
+    fn push_recent_color(&mut self, color: RgbaColor) {
+        if self.ui_state.recent_colors.first().copied() == Some(color) {
+            return;
+        }
+
+        self.ui_state
+            .recent_colors
+            .retain(|stored| *stored != color);
+        self.ui_state.recent_colors.insert(0, color);
+        self.ui_state.recent_colors.truncate(RECENT_COLOR_LIMIT);
+        self.ui_state_dirty = true;
+    }
+
+    fn apply_color_to_target(&mut self, color: RgbaColor, announce: impl Into<String>) {
+        match self.tool_colors.quick_color_target {
             ColorTarget::Stroke => {
                 self.tool_colors.stroke_color = color;
-                self.set_info("スポイトで線色を拾いました。");
             }
             ColorTarget::Fill => {
                 self.tool_colors.fill_color = color;
                 self.tool_colors.fill_enabled = true;
-                self.set_info("スポイトで塗り色を拾いました。");
             }
         }
+        self.push_recent_color(color);
+        self.set_info(announce);
+    }
+
+    fn apply_quick_color(&mut self, color: RgbaColor, source: &str) {
+        let target = self.tool_colors.quick_color_target;
+        self.apply_color_to_target(
+            color,
+            format!("{source}から{}を更新しました。", target.label()),
+        );
+    }
+
+    fn apply_picked_color(&mut self, color: RgbaColor) {
+        let target = self.tool_colors.quick_color_target;
+        self.apply_color_to_target(color, format!("スポイトで{}を拾いました。", target.label()));
 
         if self.active_tool == CanvasToolKind::Eyedropper {
+            let return_tool = self.previous_non_picker_tool;
             self.set_active_tool(self.previous_non_picker_tool, false);
             self.set_info(format!(
                 "スポイトで{}を拾いました。{} に戻ります。",
-                self.tool_colors.eyedropper_target.label(),
-                self.active_tool.label()
+                target.label(),
+                return_tool.label()
             ));
         }
     }
@@ -539,6 +585,8 @@ impl PaintApp {
             CanvasToolKind::Select,
             CanvasToolKind::Pan,
             CanvasToolKind::Brush,
+            CanvasToolKind::Pencil,
+            CanvasToolKind::Marker,
             CanvasToolKind::Eyedropper,
             CanvasToolKind::Rectangle,
             CanvasToolKind::Ellipse,
@@ -563,6 +611,8 @@ impl PaintApp {
         ui.label(RichText::new("描画ツール設定").strong());
         match self.active_tool {
             CanvasToolKind::Brush
+            | CanvasToolKind::Pencil
+            | CanvasToolKind::Marker
             | CanvasToolKind::Eyedropper
             | CanvasToolKind::Rectangle
             | CanvasToolKind::Ellipse
@@ -579,27 +629,70 @@ impl PaintApp {
                 ));
             }
             CanvasToolKind::Select | CanvasToolKind::Pan => {
-                ui.small("描く太さはブラシと図形、消しゴム太さは消しゴムに使います。");
+                ui.small("描く太さは描画ツールと図形、消しゴム太さは消しゴムに使います。");
             }
         }
 
         ui.label(RichText::new("色と不透明度").strong());
-        ui.small("線色はブラシと図形、塗り色は四角形と楕円に使います。");
+        ui.small("線色は描画と図形、塗り色は四角形と楕円に使います。");
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("色の反映先");
+            ui.selectable_value(
+                &mut self.tool_colors.quick_color_target,
+                ColorTarget::Stroke,
+                "線色",
+            );
+            ui.selectable_value(
+                &mut self.tool_colors.quick_color_target,
+                ColorTarget::Fill,
+                "塗り色",
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            let stroke_selected = self.tool_colors.quick_color_target == ColorTarget::Stroke;
+            let fill_selected = self.tool_colors.quick_color_target == ColorTarget::Fill;
+            let stroke_response = color_swatch_button(
+                ui,
+                self.tool_colors.stroke_color,
+                stroke_selected,
+                "線色を編集対象にします。",
+            );
+            if stroke_response.clicked() {
+                self.tool_colors.quick_color_target = ColorTarget::Stroke;
+            }
+            ui.small("線色");
+
+            let fill_response = color_swatch_button(
+                ui,
+                self.tool_colors.fill_color,
+                fill_selected,
+                "塗り色を編集対象にします。",
+            );
+            if fill_response.clicked() {
+                self.tool_colors.quick_color_target = ColorTarget::Fill;
+            }
+            ui.small("塗り色");
+        });
+        ui.small("スポイト、最近使った色、簡易パレットはここで選んだ色へ入ります。");
 
         ui.label("線色");
         let mut stroke_color = color32_from_rgba(self.tool_colors.stroke_color);
         if ui.color_edit_button_srgba(&mut stroke_color).changed() {
-            self.tool_colors.stroke_color = rgba_from_color32(stroke_color);
+            let color = rgba_from_color32(stroke_color);
+            self.tool_colors.stroke_color = color;
+            self.push_recent_color(color);
             self.set_info("線色を変更しました。");
         }
         let mut stroke_opacity = alpha_percent(self.tool_colors.stroke_color);
         if ui
             .add(egui::Slider::new(&mut stroke_opacity, 0..=100).suffix("%"))
-            .on_hover_text("ブラシや図形の線の不透明度を変えます。")
+            .on_hover_text("描画ツールや図形の線の不透明度を変えます。")
             .changed()
         {
             self.tool_colors.stroke_color =
                 set_alpha_percent(self.tool_colors.stroke_color, stroke_opacity);
+            self.push_recent_color(self.tool_colors.stroke_color);
             self.set_info(format!(
                 "線の不透明度を {}% に変更しました。",
                 stroke_opacity
@@ -623,7 +716,9 @@ impl PaintApp {
             ui.label("塗り色");
             let mut fill_color = color32_from_rgba(self.tool_colors.fill_color);
             if ui.color_edit_button_srgba(&mut fill_color).changed() {
-                self.tool_colors.fill_color = rgba_from_color32(fill_color);
+                let color = rgba_from_color32(fill_color);
+                self.tool_colors.fill_color = color;
+                self.push_recent_color(color);
                 self.set_info("塗り色を変更しました。");
             }
             let mut fill_opacity = alpha_percent(self.tool_colors.fill_color);
@@ -634,6 +729,7 @@ impl PaintApp {
             {
                 self.tool_colors.fill_color =
                     set_alpha_percent(self.tool_colors.fill_color, fill_opacity);
+                self.push_recent_color(self.tool_colors.fill_color);
                 self.set_info(format!(
                     "塗りの不透明度を {}% に変更しました。",
                     fill_opacity
@@ -643,20 +739,39 @@ impl PaintApp {
         if !self.tool_uses_fill() {
             ui.small("塗り色は四角形と楕円で使います。");
         }
-        ui.horizontal(|ui| {
-            ui.label("スポイト反映先");
-            ui.selectable_value(
-                &mut self.tool_colors.eyedropper_target,
-                ColorTarget::Stroke,
-                "線色",
-            );
-            ui.selectable_value(
-                &mut self.tool_colors.eyedropper_target,
-                ColorTarget::Fill,
-                "塗り色",
-            );
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("最近使った色").strong());
+        if self.ui_state.recent_colors.is_empty() {
+            ui.small("色を変更すると、ここからすぐ呼び戻せます。");
+        } else {
+            let recent_colors = self.ui_state.recent_colors.clone();
+            ui.horizontal_wrapped(|ui| {
+                for color in recent_colors {
+                    let response = color_swatch_button(
+                        ui,
+                        color,
+                        false,
+                        "最近使った色を現在の反映先へ入れます。",
+                    );
+                    if response.clicked() {
+                        self.apply_quick_color(color, "最近使った色");
+                    }
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("よく使う色").strong());
+        ui.horizontal_wrapped(|ui| {
+            for color in QUICK_PALETTE {
+                let response =
+                    color_swatch_button(ui, color, false, "よく使う色を現在の反映先へ入れます。");
+                if response.clicked() {
+                    self.apply_quick_color(color, "簡易パレット");
+                }
+            }
         });
-        ui.small("スポイトで拾った色は、ここで選んだ色に反映されます。");
 
         ui.add_space(8.0);
         ui.label("描く太さ");
@@ -665,16 +780,16 @@ impl PaintApp {
                 &mut self.tool_widths.draw_width,
                 MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
             ))
-            .on_hover_text("ブラシ、四角形、楕円、直線の太さを変えます。")
+            .on_hover_text("ペン、えんぴつ、マーカー、四角形、楕円、直線の太さを変えます。")
             .changed()
         {
             self.set_info(format!(
-                "描く太さを {:.1}px に変更しました。ブラシと図形に使います。",
+                "描く太さを {:.1}px に変更しました。描画ツールと図形に使います。",
                 self.tool_widths.draw_width
             ));
         }
         ui.small(format!(
-            "{:.1}px · ブラシ / 四角形 / 楕円 / 直線",
+            "{:.1}px · ペン / えんぴつ / マーカー / 四角形 / 楕円 / 直線",
             self.tool_widths.draw_width
         ));
 
@@ -697,6 +812,12 @@ impl PaintApp {
         ui.separator();
         ui.label(RichText::new("現在のモード").strong());
         ui.small(format!("ツール: {}", self.active_tool.label()));
+        if matches!(
+            self.active_tool,
+            CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+        ) {
+            ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
+        }
         ui.small(format!(
             "複数選択モード {} / 指でも描く {}",
             on_off_label(self.multi_select_mode),
@@ -1398,8 +1519,8 @@ impl PaintApp {
             .default_width(380.0)
             .show(ctx, |ui| {
                 ui.label(RichText::new("短く確認する").strong());
-                ui.small("描く: ブラシか図形ツールを選んでドラッグします。");
-                ui.small("色: スポイトで拾った色を線色や塗り色に反映できます。");
+                ui.small("描く: ペン / えんぴつ / マーカーか図形ツールを選んでドラッグします。");
+                ui.small("色: スポイト、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
                 ui.small("保存: JSON保存は再編集用、PNG書き出しは共有用、透過PNGは素材用です。");
@@ -1412,7 +1533,7 @@ impl PaintApp {
                 ui.label(RichText::new("ショートカット").strong());
                 ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
                 ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
-                ui.small("ツール: V 選択 · H 手のひら · B ブラシ · I スポイト · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
+                ui.small("ツール: V 選択 · H 手のひら · B ペン · N えんぴつ · M マーカー · I スポイト · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
 
                 ui.add_space(10.0);
                 if ui.button("チュートリアルをもう一度見る").clicked() {
@@ -2299,6 +2420,10 @@ impl PaintApp {
             self.set_active_tool(CanvasToolKind::Pan, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::B)) {
             self.set_active_tool(CanvasToolKind::Brush, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::N)) {
+            self.set_active_tool(CanvasToolKind::Pencil, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::M)) {
+            self.set_active_tool(CanvasToolKind::Marker, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::I)) {
             self.set_active_tool(CanvasToolKind::Eyedropper, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::R)) {
@@ -2437,6 +2562,73 @@ fn set_alpha_percent(color: RgbaColor, percent: u8) -> RgbaColor {
     RgbaColor::from_rgba(color.r, color.g, color.b, alpha)
 }
 
+fn brush_kind_summary(tool: CanvasToolKind) -> &'static str {
+    match tool {
+        CanvasToolKind::Brush => "くっきり描けるペン",
+        CanvasToolKind::Pencil => "やや薄く軽いえんぴつ",
+        CanvasToolKind::Marker => "重ねやすい半透明マーカー",
+        _ => "",
+    }
+}
+
+fn color_swatch_button(
+    ui: &mut egui::Ui,
+    color: RgbaColor,
+    selected: bool,
+    hover_text: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE),
+        egui::Sense::click(),
+    );
+
+    if ui.is_rect_visible(rect) {
+        let outer_rounding = 6.0;
+        let inner_rect = rect.shrink(2.0);
+        let inner_rounding = 4.0;
+        let checker_light = egui::Color32::from_gray(246);
+        let checker_dark = egui::Color32::from_gray(226);
+        let fill = color32_from_rgba(color);
+
+        ui.painter()
+            .rect_filled(rect, outer_rounding, checker_light);
+
+        let half_w = inner_rect.width() * 0.5;
+        let half_h = inner_rect.height() * 0.5;
+        for row in 0..2 {
+            for col in 0..2 {
+                let tile = egui::Rect::from_min_size(
+                    egui::pos2(
+                        inner_rect.min.x + half_w * col as f32,
+                        inner_rect.min.y + half_h * row as f32,
+                    ),
+                    egui::vec2(half_w, half_h),
+                );
+                let tile_color = if (row + col) % 2 == 0 {
+                    checker_light
+                } else {
+                    checker_dark
+                };
+                ui.painter().rect_filled(tile, 0.0, tile_color);
+            }
+        }
+
+        ui.painter().rect_filled(inner_rect, inner_rounding, fill);
+        ui.painter().rect_stroke(
+            rect,
+            outer_rounding,
+            if selected {
+                ui.visuals().selection.stroke
+            } else {
+                ui.visuals().widgets.inactive.bg_stroke
+            },
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    response.on_hover_text(hover_text)
+}
+
 fn tool_switch_message(tool: CanvasToolKind) -> String {
     format!(
         "{} に切り替えました。{}",
@@ -2458,7 +2650,9 @@ fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => "選ぶ・動かす・変形するツールです。",
         CanvasToolKind::Pan => "キャンバスをドラッグして移動します。",
-        CanvasToolKind::Brush => "フリーハンドで描きます。",
+        CanvasToolKind::Brush => "はっきり描けるペンです。",
+        CanvasToolKind::Pencil => "少し軽いタッチのえんぴつです。",
+        CanvasToolKind::Marker => "重ねやすい半透明のマーカーです。",
         CanvasToolKind::Eyedropper => "見えている色を拾って線色や塗り色に使います。",
         CanvasToolKind::Eraser => "背景色でなぞって消します。",
         CanvasToolKind::Rectangle => "四角形の線と塗りを描きます。",
@@ -2475,8 +2669,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
     match step_index {
         0 => TutorialStepContent {
             title: "まずは 1 つ描いてみましょう",
-            body: "ブラシか図形ツールを選んで、キャンバスをドラッグします。線色、塗り色、不透明度を少し変えるだけでも印象が変わります。",
-            action: "左の「ブラシ」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
+            body: "ペン、えんぴつ、マーカーか図形ツールを選んで、キャンバスをドラッグします。線色、塗り色、不透明度を少し変えるだけでも印象が変わります。",
+            action: "左の「ペン」「えんぴつ」「マーカー」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
         },
         1 => TutorialStepContent {
             title: "選んで動かせます",
@@ -2498,7 +2692,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanvasToolKind, PaintApp};
+    use super::{CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT};
+    use crate::model::RgbaColor;
 
     #[test]
     fn multi_select_mode_switches_to_select_tool() {
@@ -2551,5 +2746,53 @@ mod tests {
         app.set_active_tool(CanvasToolKind::Rectangle, false);
 
         assert_eq!(app.tool_settings().width, 9.0);
+    }
+
+    #[test]
+    fn pencil_and_marker_reuse_draw_width_setting() {
+        let mut app = PaintApp::default();
+        app.tool_widths.draw_width = 11.0;
+        app.tool_widths.eraser_width = 21.0;
+
+        app.set_active_tool(CanvasToolKind::Pencil, false);
+        assert_eq!(app.tool_settings().width, 11.0);
+
+        app.set_active_tool(CanvasToolKind::Marker, false);
+        assert_eq!(app.tool_settings().width, 11.0);
+    }
+
+    #[test]
+    fn recent_colors_dedupe_and_truncate() {
+        let mut app = PaintApp::default();
+        let color_a = RgbaColor::from_rgba(10, 20, 30, 255);
+        let color_b = RgbaColor::from_rgba(40, 50, 60, 255);
+
+        app.push_recent_color(color_a);
+        app.push_recent_color(color_b);
+        app.push_recent_color(color_a);
+
+        assert_eq!(app.ui_state.recent_colors[0], color_a);
+        assert_eq!(app.ui_state.recent_colors[1], color_b);
+
+        for index in 0..(RECENT_COLOR_LIMIT + 3) {
+            app.push_recent_color(RgbaColor::from_rgba(index as u8, 0, 0, 255));
+        }
+
+        assert_eq!(app.ui_state.recent_colors.len(), RECENT_COLOR_LIMIT);
+    }
+
+    #[test]
+    fn quick_color_target_fill_enables_fill() {
+        let mut app = PaintApp::default();
+        app.tool_colors.fill_enabled = false;
+        app.tool_colors.quick_color_target = ColorTarget::Fill;
+
+        app.apply_quick_color(RgbaColor::from_rgba(120, 90, 60, 180), "最近使った色");
+
+        assert!(app.tool_colors.fill_enabled);
+        assert_eq!(
+            app.tool_colors.fill_color,
+            RgbaColor::from_rgba(120, 90, 60, 180)
+        );
     }
 }

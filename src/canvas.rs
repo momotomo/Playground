@@ -63,6 +63,8 @@ pub enum CanvasToolKind {
     Select,
     Pan,
     Brush,
+    Pencil,
+    Marker,
     Eyedropper,
     Eraser,
     Rectangle,
@@ -75,7 +77,9 @@ impl CanvasToolKind {
         match self {
             Self::Select => "選択",
             Self::Pan => "手のひら",
-            Self::Brush => "ブラシ",
+            Self::Brush => "ペン",
+            Self::Pencil => "えんぴつ",
+            Self::Marker => "マーカー",
             Self::Eyedropper => "スポイト",
             Self::Eraser => "消しゴム",
             Self::Rectangle => "四角形",
@@ -87,7 +91,13 @@ impl CanvasToolKind {
     const fn is_drawing_tool(self) -> bool {
         matches!(
             self,
-            Self::Brush | Self::Eraser | Self::Rectangle | Self::Ellipse | Self::Line
+            Self::Brush
+                | Self::Pencil
+                | Self::Marker
+                | Self::Eraser
+                | Self::Rectangle
+                | Self::Ellipse
+                | Self::Line
         )
     }
 
@@ -1155,7 +1165,10 @@ impl CanvasController {
                             output.picked_color = sample_document_color(document, world);
                             output.needs_repaint = output.picked_color.is_some();
                         }
-                        CanvasToolKind::Brush | CanvasToolKind::Eraser => {
+                        CanvasToolKind::Brush
+                        | CanvasToolKind::Pencil
+                        | CanvasToolKind::Marker
+                        | CanvasToolKind::Eraser => {
                             self.begin_stroke_preview(document, tool_settings, world);
                             output.needs_repaint = true;
                         }
@@ -1402,12 +1415,16 @@ impl CanvasController {
 
         self.clear_selection();
         let color = match tool_settings.tool {
-            CanvasToolKind::Brush => tool_settings.stroke_color,
+            CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker => {
+                tool_settings.stroke_color
+            }
             CanvasToolKind::Eraser => document.background,
             _ => tool_settings.stroke_color,
         };
         let tool = match tool_settings.tool {
             CanvasToolKind::Eraser => ToolKind::Eraser,
+            CanvasToolKind::Pencil => ToolKind::Pencil,
+            CanvasToolKind::Marker => ToolKind::Marker,
             _ => ToolKind::Brush,
         };
 
@@ -2340,7 +2357,9 @@ fn paint_element(
 
 fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, background: RgbaColor) {
     let color = match stroke.tool {
-        ToolKind::Brush => color32_from_rgba(stroke.color),
+        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
+            color32_from_rgba(stroke.tool.styled_color(stroke.color))
+        }
         ToolKind::Eraser => color32_from_rgba(background),
     };
 
@@ -2349,7 +2368,7 @@ fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, backg
         [point] => {
             painter.circle_filled(
                 canvas_to_screen(rect, zoom, *point),
-                stroke.width * zoom * 0.5,
+                stroke.effective_width() * zoom * 0.5,
                 color,
             );
         }
@@ -2361,7 +2380,7 @@ fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, backg
                 .collect();
             painter.add(egui::Shape::line(
                 line_points,
-                EguiStroke::new(stroke.width * zoom, color),
+                EguiStroke::new(stroke.effective_width() * zoom, color),
             ));
         }
     }
