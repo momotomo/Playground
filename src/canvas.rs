@@ -14,11 +14,11 @@ const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const FIT_MARGIN: f32 = 24.0;
 const HIT_TOLERANCE_SCREEN: f32 = 8.0;
-const TOUCH_HIT_TOLERANCE_SCREEN: f32 = 18.0;
-const HANDLE_RADIUS: f32 = 6.5;
-const HANDLE_HIT_RADIUS: f32 = 12.0;
-const TOUCH_HANDLE_HIT_RADIUS: f32 = 22.0;
-const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 28.0;
+const TOUCH_HIT_TOLERANCE_SCREEN: f32 = 20.0;
+const HANDLE_RADIUS: f32 = 7.5;
+const HANDLE_HIT_RADIUS: f32 = 14.0;
+const TOUCH_HANDLE_HIT_RADIUS: f32 = 28.0;
+const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 34.0;
 const MIN_SELECTION_TRANSFORM_EXTENT: f32 = 4.0;
 const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
 const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
@@ -56,6 +56,14 @@ struct RulerPaintStyle {
     label_color: Color32,
     step: f32,
     label_step: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionZoneStyle {
+    fill: Color32,
+    accent: Color32,
+    expand: f32,
+    stroke_width: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -746,19 +754,19 @@ impl CanvasController {
 
     pub fn selection_summary(&self, document: &PaintDocument) -> String {
         let Some(active_layer) = document.active_layer() else {
-            return "選択: なし".to_owned();
+            return "選択なし".to_owned();
         };
 
         if !active_layer.visible {
-            return format!("選択: なし（{} は非表示）", active_layer.name);
+            return format!("選択なし（{} は非表示）", active_layer.name);
         }
 
         if active_layer.locked {
-            return format!("選択: なし（{} はロック中）", active_layer.name);
+            return format!("選択なし（{} はロック中）", active_layer.name);
         }
 
         if self.selection.is_empty() {
-            return format!("選択: なし（{}）", active_layer.name);
+            return format!("選択なし（{}）", active_layer.name);
         }
 
         if let Some(session) = &self.selection_session {
@@ -767,39 +775,23 @@ impl CanvasController {
                 && let Some(element) = document.element(index)
             {
                 return format!(
-                    "選択: {} #{}（{}）",
+                    "{} #{} を{}",
                     element.kind_label(),
                     index + 1,
                     session.mode_label()
                 );
             }
 
-            return format!(
-                "選択: {}個（{}）",
-                self.selection.len(),
-                session.mode_label()
-            );
+            return format!("{}個を{}", self.selection.len(), session.mode_label());
         }
 
         if let Some(index) = self.selection.single()
             && let Some(element) = document.element(index)
         {
-            let capability = match element {
-                PaintElement::Stroke(_) => "移動 / 拡大縮小 / 回転",
-                PaintElement::Shape(_) => "移動 / サイズ変更 / 回転",
-                PaintElement::Group(_) => "移動 / サイズ変更 / 回転 / グループ解除",
-            };
-            return format!(
-                "選択: {} #{}（{capability}）",
-                element.kind_label(),
-                index + 1
-            );
+            return format!("{} #{} を選択中", element.kind_label(), index + 1);
         }
 
-        format!(
-            "選択: {}個（移動 / サイズ変更 / 回転 / グループ化 / 整列 / 等間隔 / 重なり順）",
-            self.selection.len()
-        )
+        format!("{}個を選択中", self.selection.len())
     }
 
     pub fn zoom_label(&self) -> String {
@@ -1976,19 +1968,27 @@ impl CanvasController {
                     Some(ControlTarget::SingleRotate) | Some(ControlTarget::GroupRotate) => {
                         egui::CursorIcon::Crosshair
                     }
-                    None => match self.hit_guide(
-                        document,
-                        canvas_rect,
-                        self.view.zoom,
-                        pointer,
-                        touch_active,
-                    ) {
-                        Some((_, guide)) => match guide.axis {
-                            GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
-                            GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
-                        },
-                        None => egui::CursorIcon::PointingHand,
-                    },
+                    None => {
+                        let pointer_world =
+                            screen_to_canvas_from_canvas_rect(canvas_rect, self.view.zoom, pointer);
+                        if self.hit_selection_move_bounds(document, pointer_world, touch_active) {
+                            egui::CursorIcon::Grab
+                        } else {
+                            match self.hit_guide(
+                                document,
+                                canvas_rect,
+                                self.view.zoom,
+                                pointer,
+                                touch_active,
+                            ) {
+                                Some((_, guide)) => match guide.axis {
+                                    GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
+                                    GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
+                                },
+                                None => egui::CursorIcon::PointingHand,
+                            }
+                        }
+                    }
                 }
             } else {
                 egui::CursorIcon::PointingHand
@@ -2505,11 +2505,41 @@ fn paint_single_selection_overlay(
     match element {
         PaintElement::Stroke(stroke) => {
             if let Some(bounds) = stroke.bounds() {
+                paint_selection_move_zone(
+                    painter,
+                    rect,
+                    zoom,
+                    bounds,
+                    SelectionZoneStyle {
+                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 22),
+                        accent,
+                        expand: 6.0,
+                        stroke_width: 2.0,
+                    },
+                );
                 paint_axis_aligned_bounds(painter, rect, zoom, bounds, accent, 6.0, 2.0);
+                paint_selection_badge(
+                    painter,
+                    selection_bounds_screen_rect(rect, zoom, bounds, 6.0),
+                    "ドラッグで移動",
+                    accent,
+                );
             }
         }
         PaintElement::Shape(shape) => match shape.kind {
             ShapeKind::Line => {
+                paint_selection_move_zone(
+                    painter,
+                    rect,
+                    zoom,
+                    shape.bounds(),
+                    SelectionZoneStyle {
+                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 20),
+                        accent,
+                        expand: 6.0,
+                        stroke_width: 2.0,
+                    },
+                );
                 paint_axis_aligned_bounds(painter, rect, zoom, shape.bounds(), accent, 6.0, 2.0);
                 painter.line_segment(
                     [
@@ -2517,6 +2547,12 @@ fn paint_single_selection_overlay(
                         canvas_to_screen(rect, zoom, shape.end),
                     ],
                     EguiStroke::new(1.5, accent),
+                );
+                paint_selection_badge(
+                    painter,
+                    selection_bounds_screen_rect(rect, zoom, shape.bounds(), 6.0),
+                    single_selection_badge_text(active_control),
+                    accent,
                 );
                 if show_handles {
                     for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
@@ -2540,7 +2576,7 @@ fn paint_single_selection_overlay(
                             rotation_handle,
                             accent,
                         );
-                        paint_handle(
+                        paint_rotation_handle(
                             painter,
                             rotation_handle,
                             HANDLE_RADIUS,
@@ -2554,6 +2590,18 @@ fn paint_single_selection_overlay(
                 }
             }
             ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                paint_selection_move_zone(
+                    painter,
+                    rect,
+                    zoom,
+                    shape.bounds(),
+                    SelectionZoneStyle {
+                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 18),
+                        accent,
+                        expand: 8.0,
+                        stroke_width: 1.5,
+                    },
+                );
                 let outline: Vec<Pos2> = shape
                     .selection_outline()
                     .into_iter()
@@ -2563,6 +2611,12 @@ fn paint_single_selection_overlay(
                     outline.clone(),
                     EguiStroke::new(2.0, accent),
                 ));
+                paint_selection_badge(
+                    painter,
+                    selection_bounds_screen_rect(rect, zoom, shape.bounds(), 8.0),
+                    single_selection_badge_text(active_control),
+                    accent,
+                );
 
                 if show_handles {
                     for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
@@ -2583,7 +2637,7 @@ fn paint_single_selection_overlay(
                     if let Some(rotation_handle) = shape_rotation_handle_screen(shape, rect, zoom) {
                         let top_mid = outline[0].lerp(outline[1], 0.5);
                         paint_rotation_link(painter, top_mid, rotation_handle, accent);
-                        paint_handle(
+                        paint_rotation_handle(
                             painter,
                             rotation_handle,
                             HANDLE_RADIUS,
@@ -2621,7 +2675,25 @@ fn paint_multi_selection_overlay(
     }
 
     if let Some(group_bounds) = selection_bounds_from_elements(selected_elements) {
+        paint_selection_move_zone(
+            painter,
+            rect,
+            zoom,
+            group_bounds,
+            SelectionZoneStyle {
+                fill: Color32::from_rgba_unmultiplied(26, 115, 232, 20),
+                accent: group_accent,
+                expand: 10.0,
+                stroke_width: 2.5,
+            },
+        );
         paint_axis_aligned_bounds(painter, rect, zoom, group_bounds, group_accent, 10.0, 2.5);
+        paint_selection_badge(
+            painter,
+            selection_bounds_screen_rect(rect, zoom, group_bounds, 10.0),
+            &multi_selection_badge_text(selected_elements.len(), active_control),
+            group_accent,
+        );
 
         if show_handles {
             for (handle, position) in bounds_control_handles_screen(group_bounds, rect, zoom) {
@@ -2640,7 +2712,7 @@ fn paint_multi_selection_overlay(
             if let Some(rotation_handle) = bounds_rotation_handle_screen(group_bounds, rect, zoom) {
                 let top_mid = group_bounds_screen_top_mid(group_bounds, rect, zoom);
                 paint_rotation_link(painter, top_mid, rotation_handle, group_accent);
-                paint_handle(
+                paint_rotation_handle(
                     painter,
                     rotation_handle,
                     HANDLE_RADIUS,
@@ -2716,15 +2788,36 @@ fn paint_axis_aligned_bounds(
     expand: f32,
     stroke_width: f32,
 ) {
-    let screen_rect = Rect::from_two_pos(
-        canvas_to_screen(rect, zoom, bounds.min),
-        canvas_to_screen(rect, zoom, bounds.max),
-    )
-    .expand(expand);
+    let screen_rect = selection_bounds_screen_rect(rect, zoom, bounds, expand);
     painter.rect_stroke(
         screen_rect,
         6.0,
         EguiStroke::new(stroke_width, accent),
+        egui::StrokeKind::Outside,
+    );
+}
+
+fn selection_bounds_screen_rect(rect: Rect, zoom: f32, bounds: ElementBounds, expand: f32) -> Rect {
+    Rect::from_two_pos(
+        canvas_to_screen(rect, zoom, bounds.min),
+        canvas_to_screen(rect, zoom, bounds.max),
+    )
+    .expand(expand)
+}
+
+fn paint_selection_move_zone(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    bounds: ElementBounds,
+    style: SelectionZoneStyle,
+) {
+    let screen_rect = selection_bounds_screen_rect(rect, zoom, bounds, style.expand);
+    painter.rect_filled(screen_rect, 8.0, style.fill);
+    painter.rect_stroke(
+        screen_rect,
+        8.0,
+        EguiStroke::new(style.stroke_width, style.accent.linear_multiply(0.8)),
         egui::StrokeKind::Outside,
     );
 }
@@ -2746,8 +2839,56 @@ fn paint_handle(
     );
 }
 
+fn paint_rotation_handle(
+    painter: &Painter,
+    center: Pos2,
+    radius: f32,
+    fill: Color32,
+    stroke_color: Color32,
+) {
+    painter.circle_filled(center, radius, fill);
+    painter.circle_stroke(center, radius, EguiStroke::new(1.3, stroke_color));
+    painter.circle_filled(center, radius * 0.28, stroke_color);
+}
+
 fn paint_rotation_link(painter: &Painter, from: Pos2, to: Pos2, accent: Color32) {
-    painter.line_segment([from, to], EguiStroke::new(1.0, accent));
+    painter.line_segment([from, to], EguiStroke::new(1.4, accent));
+}
+
+fn paint_selection_badge(painter: &Painter, screen_rect: Rect, text: &str, accent: Color32) {
+    let font_id = FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font_id.clone(), Color32::from_gray(52));
+    let label_pos = Pos2::new(screen_rect.left() + 10.0, screen_rect.top() + 8.0);
+    let background_rect =
+        Rect::from_min_size(label_pos, galley.size()).expand2(Vec2::new(7.0, 4.0));
+    painter.rect_filled(
+        background_rect,
+        8.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 230),
+    );
+    painter.rect_stroke(
+        background_rect,
+        8.0,
+        EguiStroke::new(1.0, accent.linear_multiply(0.45)),
+        egui::StrokeKind::Outside,
+    );
+    painter.galley(label_pos, galley, Color32::from_gray(52));
+}
+
+fn single_selection_badge_text(active_control: Option<ControlTarget>) -> &'static str {
+    match active_control {
+        Some(ControlTarget::SingleResize(_)) => "サイズ変更",
+        Some(ControlTarget::SingleRotate) => "回転",
+        _ => "ドラッグで移動",
+    }
+}
+
+fn multi_selection_badge_text(count: usize, active_control: Option<ControlTarget>) -> String {
+    match active_control {
+        Some(ControlTarget::GroupResize(_)) => format!("{count}個を拡大縮小"),
+        Some(ControlTarget::GroupRotate) => format!("{count}個を回転"),
+        _ => format!("{count}個をまとめて移動"),
+    }
 }
 
 fn selection_bounds_from_elements(
@@ -2961,6 +3102,13 @@ fn screen_to_canvas_unclamped(
 
 fn canvas_to_screen(rect: Rect, zoom: f32, point: PaintPoint) -> Pos2 {
     Pos2::new(rect.min.x + point.x * zoom, rect.min.y + point.y * zoom)
+}
+
+fn screen_to_canvas_from_canvas_rect(rect: Rect, zoom: f32, position: Pos2) -> PaintPoint {
+    PaintPoint::new(
+        (position.x - rect.min.x) / zoom,
+        (position.y - rect.min.y) / zoom,
+    )
 }
 
 fn visible_canvas_range(
@@ -3310,12 +3458,12 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasController, CanvasViewState, SelectionSession, SelectionState, TouchContactKind,
-        bounds_from_points, canvas_rect, canvas_to_screen, effective_screen_hit_tolerance,
-        group_resize_transform, hit_tolerance_world, marquee_rect_is_visible,
-        normalize_selection_indices, ruler_step_world, screen_to_canvas,
-        shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
-        snap_point_for_document, touch_contact_kind_from_events,
+        CanvasController, CanvasViewState, ControlTarget, SelectionSession, SelectionState,
+        TouchContactKind, bounds_from_points, bounds_rotation_handle_screen, canvas_rect,
+        canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
+        hit_tolerance_world, marquee_rect_is_visible, normalize_selection_indices,
+        ruler_step_world, screen_to_canvas, shape_rotation_handle_screen, smart_guide_axis_match,
+        snap_axis_value_for_document, snap_point_for_document, touch_contact_kind_from_events,
     };
     use crate::model::{
         CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintPoint, PaintVector,
@@ -3514,6 +3662,110 @@ mod tests {
             controller.selection_session,
             Some(SelectionSession::Marquee { .. })
         ));
+    }
+
+    #[test]
+    fn touch_hit_can_reach_resize_handle_more_easily() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(80.0, 80.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller.selection.set_only(document.active_layer_id(), 0);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_screen = Pos2::new(42.0, 20.0);
+
+        assert_eq!(
+            controller.hit_selection_control(
+                &document,
+                canvas_rect,
+                controller.view.zoom,
+                pointer_screen,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            controller.hit_selection_control(
+                &document,
+                canvas_rect,
+                controller.view.zoom,
+                pointer_screen,
+                true,
+            ),
+            Some(ControlTarget::SingleResize(ShapeHandle::TopLeft))
+        );
+    }
+
+    #[test]
+    fn touch_hit_can_reach_group_rotation_handle_more_easily() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(35.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(65.0, 20.0),
+            PaintPoint::new(80.0, 40.0),
+        ));
+
+        let mut controller = CanvasController::default();
+        controller
+            .selection
+            .set_indices(document.active_layer_id(), vec![0, 1]);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let bounds = controller
+            .selection_control_bounds(&document)
+            .expect("group bounds");
+        let handle = bounds_rotation_handle_screen(bounds, canvas_rect, controller.view.zoom)
+            .expect("rotation handle");
+        let pointer_screen = Pos2::new(handle.x + 20.0, handle.y);
+
+        assert_eq!(
+            controller.hit_selection_control(
+                &document,
+                canvas_rect,
+                controller.view.zoom,
+                pointer_screen,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            controller.hit_selection_control(
+                &document,
+                canvas_rect,
+                controller.view.zoom,
+                pointer_screen,
+                true,
+            ),
+            Some(ControlTarget::GroupRotate)
+        );
     }
 
     #[test]

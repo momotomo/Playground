@@ -552,6 +552,7 @@ impl PaintApp {
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
             }
+            ui.small(self.canvas.selection_summary(self.document()));
             ui.horizontal_wrapped(|ui| {
                 ui.small("線色");
                 let stroke_response = color_swatch_button(
@@ -864,7 +865,6 @@ impl PaintApp {
             on_off_label(self.multi_select_mode),
             on_off_label(self.finger_draw_enabled),
         ));
-        ui.small(self.canvas.selection_summary(self.document()));
 
         ui.separator();
         self.show_file_summary(ui);
