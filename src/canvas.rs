@@ -2356,31 +2356,62 @@ fn paint_element(
 }
 
 fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, background: RgbaColor) {
-    let color = match stroke.tool {
+    match stroke.tool {
         ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
-            color32_from_rgba(stroke.tool.styled_color(stroke.color))
+            for pass in stroke.render_passes() {
+                paint_stroke_pass(
+                    painter,
+                    rect,
+                    zoom,
+                    &stroke.points,
+                    pass.width,
+                    pass.color,
+                    pass.offset,
+                );
+            }
         }
-        ToolKind::Eraser => color32_from_rgba(background),
-    };
+        ToolKind::Eraser => {
+            paint_stroke_pass(
+                painter,
+                rect,
+                zoom,
+                &stroke.points,
+                stroke.effective_width(),
+                background,
+                PaintVector::default(),
+            );
+        }
+    }
+}
 
-    match stroke.points.as_slice() {
+fn paint_stroke_pass(
+    painter: &Painter,
+    rect: Rect,
+    zoom: f32,
+    points: &[PaintPoint],
+    width: f32,
+    color: RgbaColor,
+    offset: PaintVector,
+) {
+    let color = color32_from_rgba(color);
+    match points {
         [] => {}
         [point] => {
             painter.circle_filled(
-                canvas_to_screen(rect, zoom, *point),
-                stroke.effective_width() * zoom * 0.5,
+                canvas_to_screen(rect, zoom, point.offset(offset)),
+                width * zoom * 0.5,
                 color,
             );
         }
-        points => {
+        _ => {
             let line_points = points
                 .iter()
                 .copied()
-                .map(|point| canvas_to_screen(rect, zoom, point))
+                .map(|point| canvas_to_screen(rect, zoom, point.offset(offset)))
                 .collect();
             painter.add(egui::Shape::line(
                 line_points,
-                EguiStroke::new(stroke.effective_width() * zoom, color),
+                EguiStroke::new(width * zoom, color),
             ));
         }
     }

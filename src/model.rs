@@ -481,6 +481,13 @@ pub struct Stroke {
     pub points: Vec<PaintPoint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrokeRenderPass {
+    pub color: RgbaColor,
+    pub width: f32,
+    pub offset: PaintVector,
+}
+
 impl Stroke {
     pub fn new(tool: ToolKind, color: RgbaColor, width: f32) -> Self {
         Self {
@@ -497,6 +504,51 @@ impl Stroke {
 
     pub fn effective_width(&self) -> f32 {
         (self.width * self.tool.width_scale()).max(1.0)
+    }
+
+    pub fn render_passes(&self) -> Vec<StrokeRenderPass> {
+        let base_color = self.tool.styled_color(self.color);
+        let base_width = self.effective_width();
+
+        match self.tool {
+            ToolKind::Brush | ToolKind::Eraser => vec![StrokeRenderPass {
+                color: base_color,
+                width: base_width,
+                offset: PaintVector::default(),
+            }],
+            ToolKind::Pencil => {
+                let offset = stroke_texture_offset(&self.points, base_width * 0.12);
+                vec![
+                    StrokeRenderPass {
+                        color: base_color,
+                        width: base_width.max(1.0),
+                        offset: PaintVector::default(),
+                    },
+                    StrokeRenderPass {
+                        color: base_color.with_alpha_scaled(0.42),
+                        width: (base_width * 0.52).max(0.9),
+                        offset,
+                    },
+                    StrokeRenderPass {
+                        color: base_color.with_alpha_scaled(0.28),
+                        width: (base_width * 0.34).max(0.8),
+                        offset: PaintVector::new(-offset.dx, -offset.dy),
+                    },
+                ]
+            }
+            ToolKind::Marker => vec![
+                StrokeRenderPass {
+                    color: base_color.with_alpha_scaled(0.78),
+                    width: (base_width * 1.18).max(1.0),
+                    offset: PaintVector::default(),
+                },
+                StrokeRenderPass {
+                    color: base_color,
+                    width: (base_width * 0.82).max(0.9),
+                    offset: PaintVector::default(),
+                },
+            ],
+        }
     }
 
     pub fn translated(&self, delta: PaintVector) -> Self {
@@ -863,6 +915,24 @@ impl ShapeElement {
         let (sign_x, sign_y) = opposite.corner_signs()?;
         Some(PaintVector::new(half.dx * sign_x, half.dy * sign_y))
     }
+}
+
+fn stroke_texture_offset(points: &[PaintPoint], distance: f32) -> PaintVector {
+    if distance.abs() <= f32::EPSILON {
+        return PaintVector::default();
+    }
+
+    let direction = match points {
+        [first, .., last] => PaintVector::new(last.x - first.x, last.y - first.y),
+        _ => PaintVector::new(1.0, -0.6),
+    };
+    let length = (direction.dx * direction.dx + direction.dy * direction.dy).sqrt();
+    if length <= f32::EPSILON {
+        return PaintVector::new(distance, -distance * 0.6);
+    }
+
+    let normal = PaintVector::new(-direction.dy / length, direction.dx / length);
+    PaintVector::new(normal.dx * distance, normal.dy * distance)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1246,6 +1316,30 @@ impl PaintDocument {
         next.active_layer_id = new_id;
         next.next_layer_id = new_id + 1;
         (next, new_id)
+    }
+
+    pub fn duplicate_active_layer_document(&self) -> Option<(Self, LayerId)> {
+        let mut next = self.clone();
+        let active_index = next.active_layer_index()?;
+        let source_layer = next.layers.get(active_index)?.clone();
+        let new_id = next.next_layer_id.max(
+            next.layers
+                .iter()
+                .map(|layer| layer.id)
+                .max()
+                .unwrap_or(DEFAULT_LAYER_ID)
+                + 1,
+        );
+
+        let mut duplicated = source_layer;
+        duplicated.id = new_id;
+        duplicated.name = format!("{} のコピー", duplicated.name);
+        duplicated.visible = true;
+        duplicated.locked = false;
+        next.layers.insert(active_index + 1, duplicated);
+        next.active_layer_id = new_id;
+        next.next_layer_id = new_id + 1;
+        Some((next, new_id))
     }
 
     pub fn delete_active_layer_document(&self) -> Option<(Self, LayerId)> {
@@ -2325,6 +2419,9 @@ mod tests {
         assert!(marker.effective_width() > pen.effective_width());
         assert!(ToolKind::Pencil.styled_color(color).a < color.a);
         assert!(ToolKind::Marker.styled_color(color).a < ToolKind::Pencil.styled_color(color).a);
+        assert_eq!(pen.render_passes().len(), 1);
+        assert_eq!(pencil.render_passes().len(), 3);
+        assert_eq!(marker.render_passes().len(), 2);
     }
 
     #[test]
@@ -2796,6 +2893,35 @@ mod tests {
             .0;
         assert!(history.replace_document(deleted.clone()));
         assert_eq!(history.current().layer_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_active_layer_tracks_undo_redo() {
+        let mut document = PaintDocument::default();
+        document.push_shape(sample_shape());
+        let mut history = DocumentHistory::new(document);
+
+        let (duplicated, duplicate_id) = history
+            .current()
+            .duplicate_active_layer_document()
+            .expect("duplicate layer should succeed");
+        assert!(history.replace_document(duplicated.clone()));
+        assert_eq!(history.current().layer_count(), 2);
+        assert_eq!(history.current().active_layer_id(), duplicate_id);
+        assert_eq!(
+            history
+                .current()
+                .layer(duplicate_id)
+                .unwrap()
+                .elements
+                .len(),
+            1
+        );
+
+        assert!(history.undo());
+        assert_eq!(history.current().layer_count(), 1);
+        assert!(history.redo());
+        assert_eq!(history.current().layer_count(), 2);
     }
 
     #[test]
