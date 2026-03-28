@@ -1638,6 +1638,25 @@ impl PaintApp {
                     egui::Label::new(self.status_message.rich_text()).truncate(),
                 );
             });
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                summary_chip(ui, format!("道具: {}", self.active_tool.label()), true);
+                if matches!(
+                    self.active_tool,
+                    CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+                ) {
+                    summary_chip(ui, brush_kind_summary(self.active_tool), false);
+                }
+                if let Some(layer) = self.document().active_layer() {
+                    summary_chip(ui, format!("作業: {}", layer.name), false);
+                }
+                if let Some(operation) = self.canvas.current_operation_label() {
+                    summary_chip(ui, operation, true);
+                } else if selection_count > 0 {
+                    summary_chip(ui, self.canvas.selection_summary(self.document()), false);
+                }
+            });
         });
     }
 
@@ -2653,10 +2672,13 @@ impl eframe::App for PaintApp {
         self.canvas.sync_with_document(self.history.current());
         self.handle_shortcuts(ctx);
 
+        let (tools_panel_width, layers_panel_width) =
+            panel_widths_for_window(ctx.available_rect().width());
+
         egui::SidePanel::left("tools_panel")
             .resizable(false)
-            .default_width(220.0)
-            .min_width(220.0)
+            .default_width(tools_panel_width)
+            .min_width(tools_panel_width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -2665,8 +2687,8 @@ impl eframe::App for PaintApp {
 
         egui::SidePanel::right("layers_panel")
             .resizable(false)
-            .default_width(240.0)
-            .min_width(240.0)
+            .default_width(layers_panel_width)
+            .min_width(layers_panel_width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -2847,6 +2869,33 @@ fn layer_row_summary(visible: bool, locked: bool, element_count: usize) -> Strin
     format!("{edit_state} · {content_state}")
 }
 
+fn summary_chip(ui: &mut egui::Ui, text: impl Into<String>, accent: bool) {
+    let text = text.into();
+    let text = if accent {
+        RichText::new(format!(" {text} "))
+            .small()
+            .strong()
+            .background_color(ui.visuals().selection.bg_fill.linear_multiply(0.18))
+            .color(ui.visuals().selection.stroke.color)
+    } else {
+        RichText::new(format!(" {text} "))
+            .small()
+            .background_color(ui.visuals().faint_bg_color.linear_multiply(0.6))
+            .color(ui.visuals().strong_text_color())
+    };
+    ui.label(text);
+}
+
+fn panel_widths_for_window(window_width: f32) -> (f32, f32) {
+    if window_width < 980.0 {
+        (198.0, 212.0)
+    } else if window_width < 1220.0 {
+        (208.0, 224.0)
+    } else {
+        (220.0, 240.0)
+    }
+}
+
 fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => "選ぶ・動かす・変形するツールです。",
@@ -2893,7 +2942,9 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT};
+    use super::{
+        CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, panel_widths_for_window,
+    };
     use crate::model::RgbaColor;
 
     #[test]
@@ -3030,5 +3081,12 @@ mod tests {
                 .text
                 .contains("選択は新しいレイヤーに合わせて解除")
         );
+    }
+
+    #[test]
+    fn panel_widths_shrink_on_narrow_screens() {
+        assert_eq!(panel_widths_for_window(900.0), (198.0, 212.0));
+        assert_eq!(panel_widths_for_window(1100.0), (208.0, 224.0));
+        assert_eq!(panel_widths_for_window(1400.0), (220.0, 240.0));
     }
 }
