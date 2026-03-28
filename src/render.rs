@@ -72,6 +72,24 @@ pub fn render_document_png(document: &PaintDocument) -> Result<Vec<u8>, RenderEr
     render_document_png_with_background(document, RasterBackground::Opaque)
 }
 
+pub fn sample_document_color(document: &PaintDocument, point: PaintPoint) -> Option<RgbaColor> {
+    let (width, height) = raster_dimensions(document).ok()?;
+    if point.x < 0.0 || point.y < 0.0 || point.x >= width as f32 || point.y >= height as f32 {
+        return None;
+    }
+
+    let pixmap = render_document_pixmap_with_background(document, RasterBackground::Opaque).ok()?;
+    let x = point.x.floor().clamp(0.0, width.saturating_sub(1) as f32) as u32;
+    let y = point.y.floor().clamp(0.0, height.saturating_sub(1) as f32) as u32;
+    let pixel = pixmap.pixel(x, y)?.demultiply();
+    Some(RgbaColor::from_rgba(
+        pixel.red(),
+        pixel.green(),
+        pixel.blue(),
+        pixel.alpha(),
+    ))
+}
+
 fn raster_dimensions(document: &PaintDocument) -> Result<(u32, u32), RenderError> {
     let width = document.canvas_size.width;
     let height = document.canvas_size.height;
@@ -170,11 +188,11 @@ fn render_stroke(
 }
 
 fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
-    let mut paint = Paint {
+    let mut stroke_paint = Paint {
         anti_alias: true,
         ..Paint::default()
     };
-    paint.set_color_rgba8(shape.color.r, shape.color.g, shape.color.b, shape.color.a);
+    stroke_paint.set_color_rgba8(shape.color.r, shape.color.g, shape.color.b, shape.color.a);
 
     let Some(path) = (match shape.kind {
         ShapeKind::Line => line_path(shape.start, shape.end),
@@ -184,9 +202,26 @@ fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
         return;
     };
 
+    if shape.kind.supports_fill()
+        && let Some(fill_color) = shape.fill_color
+    {
+        let mut fill_paint = Paint {
+            anti_alias: true,
+            ..Paint::default()
+        };
+        fill_paint.set_color_rgba8(fill_color.r, fill_color.g, fill_color.b, fill_color.a);
+        pixmap.fill_path(
+            &path,
+            &fill_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
     pixmap.stroke_path(
         &path,
-        &paint,
+        &stroke_paint,
         &stroke_style(shape.width),
         Transform::identity(),
         None,
@@ -254,7 +289,7 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{
         RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
-        render_document_png,
+        render_document_png, sample_document_color,
     };
     use crate::model::{
         CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
@@ -273,14 +308,17 @@ mod tests {
         stroke.push_point(PaintPoint::new(8.0, 8.0));
         stroke.push_point(PaintPoint::new(28.0, 8.0));
         document.push_stroke(stroke);
-        document.push_shape(ShapeElement::with_rotation(
-            ShapeKind::Rectangle,
-            RgbaColor::new(220, 64, 64, 255),
-            4.0,
-            PaintPoint::new(24.0, 24.0),
-            PaintPoint::new(44.0, 40.0),
-            std::f32::consts::FRAC_PI_4,
-        ));
+        document.push_shape(
+            ShapeElement::with_rotation(
+                ShapeKind::Rectangle,
+                RgbaColor::new(220, 64, 64, 255),
+                4.0,
+                PaintPoint::new(24.0, 24.0),
+                PaintPoint::new(44.0, 40.0),
+                std::f32::consts::FRAC_PI_4,
+            )
+            .with_fill_color(Some(RgbaColor::new(255, 196, 64, 180))),
+        );
         document
     }
 
@@ -462,5 +500,51 @@ mod tests {
             !has_non_background,
             "grid and guides should stay out of PNG output"
         );
+    }
+
+    #[test]
+    fn filled_shape_renders_its_fill_color_inside_bounds() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 64.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        document.push_shape(
+            ShapeElement::new(
+                ShapeKind::Rectangle,
+                RgbaColor::new(220, 64, 64, 255),
+                3.0,
+                PaintPoint::new(16.0, 16.0),
+                PaintPoint::new(48.0, 48.0),
+            )
+            .with_fill_color(Some(RgbaColor::new(32, 160, 220, 255))),
+        );
+
+        let pixmap = render_document_pixmap(&document).expect("document should render");
+        let pixel = pixmap.pixel(32, 32).expect("filled pixel").demultiply();
+        assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (32, 160, 220));
+    }
+
+    #[test]
+    fn sampled_document_color_reads_composited_fill() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 64.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        document.push_shape(
+            ShapeElement::new(
+                ShapeKind::Rectangle,
+                RgbaColor::new(220, 64, 64, 255),
+                2.0,
+                PaintPoint::new(8.0, 8.0),
+                PaintPoint::new(56.0, 56.0),
+            )
+            .with_fill_color(Some(RgbaColor::new(90, 180, 120, 255))),
+        );
+
+        let sampled =
+            sample_document_color(&document, PaintPoint::new(24.0, 24.0)).expect("sampled color");
+        assert_eq!(sampled, RgbaColor::new(90, 180, 120, 255));
     }
 }

@@ -555,14 +555,17 @@ mod tests {
         stroke.push_point(PaintPoint::new(4.0, 4.0));
         stroke.push_point(PaintPoint::new(28.0, 12.0));
         document.push_stroke(stroke);
-        document.push_shape(ShapeElement::with_rotation(
-            ShapeKind::Rectangle,
-            RgbaColor::new(220, 64, 64, 255),
-            3.0,
-            PaintPoint::new(36.0, 6.0),
-            PaintPoint::new(58.0, 26.0),
-            0.45,
-        ));
+        document.push_shape(
+            ShapeElement::with_rotation(
+                ShapeKind::Rectangle,
+                RgbaColor::new(220, 64, 64, 255),
+                3.0,
+                PaintPoint::new(36.0, 6.0),
+                PaintPoint::new(58.0, 26.0),
+                0.45,
+            )
+            .with_fill_color(Some(RgbaColor::new(255, 196, 64, 180))),
+        );
         document
     }
 
@@ -630,6 +633,21 @@ mod tests {
         };
 
         assert!((shape.rotation_radians - 0.45).abs() < 0.0001);
+    }
+
+    #[test]
+    fn shape_fill_color_and_alpha_survive_round_trip() {
+        let storage = StorageFacade::new();
+        let encoded = storage
+            .encode_document(&sample_document())
+            .expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        let Some(crate::model::PaintElement::Shape(shape)) = decoded.element(1) else {
+            panic!("second element should be a shape");
+        };
+
+        assert_eq!(shape.fill_color, Some(RgbaColor::new(255, 196, 64, 180)));
     }
 
     #[test]
