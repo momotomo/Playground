@@ -14,7 +14,9 @@ use crate::model::{
     AlignmentKind, DistributionKind, DocumentHistory, GuideAxis, LayerId, PaintDocument,
     PaintElement, RgbaColor, StackOrderCommand,
 };
-use crate::storage::{ExportedImage, LoadedDocument, SavedDocument, StorageError, StorageFacade};
+use crate::storage::{
+    ExportedImage, LoadedDocument, PngExportKind, SavedDocument, StorageError, StorageFacade,
+};
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
@@ -136,7 +138,10 @@ struct PendingWebStorageTask {
 enum WebStorageResult {
     Saved(SavedDocument),
     Loaded(LoadedDocument),
-    Exported(ExportedImage),
+    Exported {
+        image: ExportedImage,
+        kind: PngExportKind,
+    },
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -158,6 +163,30 @@ struct TutorialStepContent {
     action: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct ToolWidthSettings {
+    draw_width: f32,
+    eraser_width: f32,
+}
+
+impl Default for ToolWidthSettings {
+    fn default() -> Self {
+        Self {
+            draw_width: 6.0,
+            eraser_width: 12.0,
+        }
+    }
+}
+
+impl ToolWidthSettings {
+    fn for_tool(self, tool: CanvasToolKind) -> f32 {
+        match tool {
+            CanvasToolKind::Eraser => self.eraser_width,
+            _ => self.draw_width,
+        }
+    }
+}
+
 pub struct PaintApp {
     history: DocumentHistory,
     canvas: CanvasController,
@@ -166,7 +195,7 @@ pub struct PaintApp {
     multi_select_mode: bool,
     finger_draw_enabled: bool,
     brush_color: RgbaColor,
-    brush_width: f32,
+    tool_widths: ToolWidthSettings,
     status_message: StatusMessage,
     document_name: String,
     saved_snapshot: PaintDocument,
@@ -192,7 +221,7 @@ impl Default for PaintApp {
             multi_select_mode: false,
             finger_draw_enabled: false,
             brush_color: RgbaColor::charcoal(),
-            brush_width: 6.0,
+            tool_widths: ToolWidthSettings::default(),
             status_message: StatusMessage::info(
                 "描く準備ができました。ブラシや図形ツールを選んで、必要ならヘルプを開いてください。",
             ),
@@ -264,10 +293,14 @@ impl PaintApp {
         ToolSettings {
             tool: self.active_tool,
             color: self.brush_color,
-            width: self.brush_width,
+            width: self.active_tool_width(),
             multi_select_mode: self.multi_select_mode,
             finger_draw_enabled: self.finger_draw_enabled,
         }
+    }
+
+    fn active_tool_width(&self) -> f32 {
+        self.tool_widths.for_tool(self.active_tool)
     }
 
     fn set_multi_select_mode(&mut self, enabled: bool) {
@@ -371,6 +404,8 @@ impl PaintApp {
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 8.0;
+
         ui.horizontal(|ui| {
             ui.heading("ツール");
             let response = help_icon_button(
@@ -381,7 +416,7 @@ impl PaintApp {
                 self.set_info("ツールを切り替えて、現在のレイヤーを描いたり編集したりできます。");
             }
         });
-        ui.label("よく使う操作だけを置いています。迷ったらヘルプを開けます。");
+        ui.small("よく使う操作を並べています。下へスクロールすると詳細設定も開けます。");
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -451,6 +486,28 @@ impl PaintApp {
         }
 
         ui.add_space(12.0);
+        ui.label(RichText::new("描画ツール設定").strong());
+        match self.active_tool {
+            CanvasToolKind::Brush
+            | CanvasToolKind::Rectangle
+            | CanvasToolKind::Ellipse
+            | CanvasToolKind::Line => {
+                ui.small(format!(
+                    "今のツールは描く太さ {:.1}px を使います。",
+                    self.tool_widths.draw_width
+                ));
+            }
+            CanvasToolKind::Eraser => {
+                ui.small(format!(
+                    "今のツールは消しゴム太さ {:.1}px を使います。",
+                    self.tool_widths.eraser_width
+                ));
+            }
+            CanvasToolKind::Select | CanvasToolKind::Pan => {
+                ui.small("描く太さはブラシと図形、消しゴム太さは消しゴムに使います。");
+            }
+        }
+
         ui.label("色");
         let mut color = color32_from_rgba(self.brush_color);
         if ui.color_edit_button_srgba(&mut color).changed() {
@@ -458,18 +515,41 @@ impl PaintApp {
             self.set_info("描画色を変更しました。");
         }
 
-        ui.add_space(12.0);
-        ui.label("線幅");
+        ui.add_space(8.0);
+        ui.label("描く太さ");
         if ui
             .add(egui::Slider::new(
-                &mut self.brush_width,
+                &mut self.tool_widths.draw_width,
                 MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
             ))
+            .on_hover_text("ブラシ、四角形、楕円、直線の太さを変えます。")
             .changed()
         {
-            self.set_info(format!("線幅を {:.1}px に変更しました。", self.brush_width));
+            self.set_info(format!(
+                "描く太さを {:.1}px に変更しました。ブラシと図形に使います。",
+                self.tool_widths.draw_width
+            ));
         }
-        ui.label(format!("{:.1}px", self.brush_width));
+        ui.small(format!(
+            "{:.1}px · ブラシ / 四角形 / 楕円 / 直線",
+            self.tool_widths.draw_width
+        ));
+
+        ui.label("消しゴム太さ");
+        if ui
+            .add(egui::Slider::new(
+                &mut self.tool_widths.eraser_width,
+                MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
+            ))
+            .on_hover_text("消しゴムで消す太さを変えます。")
+            .changed()
+        {
+            self.set_info(format!(
+                "消しゴム太さを {:.1}px に変更しました。",
+                self.tool_widths.eraser_width
+            ));
+        }
+        ui.small(format!("{:.1}px · 消しゴム", self.tool_widths.eraser_width));
 
         ui.separator();
         ui.label(RichText::new("現在のモード").strong());
@@ -499,7 +579,7 @@ impl PaintApp {
         if let Some(active_layer) = self.document().active_layer() {
             ui.label(format!("現在のレイヤー: {}", active_layer.name));
         }
-        ui.small("詳しい操作はボタンのツールチップかヘルプで確認できます。");
+        ui.small("詳しい操作はツールチップかヘルプで確認できます。");
 
         ui.separator();
         self.show_canvas_aids(ui);
@@ -518,6 +598,7 @@ impl PaintApp {
             }
         });
         ui.small("JSONは再編集用、PNGは共有用です。");
+        ui.small("PNG書き出しは背景あり、透過PNGは透明背景で保存します。");
         ui.small(self.storage.storage_strategy_summary());
     }
 
@@ -1035,7 +1116,15 @@ impl PaintApp {
                     .on_hover_text("共有しやすい PNG 画像を書き出します。")
                     .clicked()
                 {
-                    self.export_png(ctx);
+                    self.export_png(ctx, PngExportKind::Opaque);
+                }
+
+                if ui
+                    .add_enabled(can_file_io, egui::Button::new("透過PNG"))
+                    .on_hover_text("背景を透明にした PNG 素材を書き出します。")
+                    .clicked()
+                {
+                    self.export_png(ctx, PngExportKind::Transparent);
                 }
 
                 ui.separator();
@@ -1169,10 +1258,11 @@ impl PaintApp {
                 ui.small("描く: ブラシか図形ツールを選んでドラッグします。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
-                ui.small("保存: JSON保存は再編集用、PNG書き出しは共有用です。");
+                ui.small("保存: JSON保存は再編集用、PNG書き出しは共有用、透過PNGは素材用です。");
                 ui.small("レイヤー: 右側で現在のレイヤー、表示、ロックを切り替えます。");
+                ui.small("左パネル: 下までスクロールすると配置補助や保存メモが見られます。");
                 #[cfg(target_arch = "wasm32")]
-                ui.small("Web版: JSON保存 と PNG書き出し はダウンロード、JSONを開く はファイル選択です。");
+                ui.small("Web版: JSON保存 と PNG書き出し / 透過PNG はダウンロード、JSONを開く はファイル選択です。");
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("ショートカット").strong());
@@ -1788,11 +1878,15 @@ impl PaintApp {
         self.set_info(format!("{} を開きました。", self.document_name));
     }
 
-    fn finish_export(&mut self, exported: ExportedImage) {
-        self.set_info(format!(
-            "PNG を {} として書き出しました。",
-            exported.file_name
-        ));
+    fn finish_export(&mut self, exported: ExportedImage, kind: PngExportKind) {
+        self.set_info(match kind {
+            PngExportKind::Opaque => {
+                format!("PNG を {} として書き出しました。", exported.file_name)
+            }
+            PngExportKind::Transparent => {
+                format!("透過PNG を {} として書き出しました。", exported.file_name)
+            }
+        });
     }
 
     fn storage_action_title(action: &'static str) -> &'static str {
@@ -1800,6 +1894,7 @@ impl PaintApp {
             "save" => "JSON保存",
             "load" => "JSONを開く",
             "export" => "PNG書き出し",
+            "export-transparent" => "透過PNG",
             _ => "ファイル操作",
         }
     }
@@ -1812,6 +1907,7 @@ impl PaintApp {
             }
             "load" => "ブラウザのファイル選択を開きました。.paint.json を選んでください。",
             "export" => "ブラウザで PNG ダウンロードを準備しています...",
+            "export-transparent" => "ブラウザで透過PNGダウンロードを準備しています...",
             _ => "ブラウザのファイル操作を待っています...",
         }
     }
@@ -1930,16 +2026,22 @@ impl PaintApp {
         }
     }
 
-    fn export_png(&mut self, _ctx: &egui::Context) {
-        let suggested_name = self.storage.suggested_png_file_name(&self.document_name);
+    fn export_png(&mut self, _ctx: &egui::Context, kind: PngExportKind) {
+        let suggested_name = self
+            .storage
+            .suggested_png_file_name_for_kind(&self.document_name, kind);
+        let pending_label = match kind {
+            PngExportKind::Opaque => "export",
+            PngExportKind::Transparent => "export-transparent",
+        };
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             let result = self
                 .storage
-                .export_png_via_dialog(self.document(), &suggested_name)
-                .map(|exported| self.finish_export(exported));
-            self.report_storage_result("export", result);
+                .export_png_via_dialog_with_kind(self.document(), &suggested_name, kind)
+                .map(|exported| self.finish_export(exported, kind));
+            self.report_storage_result(pending_label, result);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1952,18 +2054,18 @@ impl PaintApp {
 
             wasm_bindgen_futures::spawn_local(async move {
                 let result = storage
-                    .export_png_via_dialog(&document, &suggested_name)
+                    .export_png_via_dialog_with_kind(&document, &suggested_name, kind)
                     .await
-                    .map(WebStorageResult::Exported);
+                    .map(|image| WebStorageResult::Exported { image, kind });
                 *task_slot.borrow_mut() = Some(result);
                 ctx.request_repaint();
             });
 
             self.pending_web_task = Some(PendingWebStorageTask {
-                label: "export",
+                label: pending_label,
                 slot,
             });
-            self.set_info(Self::storage_pending_message("export"));
+            self.set_info(Self::storage_pending_message(pending_label));
         }
     }
 
@@ -2000,7 +2102,7 @@ impl PaintApp {
             && !has_canvas_interaction
             && !self.has_pending_storage_task()
         {
-            self.export_png(ctx);
+            self.export_png(ctx, PngExportKind::Opaque);
         }
 
         if ctx.input_mut(|input| input.consume_shortcut(&shortcut_group()))
@@ -2087,7 +2189,7 @@ impl PaintApp {
             match result {
                 Ok(WebStorageResult::Saved(saved)) => self.finish_save(saved),
                 Ok(WebStorageResult::Loaded(loaded)) => self.finish_load(loaded),
-                Ok(WebStorageResult::Exported(exported)) => self.finish_export(exported),
+                Ok(WebStorageResult::Exported { image, kind }) => self.finish_export(image, kind),
                 Err(error) => match &error {
                     StorageError::Cancelled => {
                         self.set_info(Self::storage_error_message(task.label, &error));
@@ -2115,13 +2217,21 @@ impl eframe::App for PaintApp {
             .resizable(false)
             .default_width(220.0)
             .min_width(220.0)
-            .show(ctx, |ui| self.show_tools(ui));
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.show_tools(ui));
+            });
 
         egui::SidePanel::right("layers_panel")
             .resizable(false)
             .default_width(240.0)
             .min_width(240.0)
-            .show(ctx, |ui| self.show_layers(ui));
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.show_layers(ui));
+            });
 
         egui::TopBottomPanel::top("actions_panel")
             .resizable(false)
@@ -2261,5 +2371,25 @@ mod tests {
 
         assert!(!app.multi_select_mode);
         assert_eq!(app.active_tool, CanvasToolKind::Select);
+    }
+
+    #[test]
+    fn eraser_uses_its_own_width_setting() {
+        let mut app = PaintApp::default();
+        app.tool_widths.draw_width = 5.0;
+        app.tool_widths.eraser_width = 19.0;
+        app.set_active_tool(CanvasToolKind::Eraser, false);
+
+        assert_eq!(app.tool_settings().width, 19.0);
+    }
+
+    #[test]
+    fn shape_tools_reuse_draw_width_setting() {
+        let mut app = PaintApp::default();
+        app.tool_widths.draw_width = 9.0;
+        app.tool_widths.eraser_width = 23.0;
+        app.set_active_tool(CanvasToolKind::Rectangle, false);
+
+        assert_eq!(app.tool_settings().width, 9.0);
     }
 }

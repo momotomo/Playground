@@ -8,6 +8,14 @@ use crate::model::{
     ShapeKind, Stroke, ToolKind,
 };
 
+// Raster export options stay separate from document traversal so future SVG export can
+// reuse the same element walk without coupling everything to PNG-specific choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RasterBackground {
+    Opaque,
+    Transparent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
     InvalidCanvasSize,
@@ -27,25 +35,41 @@ impl Display for RenderError {
 
 impl Error for RenderError {}
 
-pub fn render_document_pixmap(document: &PaintDocument) -> Result<Pixmap, RenderError> {
+pub fn render_document_pixmap_with_background(
+    document: &PaintDocument,
+    background: RasterBackground,
+) -> Result<Pixmap, RenderError> {
     let (width, height) = raster_dimensions(document)?;
     let mut pixmap = Pixmap::new(width, height).ok_or(RenderError::InvalidCanvasSize)?;
-    pixmap.fill(color_from_rgba(document.background));
+    if matches!(background, RasterBackground::Opaque) {
+        pixmap.fill(color_from_rgba(document.background));
+    }
 
     for layer in document.visible_layers() {
         for element in &layer.elements {
-            render_element(&mut pixmap, element, document.background);
+            render_element(&mut pixmap, element, document.background, background);
         }
     }
 
     Ok(pixmap)
 }
 
-pub fn render_document_png(document: &PaintDocument) -> Result<Vec<u8>, RenderError> {
-    let pixmap = render_document_pixmap(document)?;
+pub fn render_document_pixmap(document: &PaintDocument) -> Result<Pixmap, RenderError> {
+    render_document_pixmap_with_background(document, RasterBackground::Opaque)
+}
+
+pub fn render_document_png_with_background(
+    document: &PaintDocument,
+    background: RasterBackground,
+) -> Result<Vec<u8>, RenderError> {
+    let pixmap = render_document_pixmap_with_background(document, background)?;
     pixmap
         .encode_png()
         .map_err(|error| RenderError::PngEncode(error.to_string()))
+}
+
+pub fn render_document_png(document: &PaintDocument) -> Result<Vec<u8>, RenderError> {
+    render_document_png_with_background(document, RasterBackground::Opaque)
 }
 
 fn raster_dimensions(document: &PaintDocument) -> Result<(u32, u32), RenderError> {
@@ -59,29 +83,58 @@ fn raster_dimensions(document: &PaintDocument) -> Result<(u32, u32), RenderError
     Ok((width.round() as u32, height.round() as u32))
 }
 
-fn render_element(pixmap: &mut Pixmap, element: &PaintElement, background: RgbaColor) {
+fn render_element(
+    pixmap: &mut Pixmap,
+    element: &PaintElement,
+    background: RgbaColor,
+    raster_background: RasterBackground,
+) {
     match element {
-        PaintElement::Stroke(stroke) => render_stroke(pixmap, stroke, background),
+        PaintElement::Stroke(stroke) => {
+            render_stroke(pixmap, stroke, background, raster_background)
+        }
         PaintElement::Shape(shape) => render_shape(pixmap, shape),
-        PaintElement::Group(group) => render_group(pixmap, group, background),
+        PaintElement::Group(group) => render_group(pixmap, group, background, raster_background),
     }
 }
 
-fn render_group(pixmap: &mut Pixmap, group: &GroupElement, background: RgbaColor) {
+fn render_group(
+    pixmap: &mut Pixmap,
+    group: &GroupElement,
+    background: RgbaColor,
+    raster_background: RasterBackground,
+) {
     for element in &group.elements {
-        render_element(pixmap, element, background);
+        render_element(pixmap, element, background, raster_background);
     }
 }
 
-fn render_stroke(pixmap: &mut Pixmap, stroke: &Stroke, background: RgbaColor) {
-    let color = match stroke.tool {
-        ToolKind::Brush => stroke.color,
-        ToolKind::Eraser => background,
+fn render_stroke(
+    pixmap: &mut Pixmap,
+    stroke: &Stroke,
+    background: RgbaColor,
+    raster_background: RasterBackground,
+) {
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
     };
-
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-    paint.anti_alias = true;
+    match stroke.tool {
+        ToolKind::Brush => paint.set_color_rgba8(
+            stroke.color.r,
+            stroke.color.g,
+            stroke.color.b,
+            stroke.color.a,
+        ),
+        ToolKind::Eraser => match raster_background {
+            RasterBackground::Opaque => {
+                paint.set_color_rgba8(background.r, background.g, background.b, background.a);
+            }
+            RasterBackground::Transparent => {
+                paint.blend_mode = tiny_skia::BlendMode::Clear;
+            }
+        },
+    }
 
     match stroke.points.as_slice() {
         [] => {}
@@ -117,9 +170,11 @@ fn render_stroke(pixmap: &mut Pixmap, stroke: &Stroke, background: RgbaColor) {
 }
 
 fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color_rgba8(shape.color.r, shape.color.g, shape.color.b, shape.color.a);
-    paint.anti_alias = true;
 
     let Some(path) = (match shape.kind {
         ShapeKind::Line => line_path(shape.start, shape.end),
@@ -197,7 +252,10 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_document_pixmap, render_document_png};
+    use super::{
+        RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
+        render_document_png,
+    };
     use crate::model::{
         CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
         ShapeElement, ShapeKind, Stroke, ToolKind,
@@ -261,6 +319,18 @@ mod tests {
 
         assert_eq!(decoded.width(), 64);
         assert_eq!(decoded.height(), 64);
+    }
+
+    #[test]
+    fn transparent_render_keeps_background_alpha_zero() {
+        let pixmap = render_document_pixmap_with_background(
+            &sample_document(),
+            RasterBackground::Transparent,
+        )
+        .expect("transparent render should succeed");
+        let background = pixmap.pixel(0, 0).expect("background pixel");
+
+        assert_eq!(background.alpha(), 0);
     }
 
     #[test]
