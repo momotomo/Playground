@@ -651,6 +651,31 @@ mod tests {
     }
 
     #[test]
+    fn freehand_brush_kinds_survive_round_trip() {
+        let storage = StorageFacade::new();
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 48.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+
+        let mut pencil = Stroke::new(ToolKind::Pencil, RgbaColor::new(90, 90, 90, 180), 5.0);
+        pencil.push_point(PaintPoint::new(6.0, 10.0));
+        pencil.push_point(PaintPoint::new(30.0, 18.0));
+        document.push_stroke(pencil);
+
+        let mut marker = Stroke::new(ToolKind::Marker, RgbaColor::new(32, 140, 220, 220), 10.0);
+        marker.push_point(PaintPoint::new(8.0, 30.0));
+        marker.push_point(PaintPoint::new(40.0, 34.0));
+        document.push_stroke(marker);
+
+        let encoded = storage.encode_document(&document).expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, document);
+    }
+
+    #[test]
     fn group_round_trip_preserves_nested_elements() {
         let storage = StorageFacade::new();
         let encoded = storage
