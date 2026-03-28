@@ -626,6 +626,7 @@ impl CanvasController {
             self.selection_session,
             Some(SelectionSession::Marquee { .. } | SelectionSession::GuideMove { .. })
         );
+        let interaction_banner = self.interaction_overlay_text();
 
         paint_workspace(&painter, viewport);
         paint_background(&painter, canvas_rect, document.background);
@@ -665,6 +666,7 @@ impl CanvasController {
                 &selected_visual,
                 active_control,
                 show_handles,
+                touch_active,
             );
         }
 
@@ -681,6 +683,9 @@ impl CanvasController {
         }
 
         paint_rulers(&painter, viewport, canvas_rect, self.view.zoom, document);
+        if let Some((title, detail)) = interaction_banner {
+            paint_interaction_banner(&painter, viewport, title, detail);
+        }
 
         if matches!(
             self.interaction_mode,
@@ -792,6 +797,18 @@ impl CanvasController {
         }
 
         format!("{}個を選択中", self.selection.len())
+    }
+
+    pub fn current_operation_label(&self) -> Option<&'static str> {
+        if let Some(session) = &self.selection_session {
+            return Some(session.mode_label());
+        }
+
+        match self.active_preview {
+            Some(ActivePreview::Stroke(_)) => Some("描画中"),
+            Some(ActivePreview::Shape(_)) => Some("図形作成中"),
+            None => self.pending_long_press.as_ref().map(|_| "長押しで選択"),
+        }
     }
 
     pub fn zoom_label(&self) -> String {
@@ -1997,6 +2014,40 @@ impl CanvasController {
             egui::CursorIcon::Crosshair
         }
     }
+
+    fn interaction_overlay_text(&self) -> Option<(&'static str, &'static str)> {
+        if let Some(session) = &self.selection_session {
+            return Some(match session {
+                SelectionSession::Move { .. } => ("移動中", "指やマウスを離すと確定します。"),
+                SelectionSession::SingleResize { .. } | SelectionSession::MultiResize { .. } => (
+                    "サイズ変更中",
+                    "角のハンドルをドラッグして大きさを整えます。",
+                ),
+                SelectionSession::SingleRotate { .. } | SelectionSession::MultiRotate { .. } => {
+                    ("回転中", "丸いハンドルを回すようにドラッグします。")
+                }
+                SelectionSession::GuideMove { .. } => {
+                    ("ガイド移動中", "指やマウスを離すとガイド位置を確定します。")
+                }
+                SelectionSession::Marquee { .. } => {
+                    ("範囲選択中", "ドラッグで選択範囲を広げます。")
+                }
+            });
+        }
+
+        match self.active_preview {
+            Some(ActivePreview::Stroke(_)) => {
+                Some(("描画中", "指やマウスを離すと線が確定します。"))
+            }
+            Some(ActivePreview::Shape(_)) => {
+                Some(("図形作成中", "ドラッグで大きさを決め、離すと確定します。"))
+            }
+            None => self
+                .pending_long_press
+                .as_ref()
+                .map(|_| ("長押し待ち", "このまま押すと選択に切り替わります。")),
+        }
+    }
 }
 
 pub fn color32_from_rgba(color: RgbaColor) -> Color32 {
@@ -2468,6 +2519,7 @@ fn paint_selection_overlay(
     selected_elements: &[(usize, PaintElement)],
     active_control: Option<ControlTarget>,
     show_handles: bool,
+    touch_active: bool,
 ) {
     if selected_elements.len() == 1 && matches!(&selected_elements[0].1, PaintElement::Shape(_)) {
         paint_single_selection_overlay(
@@ -2477,6 +2529,7 @@ fn paint_selection_overlay(
             selected_elements[0].1.clone(),
             active_control,
             show_handles,
+            touch_active,
         );
     } else {
         paint_multi_selection_overlay(
@@ -2486,6 +2539,7 @@ fn paint_selection_overlay(
             selected_elements,
             active_control,
             show_handles,
+            touch_active,
         );
     }
 }
@@ -2497,10 +2551,12 @@ fn paint_single_selection_overlay(
     element: PaintElement,
     active_control: Option<ControlTarget>,
     show_handles: bool,
+    touch_active: bool,
 ) {
     let accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
+    let handle_radius = effective_screen_hit_tolerance(touch_active, HANDLE_RADIUS, 10.5);
 
     match element {
         PaintElement::Stroke(stroke) => {
@@ -2559,7 +2615,7 @@ fn paint_single_selection_overlay(
                         paint_handle(
                             painter,
                             position,
-                            HANDLE_RADIUS,
+                            handle_radius,
                             match active_control {
                                 Some(ControlTarget::SingleResize(active)) if active == handle => {
                                     active_fill
@@ -2579,7 +2635,7 @@ fn paint_single_selection_overlay(
                         paint_rotation_handle(
                             painter,
                             rotation_handle,
-                            HANDLE_RADIUS,
+                            handle_radius,
                             match active_control {
                                 Some(ControlTarget::SingleRotate) => active_fill,
                                 _ => inactive_fill,
@@ -2623,7 +2679,7 @@ fn paint_single_selection_overlay(
                         paint_handle(
                             painter,
                             position,
-                            HANDLE_RADIUS,
+                            handle_radius,
                             match active_control {
                                 Some(ControlTarget::SingleResize(active)) if active == handle => {
                                     active_fill
@@ -2640,7 +2696,7 @@ fn paint_single_selection_overlay(
                         paint_rotation_handle(
                             painter,
                             rotation_handle,
-                            HANDLE_RADIUS,
+                            handle_radius,
                             match active_control {
                                 Some(ControlTarget::SingleRotate) => active_fill,
                                 _ => inactive_fill,
@@ -2662,11 +2718,13 @@ fn paint_multi_selection_overlay(
     selected_elements: &[(usize, PaintElement)],
     active_control: Option<ControlTarget>,
     show_handles: bool,
+    touch_active: bool,
 ) {
     let item_accent = Color32::from_rgba_unmultiplied(26, 115, 232, 140);
     let group_accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
+    let handle_radius = effective_screen_hit_tolerance(touch_active, HANDLE_RADIUS, 10.5);
 
     for (_, element) in selected_elements {
         if let Some(bounds) = element.bounds() {
@@ -2700,7 +2758,7 @@ fn paint_multi_selection_overlay(
                 paint_handle(
                     painter,
                     position,
-                    HANDLE_RADIUS,
+                    handle_radius,
                     match active_control {
                         Some(ControlTarget::GroupResize(active)) if active == handle => active_fill,
                         _ => inactive_fill,
@@ -2715,7 +2773,7 @@ fn paint_multi_selection_overlay(
                 paint_rotation_handle(
                     painter,
                     rotation_handle,
-                    HANDLE_RADIUS,
+                    handle_radius,
                     match active_control {
                         Some(ControlTarget::GroupRotate) => active_fill,
                         _ => inactive_fill,
@@ -2853,6 +2911,42 @@ fn paint_rotation_handle(
 
 fn paint_rotation_link(painter: &Painter, from: Pos2, to: Pos2, accent: Color32) {
     painter.line_segment([from, to], EguiStroke::new(1.4, accent));
+}
+
+fn paint_interaction_banner(painter: &Painter, viewport: Rect, title: &str, detail: &str) {
+    let title_font = FontId::proportional(15.0);
+    let detail_font = FontId::proportional(12.5);
+    let title_galley = painter.layout_no_wrap(title.to_owned(), title_font, Color32::from_gray(40));
+    let detail_galley =
+        painter.layout_no_wrap(detail.to_owned(), detail_font, Color32::from_gray(70));
+    let width = title_galley.size().x.max(detail_galley.size().x) + 24.0;
+    let height = title_galley.size().y + detail_galley.size().y + 20.0;
+    let panel = Rect::from_min_size(
+        Pos2::new(viewport.right() - width - 14.0, viewport.top() + 14.0),
+        Vec2::new(width, height),
+    );
+
+    painter.rect_filled(
+        panel,
+        12.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 232),
+    );
+    painter.rect_stroke(
+        panel,
+        12.0,
+        EguiStroke::new(1.0, Color32::from_rgba_unmultiplied(26, 115, 232, 96)),
+        egui::StrokeKind::Outside,
+    );
+    painter.galley(
+        Pos2::new(panel.left() + 12.0, panel.top() + 7.0),
+        title_galley,
+        Color32::from_gray(40),
+    );
+    painter.galley(
+        Pos2::new(panel.left() + 12.0, panel.top() + 11.0 + 18.0),
+        detail_galley,
+        Color32::from_gray(70),
+    );
 }
 
 fn paint_selection_badge(painter: &Painter, screen_rect: Rect, text: &str, accent: Color32) {
@@ -3458,16 +3552,16 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasController, CanvasViewState, ControlTarget, SelectionSession, SelectionState,
-        TouchContactKind, bounds_from_points, bounds_rotation_handle_screen, canvas_rect,
-        canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
+        ActivePreview, CanvasController, CanvasViewState, ControlTarget, SelectionSession,
+        SelectionState, TouchContactKind, bounds_from_points, bounds_rotation_handle_screen,
+        canvas_rect, canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
         hit_tolerance_world, marquee_rect_is_visible, normalize_selection_indices,
         ruler_step_world, screen_to_canvas, shape_rotation_handle_screen, smart_guide_axis_match,
         snap_axis_value_for_document, snap_point_for_document, touch_contact_kind_from_events,
     };
     use crate::model::{
         CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintPoint, PaintVector,
-        RgbaColor, ShapeElement, ShapeHandle, ShapeKind,
+        RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
     };
     use eframe::egui::{Event, Pos2, Rect, TouchDeviceId, TouchId, TouchPhase, Vec2};
 
@@ -3662,6 +3756,28 @@ mod tests {
             controller.selection_session,
             Some(SelectionSession::Marquee { .. })
         ));
+    }
+
+    #[test]
+    fn current_operation_label_reflects_active_sessions() {
+        let mut controller = CanvasController::default();
+        assert_eq!(controller.current_operation_label(), None);
+
+        controller.selection_session = Some(SelectionSession::Marquee {
+            start_world: PaintPoint::new(0.0, 0.0),
+            current_world: PaintPoint::new(1.0, 1.0),
+            additive: false,
+            base_selection: Vec::new(),
+        });
+        assert_eq!(controller.current_operation_label(), Some("選択中"));
+
+        controller.selection_session = None;
+        controller.active_preview = Some(ActivePreview::Stroke(Stroke::new(
+            ToolKind::Brush,
+            RgbaColor::charcoal(),
+            4.0,
+        )));
+        assert_eq!(controller.current_operation_label(), Some("描画中"));
     }
 
     #[test]
