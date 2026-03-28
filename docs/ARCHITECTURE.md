@@ -54,12 +54,14 @@
 - `src/render.rs`
   - `PaintDocument` から PNG 用ピクセルデータを生成
   - 表示倍率に依存しない作品基準のラスタライズ
+  - 通常 PNG と透過 PNG の背景モード切り替え
+  - 将来の SVG export を足しやすい export 分岐の土台
 - `src/storage.rs`
   - JSON encode / decode
   - 保存形式 version 管理
   - 旧 format v1 の読込互換
   - native / web の保存導線差分吸収
-  - PNG export のバイト列生成と保存
+  - PNG / 透過PNG export のバイト列生成と保存
 
 ## 図形データモデルの拡張
 

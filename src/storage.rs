@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use crate::model::{PaintDocument, PaintElement, Stroke};
-use crate::render::render_document_png;
+use crate::render::{RasterBackground, render_document_png_with_background};
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
@@ -16,6 +16,7 @@ const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
 const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
 const JSON_EXTENSION: &str = "json";
 const PNG_EXTENSION: &str = "png";
+const TRANSPARENT_PNG_SUFFIX: &str = "-transparent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageFeature {
@@ -28,6 +29,35 @@ impl StorageFeature {
         match self {
             Self::WorkingDocument => "再編集用のローカル保存形式",
             Self::PngExport => "PNG書き出し",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PngExportKind {
+    Opaque,
+    Transparent,
+}
+
+impl PngExportKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Opaque => "PNG書き出し",
+            Self::Transparent => "透過PNG",
+        }
+    }
+
+    const fn dialog_title(self) -> &'static str {
+        match self {
+            Self::Opaque => "PNGを書き出し",
+            Self::Transparent => "透過PNGを書き出し",
+        }
+    }
+
+    const fn raster_background(self) -> RasterBackground {
+        match self {
+            Self::Opaque => RasterBackground::Opaque,
+            Self::Transparent => RasterBackground::Transparent,
         }
     }
 }
@@ -128,7 +158,16 @@ impl StorageFacade {
     }
 
     pub fn export_png_bytes(&self, document: &PaintDocument) -> Result<Vec<u8>, StorageError> {
-        render_document_png(document).map_err(|error| StorageError::Render(error.to_string()))
+        self.export_png_bytes_with_kind(document, PngExportKind::Opaque)
+    }
+
+    pub fn export_png_bytes_with_kind(
+        &self,
+        document: &PaintDocument,
+        kind: PngExportKind,
+    ) -> Result<Vec<u8>, StorageError> {
+        render_document_png_with_background(document, kind.raster_background())
+            .map_err(|error| StorageError::Render(error.to_string()))
     }
 
     pub const fn suggested_file_name(&self) -> &'static str {
@@ -137,6 +176,17 @@ impl StorageFacade {
 
     pub fn suggested_png_file_name(&self, document_name: &str) -> String {
         to_png_file_name(document_name)
+    }
+
+    pub fn suggested_png_file_name_for_kind(
+        &self,
+        document_name: &str,
+        kind: PngExportKind,
+    ) -> String {
+        match kind {
+            PngExportKind::Opaque => self.suggested_png_file_name(document_name),
+            PngExportKind::Transparent => to_transparent_png_file_name(document_name),
+        }
     }
 
     pub const fn editable_format_label(&self) -> &'static str {
@@ -172,7 +222,17 @@ impl StorageFacade {
         document: &PaintDocument,
         path: P,
     ) -> Result<ExportedImage, StorageError> {
-        let bytes = self.export_png_bytes(document)?;
+        self.export_png_to_path_with_kind(document, path, PngExportKind::Opaque)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_png_to_path_with_kind<P: AsRef<Path>>(
+        &self,
+        document: &PaintDocument,
+        path: P,
+        kind: PngExportKind,
+    ) -> Result<ExportedImage, StorageError> {
+        let bytes = self.export_png_bytes_with_kind(document, kind)?;
         let path = ensure_png_file_name(path.as_ref().to_path_buf());
         std::fs::write(&path, bytes).map_err(|error| StorageError::Io(error.to_string()))?;
 
@@ -218,14 +278,24 @@ impl StorageFacade {
         document: &PaintDocument,
         suggested_name: &str,
     ) -> Result<ExportedImage, StorageError> {
+        self.export_png_via_dialog_with_kind(document, suggested_name, PngExportKind::Opaque)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_png_via_dialog_with_kind(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+        kind: PngExportKind,
+    ) -> Result<ExportedImage, StorageError> {
         let path = rfd::FileDialog::new()
-            .set_title("PNGを書き出し")
+            .set_title(kind.dialog_title())
             .set_file_name(suggested_name)
             .add_filter("PNG画像", &[PNG_EXTENSION])
             .save_file()
             .ok_or(StorageError::Cancelled)?;
 
-        self.export_png_to_path(document, path)
+        self.export_png_to_path_with_kind(document, path, kind)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -269,9 +339,20 @@ impl StorageFacade {
         document: &PaintDocument,
         suggested_name: &str,
     ) -> Result<ExportedImage, StorageError> {
-        let bytes = self.export_png_bytes(document)?;
+        self.export_png_via_dialog_with_kind(document, suggested_name, PngExportKind::Opaque)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn export_png_via_dialog_with_kind(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+        kind: PngExportKind,
+    ) -> Result<ExportedImage, StorageError> {
+        let bytes = self.export_png_bytes_with_kind(document, kind)?;
         let file = rfd::AsyncFileDialog::new()
-            .set_title("PNGを書き出し")
+            .set_title(kind.dialog_title())
             .set_file_name(suggested_name)
             .add_filter("PNG画像", &[PNG_EXTENSION])
             .save_file()
@@ -427,6 +508,15 @@ fn to_png_file_name(document_name: &str) -> String {
     }
 }
 
+fn to_transparent_png_file_name(document_name: &str) -> String {
+    let base = to_png_file_name(document_name);
+    if let Some(stripped) = base.strip_suffix(".png") {
+        format!("{stripped}{TRANSPARENT_PNG_SUFFIX}.png")
+    } else {
+        format!("{base}{TRANSPARENT_PNG_SUFFIX}.png")
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn file_name_from_path(path: &Path) -> String {
     path.file_name()
@@ -445,7 +535,7 @@ fn normalize_file_name(file_name: String, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{StorageError, StorageFacade};
+    use super::{PngExportKind, StorageError, StorageFacade};
     use crate::model::{
         CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
         ShapeElement, ShapeKind, Stroke, ToolKind,
@@ -743,6 +833,18 @@ mod tests {
 
         assert_eq!(pixmap.width(), 64);
         assert_eq!(pixmap.height(), 32);
+    }
+
+    #[test]
+    fn transparent_png_export_keeps_background_alpha_zero() {
+        let storage = StorageFacade::new();
+        let bytes = storage
+            .export_png_bytes_with_kind(&sample_document(), PngExportKind::Transparent)
+            .expect("transparent png export should succeed");
+        let pixmap = Pixmap::decode_png(&bytes).expect("png bytes should decode");
+        let background = pixmap.pixel(0, 0).expect("background pixel");
+
+        assert_eq!(background.alpha(), 0);
     }
 
     #[test]
