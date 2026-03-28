@@ -21,6 +21,7 @@
 - `src/app.rs`
   - パネル構成
   - ツール状態
+  - 線色 / 塗り色 / 不透明度の保持
   - ボタン操作
   - ショートカット処理
   - ステータスメッセージ管理
@@ -55,6 +56,7 @@
   - `PaintDocument` から PNG 用ピクセルデータを生成
   - 表示倍率に依存しない作品基準のラスタライズ
   - 通常 PNG と透過 PNG の背景モード切り替え
+  - スポイト用のキャンバス色サンプリング
   - 将来の SVG export を足しやすい export 分岐の土台
 - `src/storage.rs`
   - JSON encode / decode
@@ -81,7 +83,8 @@
   - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う
 - `ShapeElement` は次の情報を保持する
   - `kind`
-  - `color`
+  - `color` (`線色`)
+  - `fill_color`
   - `width`
   - `start`
   - `end`
@@ -89,9 +92,11 @@
 - 矩形 / 楕円
   - `start` と `end` は未回転 bbox の対角点
   - `rotation_radians` を中心回りに適用する
+  - `fill_color` があれば線とは別に塗りを持てる
 - 直線
   - `start` と `end` を endpoint として扱う
   - 回転は endpoint を中心回りに回した結果で表現する
+  - `fill_color` は使わず、常に `None`
 - group
   - レイヤー内の top-level 要素として `layer.elements[]` に入る
   - 移動 / スケール / 回転は子要素へ再帰的に適用する
@@ -306,6 +311,7 @@
 - 旧 `version = 1` の stroke-only 形式は decode 側で `PaintElement::Stroke` へ変換して読む
 - 旧 `version = 2` と `version = 3` の flat な stroke / shape / group 形式は decode 側で単一 layer document へ migration する
 - 旧 shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
+- `fill_color` は serde default 付きで追加しているため、format version を上げずに後方互換を維持している
 - group は `PaintElement::Group` として再帰的に保存する
 - レイヤー順は `document.layers[]` の配列順として保存する
 - レイヤー内重なり順は `layer.elements[]` の配列順として保存する
@@ -318,11 +324,13 @@
 - PNG は「共有 / 閲覧用」
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
+- `スポイト` は UI 補助表示ではなく、作品ラスタライズ結果から色を拾う
 - visible な layer だけを順番に描画する
 - locked layer も visible なら描画する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
 - group、整列、等間隔配置、group transform、重なり順変更、layer order も作品データどおりに反映する
 - 選択枠、ハンドル、grid、guide は出力に含めない
+- 透過PNG では背景 alpha 0 を維持しつつ、線 / 塗りの alpha もそのまま保持する
 
 ## 将来の拡張方針
 

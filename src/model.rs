@@ -342,6 +342,10 @@ impl ShapeKind {
             Self::Line => "直線",
         }
     }
+
+    pub const fn supports_fill(self) -> bool {
+        matches!(self, Self::Rectangle | Self::Ellipse)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,6 +515,8 @@ impl Stroke {
 pub struct ShapeElement {
     pub kind: ShapeKind,
     pub color: RgbaColor,
+    #[serde(default)]
+    pub fill_color: Option<RgbaColor>,
     pub width: f32,
     pub start: PaintPoint,
     pub end: PaintPoint,
@@ -529,6 +535,7 @@ impl ShapeElement {
         Self {
             kind,
             color,
+            fill_color: None,
             width,
             start,
             end,
@@ -547,11 +554,21 @@ impl ShapeElement {
         Self {
             kind,
             color,
+            fill_color: None,
             width,
             start,
             end,
             rotation_radians,
         }
+    }
+
+    pub fn with_fill_color(mut self, fill_color: Option<RgbaColor>) -> Self {
+        self.fill_color = if self.kind.supports_fill() {
+            fill_color
+        } else {
+            None
+        };
+        self
     }
 
     pub fn center(&self) -> PaintPoint {
@@ -624,24 +641,19 @@ impl ShapeElement {
 
     pub fn translated(&self, delta: PaintVector) -> Self {
         Self {
-            kind: self.kind,
-            color: self.color,
-            width: self.width,
             start: self.start.offset(delta),
             end: self.end.offset(delta),
-            rotation_radians: self.rotation_radians,
+            ..*self
         }
     }
 
     pub fn scaled_from(&self, anchor: PaintPoint, scale_x: f32, scale_y: f32) -> Self {
         match self.kind {
             ShapeKind::Line => Self {
-                kind: self.kind,
-                color: self.color,
-                width: self.width,
                 start: self.start.scaled_from(anchor, scale_x, scale_y),
                 end: self.end.scaled_from(anchor, scale_x, scale_y),
                 rotation_radians: 0.0,
+                ..*self
             },
             ShapeKind::Rectangle | ShapeKind::Ellipse => {
                 let center = self.center().scaled_from(anchor, scale_x, scale_y);
@@ -650,12 +662,9 @@ impl ShapeElement {
                     PaintVector::new((half.dx * scale_x).abs(), (half.dy * scale_y).abs());
 
                 Self {
-                    kind: self.kind,
-                    color: self.color,
-                    width: self.width,
                     start: PaintPoint::new(center.x - scaled_half.dx, center.y - scaled_half.dy),
                     end: PaintPoint::new(center.x + scaled_half.dx, center.y + scaled_half.dy),
-                    rotation_radians: self.rotation_radians,
+                    ..*self
                 }
             }
         }
@@ -664,23 +673,19 @@ impl ShapeElement {
     pub fn rotated_around(&self, pivot: PaintPoint, delta_radians: f32) -> Self {
         match self.kind {
             ShapeKind::Line => Self {
-                kind: self.kind,
-                color: self.color,
-                width: self.width,
                 start: self.start.rotated_around(pivot, delta_radians),
                 end: self.end.rotated_around(pivot, delta_radians),
                 rotation_radians: 0.0,
+                ..*self
             },
             ShapeKind::Rectangle | ShapeKind::Ellipse => {
                 let center = self.center().rotated_around(pivot, delta_radians);
                 let half = self.half_extents();
                 Self {
-                    kind: self.kind,
-                    color: self.color,
-                    width: self.width,
                     start: PaintPoint::new(center.x - half.dx, center.y - half.dy),
                     end: PaintPoint::new(center.x + half.dx, center.y + half.dy),
                     rotation_radians: self.rotation_radians + delta_radians,
+                    ..*self
                 }
             }
         }
@@ -691,21 +696,15 @@ impl ShapeElement {
             ShapeKind::Line => {
                 let center = self.rotation_center();
                 Self {
-                    kind: self.kind,
-                    color: self.color,
-                    width: self.width,
                     start: self.start.rotated_around(center, delta_radians),
                     end: self.end.rotated_around(center, delta_radians),
                     rotation_radians: 0.0,
+                    ..*self
                 }
             }
             ShapeKind::Rectangle | ShapeKind::Ellipse => Self {
-                kind: self.kind,
-                color: self.color,
-                width: self.width,
-                start: self.start,
-                end: self.end,
                 rotation_radians: self.rotation_radians + delta_radians,
+                ..*self
             },
         }
     }
@@ -798,12 +797,9 @@ impl ShapeElement {
         let new_center = center.offset(rotate_vector(new_center_local, self.rotation_radians));
 
         Some(Self {
-            kind: self.kind,
-            color: self.color,
-            width: self.width,
             start: PaintPoint::new(new_center.x - new_half.dx, new_center.y - new_half.dy),
             end: PaintPoint::new(new_center.x + new_half.dx, new_center.y + new_half.dy),
-            rotation_radians: self.rotation_radians,
+            ..*self
         })
     }
 

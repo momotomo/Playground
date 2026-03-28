@@ -8,6 +8,7 @@ use crate::model::{
     PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
     ShapeKind, StackOrderCommand, Stroke, ToolKind,
 };
+use crate::render::sample_document_color;
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
@@ -62,6 +63,7 @@ pub enum CanvasToolKind {
     Select,
     Pan,
     Brush,
+    Eyedropper,
     Eraser,
     Rectangle,
     Ellipse,
@@ -74,6 +76,7 @@ impl CanvasToolKind {
             Self::Select => "選択",
             Self::Pan => "手のひら",
             Self::Brush => "ブラシ",
+            Self::Eyedropper => "スポイト",
             Self::Eraser => "消しゴム",
             Self::Rectangle => "四角形",
             Self::Ellipse => "楕円",
@@ -101,7 +104,8 @@ impl CanvasToolKind {
 #[derive(Debug, Clone, Copy)]
 pub struct ToolSettings {
     pub tool: CanvasToolKind,
-    pub color: RgbaColor,
+    pub stroke_color: RgbaColor,
+    pub fill_color: Option<RgbaColor>,
     pub width: f32,
     pub multi_select_mode: bool,
     pub finger_draw_enabled: bool,
@@ -112,6 +116,7 @@ pub struct CanvasOutput {
     pub committed_element: Option<PaintElement>,
     pub committed_edit: Option<CommittedDocumentEdit>,
     pub requested_tool: Option<CanvasToolKind>,
+    pub picked_color: Option<RgbaColor>,
     pub needs_repaint: bool,
 }
 
@@ -1146,6 +1151,10 @@ impl CanvasController {
                             self.interaction_mode = InteractionMode::Panning(PanMode::Tool);
                             output.needs_repaint = true;
                         }
+                        CanvasToolKind::Eyedropper => {
+                            output.picked_color = sample_document_color(document, world);
+                            output.needs_repaint = output.picked_color.is_some();
+                        }
                         CanvasToolKind::Brush | CanvasToolKind::Eraser => {
                             self.begin_stroke_preview(document, tool_settings, world);
                             output.needs_repaint = true;
@@ -1393,9 +1402,9 @@ impl CanvasController {
 
         self.clear_selection();
         let color = match tool_settings.tool {
-            CanvasToolKind::Brush => tool_settings.color,
+            CanvasToolKind::Brush => tool_settings.stroke_color,
             CanvasToolKind::Eraser => document.background,
-            _ => tool_settings.color,
+            _ => tool_settings.stroke_color,
         };
         let tool = match tool_settings.tool {
             CanvasToolKind::Eraser => ToolKind::Eraser,
@@ -1424,13 +1433,16 @@ impl CanvasController {
         };
         let start = snap_point_for_document(document, self.view.zoom, start);
 
-        self.active_preview = Some(ActivePreview::Shape(ShapeElement::new(
-            kind,
-            tool_settings.color,
-            tool_settings.width,
-            start,
-            start,
-        )));
+        self.active_preview = Some(ActivePreview::Shape(
+            ShapeElement::new(
+                kind,
+                tool_settings.stroke_color,
+                tool_settings.width,
+                start,
+                start,
+            )
+            .with_fill_color(tool_settings.fill_color),
+        ));
         self.interaction_mode = InteractionMode::Drawing;
     }
 
@@ -1930,6 +1942,8 @@ impl CanvasController {
         } else if tool == CanvasToolKind::Pan || ui.input(|input| input.key_down(egui::Key::Space))
         {
             egui::CursorIcon::Grab
+        } else if tool == CanvasToolKind::Eyedropper {
+            egui::CursorIcon::Crosshair
         } else if tool == CanvasToolKind::Select {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
                 match self.hit_selection_control(
@@ -2372,11 +2386,25 @@ fn paint_shape(painter: &Painter, rect: Rect, zoom: f32, shape: &ShapeElement) {
                 .into_iter()
                 .map(|point| canvas_to_screen(rect, zoom, point))
                 .collect();
+            if let Some(fill_color) = shape.fill_color {
+                painter.add(egui::Shape::convex_polygon(
+                    points.clone(),
+                    color32_from_rgba(fill_color),
+                    EguiStroke::NONE,
+                ));
+            }
             painter.add(egui::Shape::closed_line(points, stroke));
         }
         ShapeKind::Ellipse => {
             let ellipse_points = ellipse_outline_points(shape, rect, zoom);
             if ellipse_points.len() >= 2 {
+                if let Some(fill_color) = shape.fill_color {
+                    painter.add(egui::Shape::convex_polygon(
+                        ellipse_points.clone(),
+                        color32_from_rgba(fill_color),
+                        EguiStroke::NONE,
+                    ));
+                }
                 painter.add(egui::Shape::closed_line(ellipse_points, stroke));
             }
         }
