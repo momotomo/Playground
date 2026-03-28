@@ -133,52 +133,80 @@ fn render_stroke(
     background: RgbaColor,
     raster_background: RasterBackground,
 ) {
+    match stroke.tool {
+        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
+            for pass in stroke.render_passes() {
+                render_stroke_pass(pixmap, &stroke.points, pass.width, pass.color, pass.offset);
+            }
+        }
+        ToolKind::Eraser => {
+            let mut paint = Paint {
+                anti_alias: true,
+                ..Paint::default()
+            };
+            match raster_background {
+                RasterBackground::Opaque => {
+                    paint.set_color_rgba8(background.r, background.g, background.b, background.a);
+                }
+                RasterBackground::Transparent => {
+                    paint.blend_mode = tiny_skia::BlendMode::Clear;
+                }
+            }
+            render_stroke_path(
+                pixmap,
+                &stroke.points,
+                stroke.effective_width(),
+                PaintVector::default(),
+                &paint,
+            );
+        }
+    }
+}
+
+fn render_stroke_pass(
+    pixmap: &mut Pixmap,
+    points: &[PaintPoint],
+    width: f32,
+    color: RgbaColor,
+    offset: PaintVector,
+) {
     let mut paint = Paint {
         anti_alias: true,
         ..Paint::default()
     };
-    match stroke.tool {
-        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
-            let color = stroke.tool.styled_color(stroke.color);
-            paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-        }
-        ToolKind::Eraser => match raster_background {
-            RasterBackground::Opaque => {
-                paint.set_color_rgba8(background.r, background.g, background.b, background.a);
-            }
-            RasterBackground::Transparent => {
-                paint.blend_mode = tiny_skia::BlendMode::Clear;
-            }
-        },
-    }
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    render_stroke_path(pixmap, points, width, offset, &paint);
+}
 
-    match stroke.points.as_slice() {
+fn render_stroke_path(
+    pixmap: &mut Pixmap,
+    points: &[PaintPoint],
+    width: f32,
+    offset: PaintVector,
+    paint: &Paint,
+) {
+    match points {
         [] => {}
         [point] => {
-            if let Some(path) =
-                PathBuilder::from_circle(point.x, point.y, stroke.effective_width() * 0.5)
-            {
-                pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
+            let point = point.offset(offset);
+            if let Some(path) = PathBuilder::from_circle(point.x, point.y, width * 0.5) {
+                pixmap.fill_path(&path, paint, FillRule::Winding, Transform::identity(), None);
             }
         }
         [first, rest @ ..] => {
+            let first = first.offset(offset);
             let mut builder = PathBuilder::new();
             builder.move_to(first.x, first.y);
             for point in rest {
+                let point = point.offset(offset);
                 builder.line_to(point.x, point.y);
             }
 
             if let Some(path) = builder.finish() {
                 pixmap.stroke_path(
                     &path,
-                    &paint,
-                    &stroke_style(stroke.effective_width()),
+                    paint,
+                    &stroke_style(width),
                     Transform::identity(),
                     None,
                 );

@@ -22,8 +22,10 @@ const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 48.0;
 const GRID_SPACING_PRESETS: [f32; 6] = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
 const GRID_SPACING_STEP: f32 = 8.0;
-const TOOL_BUTTON_HEIGHT: f32 = 40.0;
-const COLOR_SWATCH_SIZE: f32 = 32.0;
+const TOOL_BUTTON_HEIGHT: f32 = 44.0;
+const COLOR_SWATCH_SIZE: f32 = 36.0;
+const LAYER_ACTION_BUTTON_HEIGHT: f32 = 34.0;
+const LAYER_CHIP_BUTTON_WIDTH: f32 = 56.0;
 const RECENT_COLOR_LIMIT: usize = 12;
 const APP_UI_STATE_KEY: &str = "paint_app_ui_state";
 
@@ -535,7 +537,46 @@ impl PaintApp {
                 self.set_info("ツールを切り替えて、現在のレイヤーを描いたり編集したりできます。");
             }
         });
-        ui.small("よく使う操作を並べています。下へスクロールすると詳細設定も開けます。");
+        ui.small("よく使う操作を上にまとめています。下へスクロールすると詳細設定も開けます。");
+        ui.add_space(8.0);
+
+        ui.group(|ui| {
+            ui.label(RichText::new("今の状態").strong());
+            ui.small(format!("道具: {}", self.active_tool.label()));
+            if matches!(
+                self.active_tool,
+                CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+            ) {
+                ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
+            }
+            if let Some(active_layer) = self.document().active_layer() {
+                ui.small(format!("レイヤー: {}", active_layer.name));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.small("線色");
+                let stroke_response = color_swatch_button(
+                    ui,
+                    self.tool_colors.stroke_color,
+                    self.tool_colors.quick_color_target == ColorTarget::Stroke,
+                    "線色を編集対象にします。",
+                );
+                if stroke_response.clicked() {
+                    self.tool_colors.quick_color_target = ColorTarget::Stroke;
+                }
+                if self.tool_colors.fill_enabled || self.tool_uses_fill() {
+                    ui.small("塗り色");
+                    let fill_response = color_swatch_button(
+                        ui,
+                        self.tool_colors.fill_color,
+                        self.tool_colors.quick_color_target == ColorTarget::Fill,
+                        "塗り色を編集対象にします。",
+                    );
+                    if fill_response.clicked() {
+                        self.tool_colors.quick_color_target = ColorTarget::Fill;
+                    }
+                }
+            });
+        });
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -1075,6 +1116,7 @@ impl PaintApp {
         #[derive(Clone, Copy)]
         enum LayerAction {
             Add,
+            DuplicateActive,
             DeleteActive,
             RenameActive,
             SetActive(LayerId),
@@ -1087,6 +1129,7 @@ impl PaintApp {
         }
 
         self.sync_layer_name_draft();
+        ui.spacing_mut().item_spacing.y = 8.0;
 
         let layer_count = self.document().layer_count();
         let active_layer_id = self.document().active_layer_id();
@@ -1108,10 +1151,15 @@ impl PaintApp {
                 )
             })
             .collect();
-        let active_layer_state = self
-            .document()
-            .active_layer()
-            .map(|layer| (layer.id, layer.name.clone(), layer.visible, layer.locked));
+        let active_layer_state = self.document().active_layer().map(|layer| {
+            (
+                layer.id,
+                layer.name.clone(),
+                layer.visible,
+                layer.locked,
+                layer.elements.len(),
+            )
+        });
         let mut pending_action = None;
 
         ui.horizontal(|ui| {
@@ -1127,9 +1175,27 @@ impl PaintApp {
         ui.small("現在のレイヤーだけ描いたり編集したりできます。");
         ui.add_space(8.0);
 
-        ui.horizontal(|ui| {
+        if let Some((_, active_name, visible, locked, element_count)) = &active_layer_state {
+            ui.group(|ui| {
+                ui.label(RichText::new("作業レイヤー").strong());
+                ui.label(RichText::new(active_name).strong().size(15.0));
+                ui.horizontal_wrapped(|ui| {
+                    ui.small(format!("{element_count}個"));
+                    layer_status_chip(ui, "作業中", true);
+                    layer_status_chip(ui, "表示", *visible);
+                    layer_status_chip(ui, "ロック", *locked);
+                });
+            });
+            ui.add_space(8.0);
+        }
+
+        let action_width = ((ui.available_width() - 16.0) / 3.0).max(64.0);
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button("レイヤー追加")
+                .add_sized(
+                    [action_width, LAYER_ACTION_BUTTON_HEIGHT],
+                    egui::Button::new("追加"),
+                )
                 .on_hover_text("新しいレイヤーを追加して、作業レイヤーに切り替えます。")
                 .clicked()
             {
@@ -1137,7 +1203,22 @@ impl PaintApp {
             }
 
             if ui
-                .add_enabled(layer_count > 1, egui::Button::new("レイヤー削除"))
+                .add_sized(
+                    [action_width, LAYER_ACTION_BUTTON_HEIGHT],
+                    egui::Button::new("複製"),
+                )
+                .on_hover_text("現在のレイヤーを複製して、コピー側を作業レイヤーにします。")
+                .clicked()
+            {
+                pending_action = Some(LayerAction::DuplicateActive);
+            }
+
+            if ui
+                .add_enabled(
+                    layer_count > 1,
+                    egui::Button::new("削除")
+                        .min_size(egui::vec2(action_width, LAYER_ACTION_BUTTON_HEIGHT)),
+                )
                 .on_hover_text("現在のレイヤーを削除します。最低 1 レイヤーは残ります。")
                 .clicked()
             {
@@ -1158,7 +1239,7 @@ impl PaintApp {
             let is_active = layer_id == active_layer_id;
             let can_receive_selection =
                 selection_count > 0 && !has_canvas_interaction && layer_id != active_layer_id;
-            let active_fill = ui.visuals().selection.bg_fill.linear_multiply(0.14);
+            let active_fill = ui.visuals().selection.bg_fill.linear_multiply(0.22);
             let frame = egui::Frame::group(ui.style())
                 .fill(if is_active {
                     active_fill
@@ -1169,9 +1250,11 @@ impl PaintApp {
                     ui.visuals().selection.stroke
                 } else {
                     ui.visuals().widgets.noninteractive.bg_stroke
-                });
+                })
+                .inner_margin(egui::Margin::same(10));
 
             frame.show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 ui.horizontal(|ui| {
                     let active_response = ui
                         .selectable_label(
@@ -1186,9 +1269,26 @@ impl PaintApp {
                     if active_response.clicked() {
                         pending_action = Some(LayerAction::SetActive(layer_id));
                     }
+                });
 
+                ui.horizontal_wrapped(|ui| {
+                    layer_status_chip(ui, "作業中", is_active);
+                    layer_status_chip(ui, "表示", visible);
+                    layer_status_chip(ui, "ロック", locked);
+                    ui.small(format!("{element_count}個"));
+                    if index + 1 == total_layers {
+                        ui.small("最前面");
+                    } else if index == 0 {
+                        ui.small("最背面");
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
                     if ui
-                        .small_button(if visible { "非表示" } else { "表示" })
+                        .add_sized(
+                            [LAYER_CHIP_BUTTON_WIDTH, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new("表示").selected(visible),
+                        )
                         .on_hover_text(if visible {
                             "このレイヤーを隠します。"
                         } else {
@@ -1200,11 +1300,10 @@ impl PaintApp {
                     }
 
                     if ui
-                        .small_button(if locked {
-                            "ロック解除"
-                        } else {
-                            "ロック"
-                        })
+                        .add_sized(
+                            [LAYER_CHIP_BUTTON_WIDTH, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new("ロック").selected(locked),
+                        )
                         .on_hover_text(if locked {
                             "このレイヤーを編集できるように戻します。"
                         } else {
@@ -1214,28 +1313,22 @@ impl PaintApp {
                     {
                         pending_action = Some(LayerAction::ToggleLocked(layer_id));
                     }
-                });
 
-                ui.horizontal(|ui| {
-                    if is_active {
-                        ui.label(RichText::new("作業中").small().strong());
-                    }
-                    if !visible {
-                        ui.label(RichText::new("非表示").small());
-                    }
-                    if locked {
-                        ui.label(RichText::new("ロック中").small());
-                    }
-                    ui.small(format!("{element_count}個"));
                     if ui
-                        .small_button("上へ")
+                        .add_sized(
+                            [LAYER_CHIP_BUTTON_WIDTH, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new("上へ"),
+                        )
                         .on_hover_text("レイヤー順をひとつ上げます。")
                         .clicked()
                     {
                         pending_action = Some(LayerAction::MoveUp(layer_id));
                     }
                     if ui
-                        .small_button("下へ")
+                        .add_sized(
+                            [LAYER_CHIP_BUTTON_WIDTH, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new("下へ"),
+                        )
                         .on_hover_text("レイヤー順をひとつ下げます。")
                         .clicked()
                     {
@@ -1262,12 +1355,6 @@ impl PaintApp {
                         }
                     });
                 }
-
-                if index + 1 == total_layers {
-                    ui.small("最前面");
-                } else if index == 0 {
-                    ui.small("最背面");
-                }
             });
             ui.add_space(4.0);
         }
@@ -1286,7 +1373,7 @@ impl PaintApp {
             pending_action = Some(LayerAction::RenameActive);
         }
 
-        if let Some((_, active_name, visible, locked)) = active_layer_state {
+        if let Some((_, active_name, visible, locked, _)) = active_layer_state {
             if !visible {
                 ui.small(format!(
                     "{active_name} は非表示です。表示も書き出しもされません。"
@@ -1301,6 +1388,7 @@ impl PaintApp {
         if let Some(action) = pending_action {
             match action {
                 LayerAction::Add => self.add_layer(),
+                LayerAction::DuplicateActive => self.duplicate_active_layer(),
                 LayerAction::DeleteActive => self.delete_active_layer(),
                 LayerAction::RenameActive => self.rename_active_layer(),
                 LayerAction::SetActive(layer_id) => self.set_active_layer(layer_id),
@@ -1833,6 +1921,17 @@ impl PaintApp {
             .map(|layer| layer.name.clone())
             .unwrap_or_else(|| "新しいレイヤー".to_owned());
         self.apply_layer_document_change(next, format!("{layer_name} を追加しました。"));
+    }
+
+    fn duplicate_active_layer(&mut self) {
+        let document = self.document().clone();
+        if let Some((next, layer_id)) = document.duplicate_active_layer_document() {
+            let layer_name = next
+                .layer(layer_id)
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| "レイヤーのコピー".to_owned());
+            self.apply_layer_document_change(next, format!("{layer_name} を追加しました。"));
+        }
     }
 
     fn delete_active_layer(&mut self) {
@@ -2644,6 +2743,20 @@ fn help_icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
             .frame(false),
     )
     .on_hover_text(text)
+}
+
+fn layer_status_chip(ui: &mut egui::Ui, label: &str, active: bool) {
+    let text = if active {
+        RichText::new(label)
+            .small()
+            .strong()
+            .color(ui.visuals().selection.stroke.color)
+    } else {
+        RichText::new(label)
+            .small()
+            .color(ui.visuals().weak_text_color())
+    };
+    ui.label(text);
 }
 
 fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {

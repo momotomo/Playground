@@ -23,6 +23,7 @@
   - ツール状態
   - 線色 / 塗り色 / 不透明度の保持
   - 最近使った色と簡易パレット
+  - 現在ツール / 現在レイヤーが分かる UI summary
   - ボタン操作
   - ショートカット処理
   - ステータスメッセージ管理
@@ -84,6 +85,7 @@
 - `Stroke`
   - `tool` は `pen / pencil / marker / eraser` を表せる
   - tool ごとに最小限の幅係数 / alpha 係数を持ち、重いブラシエンジンなしで描き味の差を出す
+  - pencil / marker は deterministic な multi-pass 描画で、少しラフさや重ね感を出す
 - `GroupElement`
   - `elements: Vec<PaintElement>` を持つ
   - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う
@@ -178,6 +180,7 @@
   - 選択 / 描画 / 編集対象にはしない
 - active layer の切替は UI 状態として扱い、Undo/Redo には積まない
 - layer add/delete/rename/visible/locked/order は document 変更として Undo/Redo に積む
+- active layer の複製は document 変更として扱い、複製後はコピー側を active にする
 - 要素のレイヤー間移動 / 複製は visible かつ unlocked な destination layer にだけ許可する
 - レイヤー間移動 / 複製は destination layer の末尾へ要素を追加し、同一レイヤー内の既存重なり順ルールを維持する
 
