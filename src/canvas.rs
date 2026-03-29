@@ -96,6 +96,7 @@ pub enum CanvasToolKind {
     Pan,
     Brush,
     Pencil,
+    Crayon,
     Marker,
     Eyedropper,
     Bucket,
@@ -112,6 +113,7 @@ impl CanvasToolKind {
             Self::Pan => "手のひら",
             Self::Brush => "ペン",
             Self::Pencil => "えんぴつ",
+            Self::Crayon => "クレヨン",
             Self::Marker => "マーカー",
             Self::Eyedropper => "スポイト",
             Self::Bucket => "バケツ塗り",
@@ -127,6 +129,7 @@ impl CanvasToolKind {
             self,
             Self::Brush
                 | Self::Pencil
+                | Self::Crayon
                 | Self::Marker
                 | Self::Eraser
                 | Self::Rectangle
@@ -1338,6 +1341,7 @@ impl CanvasController {
                         }
                         CanvasToolKind::Brush
                         | CanvasToolKind::Pencil
+                        | CanvasToolKind::Crayon
                         | CanvasToolKind::Marker
                         | CanvasToolKind::Eraser => {
                             self.begin_stroke_preview(document, tool_settings, world);
@@ -1600,15 +1604,17 @@ impl CanvasController {
 
         self.clear_selection();
         let color = match tool_settings.tool {
-            CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker => {
-                tool_settings.stroke_color
-            }
+            CanvasToolKind::Brush
+            | CanvasToolKind::Pencil
+            | CanvasToolKind::Crayon
+            | CanvasToolKind::Marker => tool_settings.stroke_color,
             CanvasToolKind::Eraser => document.background,
             _ => tool_settings.stroke_color,
         };
         let tool = match tool_settings.tool {
             CanvasToolKind::Eraser => ToolKind::Eraser,
             CanvasToolKind::Pencil => ToolKind::Pencil,
+            CanvasToolKind::Crayon => ToolKind::Crayon,
             CanvasToolKind::Marker => ToolKind::Marker,
             _ => ToolKind::Brush,
         };
@@ -2726,7 +2732,7 @@ fn paint_element(
 
 fn paint_stroke(painter: &Painter, rect: Rect, zoom: f32, stroke: &Stroke, background: RgbaColor) {
     match stroke.tool {
-        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
+        ToolKind::Brush | ToolKind::Pencil | ToolKind::Crayon | ToolKind::Marker => {
             for pass in stroke.render_passes() {
                 paint_stroke_pass(
                     painter,
