@@ -112,6 +112,18 @@ fn shortcut_reset_view() -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0)
 }
 
+fn export_role_summary_short() -> &'static str {
+    "続きは JSON保存 · 共有は PNG / 透過PNG · 再利用は SVG"
+}
+
+fn export_role_summary_long() -> &'static str {
+    "JSON保存は続きから再編集、PNG書き出しは見たまま共有、透過PNGは透明素材、SVG書き出しは図形や線の再利用に向いています。"
+}
+
+fn export_role_summary_compact() -> &'static str {
+    "JSONは再編集用、PNG / 透過PNG は共有や素材、SVGは再利用向けです。"
+}
+
 #[derive(Clone)]
 struct StatusMessage {
     kind: StatusKind,
@@ -1163,7 +1175,7 @@ impl PaintApp {
         ui.label(RichText::new("ドキュメント").strong());
         ui.label(self.document_name.as_str());
         ui.small(dirty_suffix);
-        ui.small("続きは JSON保存 · 共有は PNG / 透過PNG · 再利用は SVG");
+        ui.small(export_role_summary_short());
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
@@ -1182,7 +1194,7 @@ impl PaintApp {
                 "描く / 選ぶ / 動かすツールを切り替えます。詳しい流れはヘルプやチュートリアルで確認できます。",
             );
             if response.clicked() {
-                self.set_info("ツールを切り替えて、現在のレイヤーを描いたり編集したりできます。");
+                self.set_info("ツールを切り替えて、作業レイヤーを描いたり編集したりできます。");
             }
         });
         ui.small("上から順に、選ぶ / 描く / 色 / 図形のまとまりで並んでいます。下へスクロールすると詳細設定も開けます。");
@@ -1538,7 +1550,7 @@ impl PaintApp {
                     }
                 });
                 ui.small(self.ui_state.bucket_fill_tolerance.description());
-                ui.small("判定は見えている全レイヤーを使い、塗り結果は現在のレイヤーへ入ります。");
+                ui.small("判定は見えている全レイヤーを使い、塗り結果は作業レイヤーへ入ります。");
                 ui.small("迷ったら「ふつう」か「広め」から試すと自然です。");
             });
         }
@@ -2054,7 +2066,7 @@ impl PaintApp {
                     }
                     let mut fill_enabled = fill_enabled_source;
                     if ui
-                        .checkbox(&mut fill_enabled, "塗りを使う")
+                        .checkbox(&mut fill_enabled, "線と塗りにする")
                         .on_hover_text("四角形や楕円の内側を塗ります。")
                         .changed()
                     {
@@ -2172,9 +2184,9 @@ impl PaintApp {
                             }
                         }
                         ui.small(if fill_enabled {
-                            "塗りを使うと、透過PNGでも塗りの透明度がそのまま出ます。"
+                            "線と塗りにすると、透過PNGでも塗りの透明度がそのまま出ます。"
                         } else {
-                            "塗りなしです。必要なら「塗りを使う」をオンにします。"
+                            "塗りなしです。必要なら「線と塗り」にします。"
                         });
                     });
                 } else if let Some(paint_context) = selection_paint_context {
@@ -2302,7 +2314,7 @@ impl PaintApp {
         ui.small(format!("{:.1}px · 消しゴム", self.tool_widths.eraser_width));
 
         ui.separator();
-        ui.label(RichText::new("現在のモード").strong());
+        ui.label(RichText::new("ツールと描き味").strong());
         ui.small(format!("ツール: {}", self.active_tool.label()));
         if matches!(
             self.active_tool,
@@ -2334,13 +2346,13 @@ impl PaintApp {
             self.document().canvas_size.height
         ));
         ui.label(format!(
-            "要素数: 全体 {} / 現在のレイヤー {}",
+            "要素数: 全体 {} / 作業レイヤー {}",
             self.document().total_element_count(),
             self.document().element_count()
         ));
         ui.label(format!("ズーム: {}", self.canvas.zoom_label()));
         if let Some(active_layer) = self.document().active_layer() {
-            ui.label(format!("現在のレイヤー: {}", active_layer.name));
+            ui.label(format!("作業レイヤー: {}", active_layer.name));
         }
         ui.small("詳しい操作はツールチップかヘルプで確認できます。");
 
@@ -2352,15 +2364,13 @@ impl PaintApp {
             ui.label(RichText::new("保存と書き出し").strong());
             let response = help_icon_button(
                 ui,
-                "JSON保存は再編集用、PNG書き出しは見たまま共有、透過PNGは素材、SVG書き出しは図形や線の再利用向けです。上部バーから使えます。",
+                "JSON保存は再編集用、PNG書き出しは見たまま共有、透過PNGは透明素材、SVG書き出しは図形や線の再利用向けです。上部バーから使えます。",
             );
             if response.clicked() {
-                self.set_info(
-                    "JSON保存は続きから再編集、PNG書き出しは見たまま共有、SVG書き出しは図形や線の再利用に向いています。",
-                );
+                self.set_info(export_role_summary_long());
             }
         });
-        ui.small("JSONは再編集用、PNGは見たまま共有用、SVGは拡大や再利用向けです。");
+        ui.small(export_role_summary_compact());
         ui.small("PNG書き出しは背景あり、透過PNGは透明背景、SVGは図形と線を中心に書き出します。");
         ui.small(self.storage.storage_strategy_summary());
     }
@@ -2738,13 +2748,13 @@ impl PaintApp {
             ui.heading("レイヤー");
             let response = help_icon_button(
                 ui,
-                "現在のレイヤーだけ編集できます。非表示は書き出しに含まれず、ロック中は編集できません。",
+                "作業レイヤーだけ編集できます。非表示は書き出しに含まれず、ロック中は編集できません。",
             );
             if response.clicked() {
                 self.set_info("レイヤーでは表示、ロック、順序、レイヤー間の移動 / 複製を管理できます。");
             }
         });
-        ui.small("現在のレイヤーだけ描いたり編集したりできます。");
+        ui.small("作業レイヤーだけ描いたり編集したりできます。");
         ui.add_space(8.0);
 
         if let Some((_, active_name, visible, locked, element_count)) = &active_layer_state {
@@ -2806,7 +2816,7 @@ impl PaintApp {
                     [action_width, LAYER_ACTION_BUTTON_HEIGHT],
                     egui::Button::new("複製"),
                 )
-                .on_hover_text("現在のレイヤーを複製して、コピー側を作業レイヤーにします。")
+                .on_hover_text("作業レイヤーを複製して、コピー側を作業レイヤーにします。")
                 .clicked()
             {
                 pending_action = Some(LayerAction::DuplicateActive);
@@ -2818,7 +2828,7 @@ impl PaintApp {
                     egui::Button::new("削除")
                         .min_size(egui::vec2(action_width, LAYER_ACTION_BUTTON_HEIGHT)),
                 )
-                .on_hover_text("現在のレイヤーを削除します。最低 1 レイヤーは残ります。")
+                .on_hover_text("作業レイヤーを削除します。最低 1 レイヤーは残ります。")
                 .clicked()
             {
                 pending_action = Some(LayerAction::DeleteActive);
@@ -3000,13 +3010,13 @@ impl PaintApp {
         }
 
         ui.separator();
-        ui.label(RichText::new("現在のレイヤー名").strong());
+        ui.label(RichText::new("作業レイヤー名").strong());
         let rename_response = ui.text_edit_singleline(&mut self.layer_name_draft);
         let rename_on_enter =
             rename_response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
         if ui
             .button("レイヤー名を変更")
-            .on_hover_text("現在のレイヤー名を更新します。")
+            .on_hover_text("作業レイヤー名を更新します。")
             .clicked()
             || rename_on_enter
         {
@@ -3375,7 +3385,7 @@ impl PaintApp {
                 ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。バケツ塗りは塗りのゆるさも変えられます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
-                ui.small("レイヤー: 右側で現在のレイヤー、表示、ロックを切り替えます。");
+                ui.small("レイヤー: 右側で作業レイヤー、表示、ロックを切り替えます。");
                 ui.small("左パネル: 下までスクロールすると配置補助や保存メモが見られます。");
 
                 ui.add_space(8.0);
@@ -3577,9 +3587,7 @@ impl PaintApp {
                         "選択中の図形を回転しました。"
                     }
                 }
-                DocumentEditMode::Fill => {
-                    "閉じた領域を塗りました。結果は現在のレイヤーに入ります。"
-                }
+                DocumentEditMode::Fill => "閉じた領域を塗りました。結果は作業レイヤーに入ります。",
                 DocumentEditMode::Guide => "ガイドを移動しました。",
                 DocumentEditMode::Group => "選択中の要素をグループ化しました。",
                 DocumentEditMode::Ungroup => "選択中のグループを解除しました。",
@@ -3743,7 +3751,7 @@ impl PaintApp {
                 .unwrap_or_else(|| "残りのレイヤー".to_owned());
             self.apply_layer_document_change(
                 next,
-                format!("現在のレイヤーを削除しました。{next_name} が作業レイヤーです。"),
+                format!("作業レイヤーを削除しました。{next_name} が作業レイヤーです。"),
             );
         }
     }
