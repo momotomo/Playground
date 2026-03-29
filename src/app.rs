@@ -27,7 +27,7 @@ const GRID_SPACING_STEP: f32 = 8.0;
 const TOOL_BUTTON_HEIGHT: f32 = 44.0;
 const COLOR_SWATCH_SIZE: f32 = 36.0;
 const LAYER_ACTION_BUTTON_HEIGHT: f32 = 38.0;
-const LAYER_CHIP_BUTTON_WIDTH: f32 = 64.0;
+const LAYER_CHIP_BUTTON_WIDTH: f32 = 72.0;
 const RECENT_COLOR_LIMIT: usize = 12;
 const APP_UI_STATE_KEY: &str = "paint_app_ui_state";
 
@@ -2201,6 +2201,9 @@ impl PaintApp {
                     if selection_layer_id == Some(active_layer_id) && selection_count > 0 {
                         layer_status_chip(ui, "選択中", true);
                     }
+                    if selection_count > 0 {
+                        layer_status_chip(ui, &format!("{selection_count}個"), false);
+                    }
                     layer_status_chip(ui, if *visible { "表示中" } else { "非表示" }, *visible);
                     layer_status_chip(ui, if *locked { "ロック中" } else { "編集可" }, !*locked);
                     layer_status_chip(
@@ -2217,12 +2220,20 @@ impl PaintApp {
                 ui.small(layer_row_summary(*visible, *locked, *element_count));
                 if let Some(selection_context) = self.selection_layer_context() {
                     ui.small(selection_context);
+                } else if selection_count > 0 {
+                    ui.small("選択した要素は別のレイヤーにあります。右側の一覧から作業レイヤーを切り替えられます。");
                 }
             });
             ui.add_space(8.0);
         }
 
-        let action_width = ((ui.available_width() - 16.0) / 3.0).max(64.0);
+        let action_columns = if ui.available_width() < 240.0 {
+            2.0
+        } else {
+            3.0
+        };
+        let action_width =
+            ((ui.available_width() - (action_columns - 1.0) * 8.0) / action_columns).max(72.0);
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_sized(
@@ -2260,9 +2271,11 @@ impl PaintApp {
         });
 
         if selection_count > 0 {
-            ui.small(format!(
-                "{selection_count} 個選択中です。移動先のレイヤーで「ここへ移動」または「ここへ複製」を使えます。"
-            ));
+            ui.horizontal_wrapped(|ui| {
+                layer_status_chip(ui, &format!("{selection_count}個選択中"), true);
+                layer_status_chip(ui, "受け取り先を選べます", false);
+            });
+            ui.small("移動先のレイヤーで「ここへ移動」または「ここへ複製」を使えます。");
         }
 
         ui.separator();
@@ -2309,6 +2322,18 @@ impl PaintApp {
                     layer_status_chip(ui, "作業中", is_active);
                     if selection_layer_id == Some(layer_id) && selection_count > 0 {
                         layer_status_chip(ui, "選択中", true);
+                    }
+                    if can_receive_selection {
+                        let can_drop_here = visible && !locked;
+                        layer_status_chip(
+                            ui,
+                            if can_drop_here {
+                                "受け取り可"
+                            } else {
+                                "受け取り不可"
+                            },
+                            can_drop_here,
+                        );
                     }
                     layer_status_chip(ui, if visible { "表示中" } else { "非表示" }, visible);
                     layer_status_chip(ui, if locked { "ロック中" } else { "編集可" }, !locked);
