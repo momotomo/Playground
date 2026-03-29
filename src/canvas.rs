@@ -3,6 +3,7 @@ use eframe::egui::{
     Vec2,
 };
 
+use crate::fill::{FloodFillFailure, flood_fill_document};
 use crate::model::{
     AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, GuideLine, LayerId,
     PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
@@ -74,6 +75,7 @@ pub enum CanvasToolKind {
     Pencil,
     Marker,
     Eyedropper,
+    Bucket,
     Eraser,
     Rectangle,
     Ellipse,
@@ -89,6 +91,7 @@ impl CanvasToolKind {
             Self::Pencil => "えんぴつ",
             Self::Marker => "マーカー",
             Self::Eyedropper => "スポイト",
+            Self::Bucket => "バケツ塗り",
             Self::Eraser => "消しゴム",
             Self::Rectangle => "四角形",
             Self::Ellipse => "楕円",
@@ -135,7 +138,36 @@ pub struct CanvasOutput {
     pub committed_edit: Option<CommittedDocumentEdit>,
     pub requested_tool: Option<CanvasToolKind>,
     pub picked_color: Option<RgbaColor>,
+    pub message: Option<CanvasMessage>,
     pub needs_repaint: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasMessage {
+    pub kind: CanvasMessageKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasMessageKind {
+    Info,
+    Error,
+}
+
+impl CanvasMessage {
+    fn info(text: impl Into<String>) -> Self {
+        Self {
+            kind: CanvasMessageKind::Info,
+            text: text.into(),
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            kind: CanvasMessageKind::Error,
+            text: text.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +182,7 @@ pub enum DocumentEditMode {
     Move,
     Resize,
     Rotate,
+    Fill,
     Guide,
     Group,
     Ungroup,
@@ -164,6 +197,7 @@ impl DocumentEditMode {
             Self::Move => "移動中",
             Self::Resize => "サイズ変更中",
             Self::Rotate => "回転中",
+            Self::Fill => "塗り中",
             Self::Guide => "ガイド移動中",
             Self::Group => "グループ化中",
             Self::Ungroup => "グループ解除中",
@@ -622,10 +656,11 @@ impl CanvasController {
             .selection_session
             .as_ref()
             .and_then(SelectionSession::control_target);
+        let can_transform_selection = self.selection_can_transform(document);
         let show_handles = !matches!(
             self.selection_session,
             Some(SelectionSession::Marquee { .. } | SelectionSession::GuideMove { .. })
-        );
+        ) && can_transform_selection;
         let interaction_banner = self.interaction_overlay_text();
 
         paint_workspace(&painter, viewport);
@@ -1174,6 +1209,9 @@ impl CanvasController {
                             output.picked_color = sample_document_color(document, world);
                             output.needs_repaint = output.picked_color.is_some();
                         }
+                        CanvasToolKind::Bucket => {
+                            output = self.perform_bucket_fill(document, tool_settings, world);
+                        }
                         CanvasToolKind::Brush
                         | CanvasToolKind::Pencil
                         | CanvasToolKind::Marker
@@ -1470,6 +1508,54 @@ impl CanvasController {
             .with_fill_color(tool_settings.fill_color),
         ));
         self.interaction_mode = InteractionMode::Drawing;
+    }
+
+    fn perform_bucket_fill(
+        &mut self,
+        document: &PaintDocument,
+        tool_settings: ToolSettings,
+        world: PaintPoint,
+    ) -> CanvasOutput {
+        let Some(fill_color) = tool_settings.fill_color else {
+            return CanvasOutput {
+                message: Some(CanvasMessage::error(
+                    "塗り色を選ぶと、バケツ塗りを使えます。",
+                )),
+                ..Default::default()
+            };
+        };
+
+        match flood_fill_document(document, world, fill_color) {
+            Ok(result) => {
+                let mut next = document.clone();
+                if next.insert_element_at(0, PaintElement::Fill(result.element)) {
+                    self.clear_selection();
+                    CanvasOutput {
+                        committed_edit: Some(CommittedDocumentEdit {
+                            document: next,
+                            selection_indices: Vec::new(),
+                            mode: DocumentEditMode::Fill,
+                        }),
+                        needs_repaint: true,
+                        ..Default::default()
+                    }
+                } else {
+                    CanvasOutput {
+                        message: Some(CanvasMessage::error(
+                            FloodFillFailure::ActiveLayerNotEditable.message(),
+                        )),
+                        ..Default::default()
+                    }
+                }
+            }
+            Err(error) => CanvasOutput {
+                message: Some(match error {
+                    FloodFillFailure::SameColor => CanvasMessage::info(error.message()),
+                    _ => CanvasMessage::error(error.message()),
+                }),
+                ..Default::default()
+            },
+        }
     }
 
     fn update_active_preview(&mut self, document: &PaintDocument, world: PaintPoint) {
@@ -1826,7 +1912,7 @@ impl CanvasController {
         let index = self.selection.single()?;
         match self.single_selected_element_owned(document)? {
             PaintElement::Shape(shape) => Some((index, shape)),
-            PaintElement::Stroke(_) | PaintElement::Group(_) => None,
+            PaintElement::Stroke(_) | PaintElement::Fill(_) | PaintElement::Group(_) => None,
         }
     }
 
@@ -1837,8 +1923,16 @@ impl CanvasController {
 
         matches!(
             self.single_selected_element_owned(document),
-            Some(PaintElement::Stroke(_) | PaintElement::Group(_))
+            Some(PaintElement::Stroke(_) | PaintElement::Fill(_) | PaintElement::Group(_))
         )
+    }
+
+    fn selection_can_transform(&self, document: &PaintDocument) -> bool {
+        !self.selection.is_empty()
+            && self
+                .selected_visual_elements(document)
+                .iter()
+                .all(|(_, element)| element.is_transform_editable())
     }
 
     fn selection_control_bounds(&self, document: &PaintDocument) -> Option<ElementBounds> {
@@ -1876,6 +1970,10 @@ impl CanvasController {
         pointer_screen: Pos2,
         touch_active: bool,
     ) -> Option<ControlTarget> {
+        if !self.selection_can_transform(document) {
+            return None;
+        }
+
         let handle_hit_radius = effective_screen_hit_tolerance(
             touch_active,
             HANDLE_HIT_RADIUS,
@@ -2398,6 +2496,7 @@ fn paint_element(
     match element {
         PaintElement::Stroke(stroke) => paint_stroke(painter, rect, zoom, stroke, background),
         PaintElement::Shape(shape) => paint_shape(painter, rect, zoom, shape),
+        PaintElement::Fill(fill) => paint_fill(painter, rect, zoom, fill),
         PaintElement::Group(group) => {
             for child in &group.elements {
                 paint_element(painter, rect, zoom, child, background);
@@ -2509,6 +2608,32 @@ fn paint_shape(painter: &Painter, rect: Rect, zoom: f32, shape: &ShapeElement) {
                 painter.add(egui::Shape::closed_line(ellipse_points, stroke));
             }
         }
+    }
+}
+
+fn paint_fill(painter: &Painter, rect: Rect, zoom: f32, fill: &crate::model::FillElement) {
+    let color = color32_from_rgba(fill.color);
+    for span in &fill.spans {
+        if span.width() == 0 {
+            continue;
+        }
+        let min = canvas_to_screen(
+            rect,
+            zoom,
+            PaintPoint::new(
+                fill.origin.x + span.x_start as f32,
+                fill.origin.y + span.y as f32,
+            ),
+        );
+        let max = canvas_to_screen(
+            rect,
+            zoom,
+            PaintPoint::new(
+                fill.origin.x + span.x_end as f32,
+                fill.origin.y + span.y as f32 + 1.0,
+            ),
+        );
+        painter.rect_filled(Rect::from_min_max(min, max), 0.0, color);
     }
 }
 
@@ -2707,7 +2832,7 @@ fn paint_single_selection_overlay(
                 }
             }
         },
-        PaintElement::Group(_) => {}
+        PaintElement::Fill(_) | PaintElement::Group(_) => {}
     }
 }
 

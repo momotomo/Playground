@@ -632,8 +632,8 @@ fn normalize_file_name(file_name: String, fallback: &str) -> String {
 mod tests {
     use super::{PngExportKind, StorageError, StorageFacade};
     use crate::model::{
-        CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
-        ShapeElement, ShapeKind, Stroke, ToolKind,
+        CanvasSize, FillElement, FillSpan, GroupElement, GuideAxis, PaintDocument, PaintElement,
+        PaintPoint, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -743,6 +743,33 @@ mod tests {
         };
 
         assert_eq!(shape.fill_color, Some(RgbaColor::new(255, 196, 64, 180)));
+    }
+
+    #[test]
+    fn flood_fill_element_survives_round_trip() {
+        let storage = StorageFacade::new();
+        let mut document = sample_document();
+        document.push_fill(FillElement::new(
+            RgbaColor::from_rgba(32, 160, 220, 180),
+            PaintPoint::new(8.0, 8.0),
+            vec![
+                FillSpan {
+                    y: 0,
+                    x_start: 0,
+                    x_end: 6,
+                },
+                FillSpan {
+                    y: 1,
+                    x_start: 1,
+                    x_end: 7,
+                },
+            ],
+        ));
+
+        let encoded = storage.encode_document(&document).expect("must encode");
+        let decoded = storage.decode_document(&encoded).expect("must decode");
+
+        assert_eq!(decoded, document);
     }
 
     #[test]

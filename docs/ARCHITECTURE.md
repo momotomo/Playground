@@ -11,6 +11,7 @@
 - アプリ本体は `src/app.rs`
 - キャンバス描画、ビュー状態、選択操作は `src/canvas.rs`
 - 作品モデルと編集履歴は `src/model.rs`
+- バケツ塗りの領域抽出は `src/fill.rs`
 - 保存 / 読込 / export は `src/storage.rs`
 - PNG ラスタライズは `src/render.rs`
 - native 起動は `src/native.rs`
@@ -49,6 +50,7 @@
   - `PaintElement`
   - `Stroke`
   - `ShapeElement`
+  - `FillElement`
   - `GroupElement`
   - 色、点列、キャンバスサイズ
   - ブラシ種別ごとの基本スタイル係数
@@ -62,8 +64,13 @@
   - 通常 PNG と透過 PNG の背景モード切り替え
   - 図形中心の SVG バイト列生成
   - スポイト用のキャンバス色サンプリング
+  - バケツ塗り結果の raster 描画と SVG 簡略出力
   - freehand stroke の tool 種別ごとの見た目差の反映
   - shape の vector path / style 分離による SVG / 将来の fill 拡張の土台
+- `src/fill.rs`
+  - visible layer を合成した見た目を基準にした flood fill
+  - scanline span による領域抽出
+  - `FillElement` 生成
 - `src/storage.rs`
   - JSON encode / decode
   - 保存形式 version 管理
@@ -83,6 +90,7 @@
 - `PaintElement` は次の enum
   - `Stroke`
   - `Shape`
+  - `Fill`
   - `Group`
 - `Stroke`
   - `tool` は `pen / pencil / marker / eraser` を表せる
@@ -92,6 +100,12 @@
 - `GroupElement`
   - `elements: Vec<PaintElement>` を持つ
   - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う
+- `FillElement`
+  - `color`
+  - `origin`
+  - `spans`
+  - バケツ塗り結果を scanline span で持つ第一版のラスタ塗り要素
+  - PNG / 透過PNG では見たまま描画し、SVG では 1px 高の矩形列へ簡略化して出力する
 - `ShapeElement` は次の情報を保持する
   - `kind`
   - `color` (`線色`)
@@ -221,11 +235,13 @@
 - PNG / 透過PNG
   - 見たまま共有向け
   - multi-pass のブラシ質感や消しゴム結果も含めてラスタライズする
+  - バケツ塗り結果も `FillElement` のまま見た目優先で反映する
   - UI 補助表示は含めない
 - SVG
   - 図形 / 線の再利用や拡大向け
   - `直線` / `四角形` / `楕円` は shape geometry から安全に書き出す
   - freehand は path として簡略化し、`ペン / えんぴつ / マーカー` の質感差は PNG より単純化する
+  - バケツ塗り結果は 1px 高の矩形列へ簡略化し、見たまま完全一致は PNG 系へ寄せる
   - `消しゴム` は SVG では安全な再現が難しいため省略し、見たまま共有は PNG 系に寄せる
   - raster export と vector export を `src/render.rs` 内で分け、`src/storage.rs` は保存導線だけを担当する
 
@@ -339,6 +355,7 @@
 - 旧 `version = 2` と `version = 3` の flat な stroke / shape / group 形式は decode 側で単一 layer document へ migration する
 - 旧 shape JSON に `rotation_radians` が無い場合は `0` 扱いで読める
 - `fill_color` は serde default 付きで追加しているため、format version を上げずに後方互換を維持している
+- `FillElement.spans` も同じ `format.version = 4` のまま保存できるため、バケツ塗り追加でも version は上げていない
 - group は `PaintElement::Group` として再帰的に保存する
 - レイヤー順は `document.layers[]` の配列順として保存する
 - レイヤー内重なり順は `layer.elements[]` の配列順として保存する
@@ -352,6 +369,7 @@
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
 - `スポイト` は UI 補助表示ではなく、作品ラスタライズ結果から色を拾う
+- バケツ塗りは visible layer を合成した見た目を境界判定に使い、結果は active layer へ `FillElement` として積む
 - visible な layer だけを順番に描画する
 - locked layer も visible なら描画する
 - 回転やリサイズ後の図形も作品データからそのまま描画する

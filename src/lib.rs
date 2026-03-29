@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod canvas;
+pub mod fill;
 pub mod fonts;
 pub mod model;
 pub mod render;

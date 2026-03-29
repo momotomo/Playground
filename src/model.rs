@@ -932,6 +932,86 @@ impl ShapeElement {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillSpan {
+    pub y: u32,
+    pub x_start: u32,
+    pub x_end: u32,
+}
+
+impl FillSpan {
+    pub fn width(self) -> u32 {
+        self.x_end.saturating_sub(self.x_start)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FillElement {
+    pub color: RgbaColor,
+    pub origin: PaintPoint,
+    #[serde(default)]
+    pub spans: Vec<FillSpan>,
+}
+
+impl FillElement {
+    pub fn new(color: RgbaColor, origin: PaintPoint, spans: Vec<FillSpan>) -> Self {
+        Self {
+            color,
+            origin,
+            spans,
+        }
+    }
+
+    pub fn bounds(&self) -> Option<ElementBounds> {
+        let first = *self.spans.first()?;
+        let mut min_x = self.origin.x + first.x_start as f32;
+        let mut min_y = self.origin.y + first.y as f32;
+        let mut max_x = self.origin.x + first.x_end as f32;
+        let mut max_y = self.origin.y + first.y as f32 + 1.0;
+
+        for span in self.spans.iter().copied().skip(1) {
+            min_x = min_x.min(self.origin.x + span.x_start as f32);
+            min_y = min_y.min(self.origin.y + span.y as f32);
+            max_x = max_x.max(self.origin.x + span.x_end as f32);
+            max_y = max_y.max(self.origin.y + span.y as f32 + 1.0);
+        }
+
+        Some(ElementBounds {
+            min: PaintPoint::new(min_x, min_y),
+            max: PaintPoint::new(max_x, max_y),
+        })
+    }
+
+    pub fn hit_test(&self, point: PaintPoint, tolerance: f32) -> bool {
+        let tolerance = tolerance.max(HIT_TOLERANCE_MIN);
+        self.spans.iter().copied().any(|span| {
+            let row_min_y = self.origin.y + span.y as f32;
+            let row_max_y = row_min_y + 1.0;
+            let row_min_x = self.origin.x + span.x_start as f32;
+            let row_max_x = self.origin.x + span.x_end as f32;
+            point.y >= row_min_y - tolerance
+                && point.y <= row_max_y + tolerance
+                && point.x >= row_min_x - tolerance
+                && point.x <= row_max_x + tolerance
+        })
+    }
+
+    pub fn translated(&self, delta: PaintVector) -> Self {
+        Self {
+            origin: self.origin.offset(delta),
+            ..self.clone()
+        }
+    }
+
+    pub fn scaled_from(&self, _anchor: PaintPoint, _scale_x: f32, _scale_y: f32) -> Self {
+        self.clone()
+    }
+
+    pub fn rotated_around(&self, _pivot: PaintPoint, _angle_radians: f32) -> Self {
+        self.clone()
+    }
+}
+
 fn stroke_texture_offset(points: &[PaintPoint], distance: f32) -> PaintVector {
     if distance.abs() <= f32::EPSILON {
         return PaintVector::default();
@@ -1001,9 +1081,11 @@ impl GroupElement {
     }
 
     pub fn is_transform_editable(&self) -> bool {
-        self.elements
-            .iter()
-            .any(PaintElement::is_transform_editable)
+        !self.elements.is_empty()
+            && self
+                .elements
+                .iter()
+                .all(PaintElement::is_transform_editable)
     }
 }
 
@@ -1012,6 +1094,7 @@ impl GroupElement {
 pub enum PaintElement {
     Stroke(Stroke),
     Shape(ShapeElement),
+    Fill(FillElement),
     Group(GroupElement),
 }
 
@@ -1020,6 +1103,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.tool.label(),
             Self::Shape(shape) => shape.kind.label(),
+            Self::Fill(_) => "塗り",
             Self::Group(_) => "グループ",
         }
     }
@@ -1028,6 +1112,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.bounds(),
             Self::Shape(shape) => Some(shape.bounds()),
+            Self::Fill(fill) => fill.bounds(),
             Self::Group(group) => group.bounds(),
         }
     }
@@ -1036,6 +1121,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => stroke.hit_test(point, tolerance),
             Self::Shape(shape) => shape.hit_test(point, tolerance),
+            Self::Fill(fill) => fill.hit_test(point, tolerance),
             Self::Group(group) => group.hit_test(point, tolerance),
         }
     }
@@ -1044,6 +1130,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.translated(delta)),
             Self::Shape(shape) => Self::Shape(shape.translated(delta)),
+            Self::Fill(fill) => Self::Fill(fill.translated(delta)),
             Self::Group(group) => Self::Group(group.translated(delta)),
         }
     }
@@ -1052,6 +1139,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.scaled_from(anchor, scale_x, scale_y)),
             Self::Shape(shape) => Self::Shape(shape.scaled_from(anchor, scale_x, scale_y)),
+            Self::Fill(fill) => Self::Fill(fill.scaled_from(anchor, scale_x, scale_y)),
             Self::Group(group) => Self::Group(group.scaled_from(anchor, scale_x, scale_y)),
         }
     }
@@ -1060,6 +1148,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => Self::Stroke(stroke.rotated_around(pivot, angle_radians)),
             Self::Shape(shape) => Self::Shape(shape.rotated_around(pivot, angle_radians)),
+            Self::Fill(fill) => Self::Fill(fill.rotated_around(pivot, angle_radians)),
             Self::Group(group) => Self::Group(group.rotated_around(pivot, angle_radians)),
         }
     }
@@ -1068,6 +1157,7 @@ impl PaintElement {
         match self {
             Self::Stroke(stroke) => !stroke.points.is_empty(),
             Self::Shape(shape) => shape.is_transform_editable(),
+            Self::Fill(_) => false,
             Self::Group(group) => group.is_transform_editable(),
         }
     }
@@ -1546,10 +1636,23 @@ impl PaintDocument {
         self.push_element(PaintElement::Shape(shape));
     }
 
+    pub fn push_fill(&mut self, fill: FillElement) {
+        self.push_element(PaintElement::Fill(fill));
+    }
+
     pub fn push_element(&mut self, element: PaintElement) {
         if let Some(layer) = self.active_layer_mut() {
             layer.elements.push(element);
         }
+    }
+
+    pub fn insert_element_at(&mut self, index: usize, element: PaintElement) -> bool {
+        let Some(layer) = self.active_layer_mut() else {
+            return false;
+        };
+        let index = index.min(layer.elements.len());
+        layer.elements.insert(index, element);
+        true
     }
 
     pub fn replace_element(&mut self, index: usize, element: PaintElement) -> bool {
@@ -2690,6 +2793,7 @@ mod tests {
             .map(|element| match element {
                 PaintElement::Shape(shape) => shape.color,
                 PaintElement::Stroke(_) => RgbaColor::white(),
+                PaintElement::Fill(fill) => fill.color,
                 PaintElement::Group(_) => RgbaColor::new(1, 1, 1, 255),
             })
             .collect();
