@@ -14,7 +14,7 @@
 ## freehand SVG の品質
 
 - 現状
-  - 軽い簡略化と smoothing で quadratic path 化している
+  - 軽い簡略化と smoothing で cubic path 化している
   - ブラシ質感は SVG で簡略化している
 - 候補
   - 点列の追加整理
