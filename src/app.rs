@@ -1185,7 +1185,7 @@ impl PaintApp {
                 self.set_info("ツールを切り替えて、現在のレイヤーを描いたり編集したりできます。");
             }
         });
-        ui.small("よく使う操作を上にまとめています。下へスクロールすると詳細設定も開けます。");
+        ui.small("上から順に、選ぶ / 描く / 色 / 図形のまとまりで並んでいます。下へスクロールすると詳細設定も開けます。");
         ui.add_space(8.0);
 
         ui.group(|ui| {
@@ -1280,6 +1280,80 @@ impl PaintApp {
         });
         ui.add_space(8.0);
 
+        let tool_columns = tablet_button_columns(ui.available_width());
+        let tool_button_width = if tool_columns == 2 {
+            ((ui.available_width() - 8.0) / 2.0).max(104.0)
+        } else {
+            ui.available_width()
+        };
+        let render_tool_group =
+            |ui: &mut egui::Ui, title: &str, tools: &[CanvasToolKind], app: &mut PaintApp| {
+                ui.label(RichText::new(title).strong());
+                for row in tools.chunks(tool_columns) {
+                    ui.horizontal_wrapped(|ui| {
+                        for tool in row {
+                            let is_selected = app.active_tool == *tool;
+                            let response = ui
+                                .add_sized(
+                                    [tool_button_width, TOOL_BUTTON_HEIGHT],
+                                    egui::Button::new(tool.label()).selected(is_selected),
+                                )
+                                .on_hover_text(tool_button_tooltip(*tool));
+                            let can_activate = !is_selected
+                                || (*tool == CanvasToolKind::Select && app.multi_select_mode);
+                            if response.clicked() && can_activate {
+                                app.apply_tool_button_selection(*tool);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                ui.add_space(4.0);
+            };
+        render_tool_group(
+            ui,
+            "選ぶ / 動かす",
+            &[CanvasToolKind::Select, CanvasToolKind::Pan],
+            self,
+        );
+        render_tool_group(
+            ui,
+            "描く",
+            &[
+                CanvasToolKind::Brush,
+                CanvasToolKind::Pencil,
+                CanvasToolKind::Crayon,
+                CanvasToolKind::Marker,
+                CanvasToolKind::Eraser,
+            ],
+            self,
+        );
+        render_tool_group(
+            ui,
+            "色 / 塗り",
+            &[CanvasToolKind::Eyedropper, CanvasToolKind::Bucket],
+            self,
+        );
+        render_tool_group(
+            ui,
+            "図形",
+            &[
+                CanvasToolKind::Rectangle,
+                CanvasToolKind::Ellipse,
+                CanvasToolKind::Line,
+            ],
+            self,
+        );
+
+        ui.add_space(8.0);
+        if matches!(
+            self.active_tool,
+            CanvasToolKind::Select | CanvasToolKind::Pan
+        ) {
+            ui.small("選択や手のひらは、上の切り替えと合わせるとタブレットで使いやすくなります。");
+        }
+        ui.add_space(6.0);
+
         ui.horizontal(|ui| {
             ui.label(RichText::new("タブレット向け").strong());
             let response = help_icon_button(
@@ -1363,55 +1437,6 @@ impl PaintApp {
             if keep_selection_response.clicked() {
                 self.exit_multi_select_mode_for_editing();
             }
-        }
-        ui.add_space(8.0);
-
-        let tools = [
-            CanvasToolKind::Select,
-            CanvasToolKind::Pan,
-            CanvasToolKind::Brush,
-            CanvasToolKind::Pencil,
-            CanvasToolKind::Crayon,
-            CanvasToolKind::Marker,
-            CanvasToolKind::Eyedropper,
-            CanvasToolKind::Bucket,
-            CanvasToolKind::Rectangle,
-            CanvasToolKind::Ellipse,
-            CanvasToolKind::Line,
-            CanvasToolKind::Eraser,
-        ];
-        let tool_columns = tablet_button_columns(ui.available_width());
-        let tool_button_width = if tool_columns == 2 {
-            ((ui.available_width() - 8.0) / 2.0).max(104.0)
-        } else {
-            ui.available_width()
-        };
-        for row in tools.chunks(tool_columns) {
-            ui.horizontal_wrapped(|ui| {
-                for tool in row {
-                    let is_selected = self.active_tool == *tool;
-                    let response = ui
-                        .add_sized(
-                            [tool_button_width, TOOL_BUTTON_HEIGHT],
-                            egui::Button::new(tool.label()).selected(is_selected),
-                        )
-                        .on_hover_text(tool_button_tooltip(*tool));
-                    let can_activate =
-                        !is_selected || (*tool == CanvasToolKind::Select && self.multi_select_mode);
-                    if response.clicked() && can_activate {
-                        self.apply_tool_button_selection(*tool);
-                    }
-                }
-            });
-            ui.add_space(4.0);
-        }
-
-        ui.add_space(8.0);
-        if matches!(
-            self.active_tool,
-            CanvasToolKind::Select | CanvasToolKind::Pan
-        ) {
-            ui.small("選択や手のひらは、上の切り替えと合わせるとタブレットで使いやすくなります。");
         }
         ui.add_space(12.0);
         if arrange_context.show_panel() {
