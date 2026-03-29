@@ -57,6 +57,14 @@ impl FillTolerancePreset {
         }
     }
 
+    pub const fn neighbor_padding(self) -> u32 {
+        match self {
+            Self::VeryStrict | Self::Strict => 0,
+            Self::Standard | Self::Relaxed => 1,
+            Self::VeryRelaxed => 2,
+        }
+    }
+
     pub const fn next_more_permissive(self) -> Option<Self> {
         match self {
             Self::VeryStrict => Some(Self::Strict),
@@ -136,6 +144,7 @@ struct AbsoluteFillSpan {
 struct FillMatchRule {
     target_color: RgbaColor,
     tolerance: u8,
+    neighbor_padding: u32,
 }
 
 pub fn flood_fill_document(
@@ -168,7 +177,14 @@ pub fn flood_fill_document(
         return Err(FloodFillFailure::SameColor);
     }
 
-    let spans = extract_fill_region(&pixmap, seed_x, seed_y, target_color, tolerance);
+    let spans = extract_fill_region(
+        &pixmap,
+        seed_x,
+        seed_y,
+        target_color,
+        tolerance,
+        options.tolerance.neighbor_padding(),
+    );
     if spans.is_empty() {
         return Err(FloodFillFailure::RegionNotFound);
     }
@@ -209,6 +225,7 @@ fn extract_fill_region(
     seed_y: u32,
     target_color: RgbaColor,
     tolerance: u8,
+    neighbor_padding: u32,
 ) -> Vec<AbsoluteFillSpan> {
     let width = pixmap.width();
     let height = pixmap.height();
@@ -280,6 +297,7 @@ fn extract_fill_region(
                 FillMatchRule {
                     target_color,
                     tolerance,
+                    neighbor_padding,
                 },
             );
         }
@@ -293,6 +311,7 @@ fn extract_fill_region(
                 FillMatchRule {
                     target_color,
                     tolerance,
+                    neighbor_padding,
                 },
             );
         }
@@ -310,8 +329,9 @@ fn enqueue_adjacent_matches(
     rule: FillMatchRule,
 ) {
     let width = pixmap.width();
-    let right = *x_range.end();
-    let mut x = *x_range.start();
+    let padded_range = expand_fill_range(x_range, rule.neighbor_padding, width);
+    let right = *padded_range.end();
+    let mut x = *padded_range.start();
     while x <= right {
         let index = pixel_index(width, x, y);
         let Some(color) = pixel_color(pixmap, x, y) else {
@@ -337,6 +357,18 @@ fn enqueue_adjacent_matches(
             x += 1;
         }
     }
+}
+
+fn expand_fill_range(
+    x_range: RangeInclusive<u32>,
+    padding: u32,
+    width: u32,
+) -> RangeInclusive<u32> {
+    let start = (*x_range.start()).saturating_sub(padding);
+    let end = (*x_range.end())
+        .saturating_add(padding)
+        .min(width.saturating_sub(1));
+    start..=end
 }
 
 fn pixel_index(width: u32, x: u32, y: u32) -> usize {
@@ -562,6 +594,51 @@ mod tests {
             "very relaxed should cross farther into the more strongly tinted area"
         );
         assert!(very_relaxed.pixel_count > relaxed.pixel_count);
+    }
+
+    #[test]
+    fn standard_tolerance_can_bridge_diagonal_fill_pixels() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(6.0, 6.0),
+            background: RgbaColor::from_rgba(10, 10, 10, 255),
+            ..PaintDocument::default()
+        };
+        document.push_fill(FillElement::new(
+            RgbaColor::white(),
+            PaintPoint::new(1.0, 1.0),
+            vec![FillSpan {
+                y: 0,
+                x_start: 0,
+                x_end: 1,
+            }],
+        ));
+        document.push_fill(FillElement::new(
+            RgbaColor::white(),
+            PaintPoint::new(2.0, 2.0),
+            vec![FillSpan {
+                y: 0,
+                x_start: 0,
+                x_end: 1,
+            }],
+        ));
+
+        let strict = flood_fill_document(
+            &document,
+            PaintPoint::new(1.0, 1.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::Strict),
+        )
+        .expect("strict fill should still work");
+        let standard = flood_fill_document(
+            &document,
+            PaintPoint::new(1.0, 1.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::Standard),
+        )
+        .expect("standard fill should bridge nearby diagonal pixels");
+
+        assert_eq!(strict.pixel_count, 1);
+        assert_eq!(standard.pixel_count, 2);
     }
 
     #[test]
