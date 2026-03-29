@@ -216,23 +216,23 @@ fn render_stroke_path(
 }
 
 fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
+    let Some(path) = shape_vector_path(shape) else {
+        return;
+    };
+    let style = shape_render_style(shape);
+
     let mut stroke_paint = Paint {
         anti_alias: true,
         ..Paint::default()
     };
-    stroke_paint.set_color_rgba8(shape.color.r, shape.color.g, shape.color.b, shape.color.a);
+    stroke_paint.set_color_rgba8(
+        style.stroke_color.r,
+        style.stroke_color.g,
+        style.stroke_color.b,
+        style.stroke_color.a,
+    );
 
-    let Some(path) = (match shape.kind {
-        ShapeKind::Line => line_path(shape.start, shape.end),
-        ShapeKind::Rectangle => polygon_path(&shape.rotated_box_corners()),
-        ShapeKind::Ellipse => ellipse_path(shape),
-    }) else {
-        return;
-    };
-
-    if shape.kind.supports_fill()
-        && let Some(fill_color) = shape.fill_color
-    {
+    if let Some(fill_color) = style.fill_color {
         let mut fill_paint = Paint {
             anti_alias: true,
             ..Paint::default()
@@ -250,10 +250,35 @@ fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
     pixmap.stroke_path(
         &path,
         &stroke_paint,
-        &stroke_style(shape.width),
+        &stroke_style(style.stroke_width),
         Transform::identity(),
         None,
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShapeRenderStyle {
+    stroke_color: RgbaColor,
+    fill_color: Option<RgbaColor>,
+    stroke_width: f32,
+}
+
+fn shape_render_style(shape: &ShapeElement) -> ShapeRenderStyle {
+    ShapeRenderStyle {
+        stroke_color: shape.color,
+        fill_color: shape.effective_fill_color(),
+        stroke_width: shape.width,
+    }
+}
+
+// Keep vector-friendly geometry separate from raster-only export details so future SVG
+// export and fill tools can reuse the same path construction without coupling to PNG.
+fn shape_vector_path(shape: &ShapeElement) -> Option<tiny_skia::Path> {
+    match shape.kind {
+        ShapeKind::Line => line_path(shape.start, shape.end),
+        ShapeKind::Rectangle => polygon_path(&shape.rotated_box_corners()),
+        ShapeKind::Ellipse => ellipse_path(shape),
+    }
 }
 
 fn line_path(start: PaintPoint, end: PaintPoint) -> Option<tiny_skia::Path> {
