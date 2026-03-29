@@ -739,6 +739,9 @@ impl PaintApp {
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
             }
+            if let Some(operation) = self.canvas.current_operation_label() {
+                ui.small(format!("操作: {operation}"));
+            }
             ui.small(self.canvas.selection_summary(self.document()));
             if let Some(selection_context) = self.selection_layer_context() {
                 ui.small(selection_context);
@@ -885,11 +888,12 @@ impl PaintApp {
             ui.group(|ui| {
                 ui.label(RichText::new("バケツ塗り設定").strong());
                 ui.small("少し色が違う場所まで、どのくらいまとめて塗るかを切り替えます。");
+                let preset_width = ((ui.available_width() - 16.0) / 3.0).max(88.0);
                 ui.horizontal_wrapped(|ui| {
                     for preset in FillTolerancePreset::ALL {
                         let response = ui
                             .add_sized(
-                                [88.0, 34.0],
+                                [preset_width, 36.0],
                                 egui::Button::new(preset.label())
                                     .selected(self.ui_state.bucket_fill_tolerance == preset),
                             )
@@ -2100,27 +2104,57 @@ impl PaintApp {
             });
 
             ui.add_space(4.0);
+            let compact_summary = ui.available_width() < 760.0;
             ui.horizontal_wrapped(|ui| {
-                summary_chip(ui, format!("道具: {}", self.active_tool.label()), true);
+                summary_chip(
+                    ui,
+                    if compact_summary {
+                        self.active_tool.label().to_owned()
+                    } else {
+                        format!("道具: {}", self.active_tool.label())
+                    },
+                    true,
+                );
                 if matches!(
                     self.active_tool,
                     CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
-                ) {
+                ) && !compact_summary
+                {
                     summary_chip(ui, brush_kind_summary(self.active_tool), false);
                 } else if self.active_tool == CanvasToolKind::Bucket {
                     summary_chip(
                         ui,
-                        format!("ゆるさ: {}", self.ui_state.bucket_fill_tolerance.label()),
+                        if compact_summary {
+                            format!("塗り {}", self.ui_state.bucket_fill_tolerance.label())
+                        } else {
+                            format!("ゆるさ: {}", self.ui_state.bucket_fill_tolerance.label())
+                        },
                         false,
                     );
                 }
                 if let Some(layer) = self.document().active_layer() {
-                    summary_chip(ui, format!("作業: {}", layer.name), false);
+                    summary_chip(
+                        ui,
+                        if compact_summary {
+                            format!("L: {}", layer.name)
+                        } else {
+                            format!("作業: {}", layer.name)
+                        },
+                        false,
+                    );
                 }
                 if let Some(operation) = self.canvas.current_operation_label() {
                     summary_chip(ui, operation, true);
                 } else if selection_count > 0 {
-                    summary_chip(ui, self.canvas.selection_summary(self.document()), false);
+                    summary_chip(
+                        ui,
+                        if compact_summary {
+                            format!("{selection_count}個を選択中")
+                        } else {
+                            self.canvas.selection_summary(self.document())
+                        },
+                        false,
+                    );
                 }
             });
         });
