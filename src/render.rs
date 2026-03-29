@@ -193,39 +193,142 @@ fn append_svg_stroke(svg: &mut String, stroke: &Stroke, skipped_eraser: &mut boo
         return;
     }
 
-    let color = stroke.tool.styled_color(stroke.color);
-    let width = stroke.effective_width();
-    match stroke.points.as_slice() {
+    let passes = svg_stroke_export_passes(stroke);
+    let points = simplify_stroke_points_for_svg(&stroke.points, stroke.effective_width());
+    match points.as_slice() {
         [] => {}
         [point] => {
-            writeln!(
-                svg,
-                r#"<circle cx="{}" cy="{}" r="{}" fill="{}" fill-opacity="{}" />"#,
-                svg_scalar(point.x),
-                svg_scalar(point.y),
-                svg_scalar((width * 0.5).max(0.5)),
-                svg_rgb(color),
-                svg_opacity(color),
-            )
-            .expect("write into String should succeed");
-        }
-        [first, rest @ ..] => {
-            let mut data = format!("M {} {}", svg_scalar(first.x), svg_scalar(first.y));
-            for point in rest {
-                write!(data, " L {} {}", svg_scalar(point.x), svg_scalar(point.y))
-                    .expect("write into String should succeed");
+            for pass in passes {
+                writeln!(
+                    svg,
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}" fill-opacity="{}" />"#,
+                    svg_scalar(point.x),
+                    svg_scalar(point.y),
+                    svg_scalar((pass.width * 0.5).max(0.5)),
+                    svg_rgb(pass.color),
+                    svg_opacity(pass.color),
+                )
+                .expect("write into String should succeed");
             }
-            writeln!(
-                svg,
-                r#"<path d="{}" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" />"#,
-                data,
-                svg_rgb(color),
-                svg_opacity(color),
-                svg_scalar(width),
-            )
-            .expect("write into String should succeed");
+        }
+        [..] => {
+            let data = stroke_points_to_svg_path_data(&points);
+            for pass in passes {
+                writeln!(
+                    svg,
+                    r#"<path d="{}" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" />"#,
+                    data,
+                    svg_rgb(pass.color),
+                    svg_opacity(pass.color),
+                    svg_scalar(pass.width),
+                )
+                .expect("write into String should succeed");
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SvgStrokePass {
+    color: RgbaColor,
+    width: f32,
+}
+
+fn svg_stroke_export_passes(stroke: &Stroke) -> Vec<SvgStrokePass> {
+    let base_color = stroke.tool.styled_color(stroke.color);
+    let base_width = stroke.effective_width();
+
+    match stroke.tool {
+        ToolKind::Brush => vec![SvgStrokePass {
+            color: base_color,
+            width: base_width,
+        }],
+        ToolKind::Pencil => vec![
+            SvgStrokePass {
+                color: base_color,
+                width: (base_width * 0.92).max(0.9),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.38),
+                width: (base_width * 0.46).max(0.75),
+            },
+        ],
+        ToolKind::Marker => vec![
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.72),
+                width: (base_width * 1.18).max(1.0),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.94),
+                width: (base_width * 0.84).max(0.9),
+            },
+        ],
+        ToolKind::Eraser => Vec::new(),
+    }
+}
+
+fn simplify_stroke_points_for_svg(points: &[PaintPoint], width: f32) -> Vec<PaintPoint> {
+    let Some((&first, rest)) = points.split_first() else {
+        return Vec::new();
+    };
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+
+    let min_step = (width * 0.18).clamp(0.75, 3.5);
+    let mut simplified = Vec::with_capacity(points.len());
+    simplified.push(first);
+
+    for &point in rest.iter().take(rest.len().saturating_sub(1)) {
+        if point.distance_to(*simplified.last().expect("first point exists")) >= min_step {
+            simplified.push(point);
+        }
+    }
+
+    let last = *points.last().expect("split_first guarantees one point");
+    if simplified.last().copied() != Some(last) {
+        simplified.push(last);
+    }
+    simplified
+}
+
+fn stroke_points_to_svg_path_data(points: &[PaintPoint]) -> String {
+    let Some((first, _)) = points.split_first() else {
+        return String::new();
+    };
+    if points.len() == 2 {
+        return points_to_path_data(points, false);
+    }
+
+    let mut data = format!("M {} {}", svg_scalar(first.x), svg_scalar(first.y));
+    for window in points[1..].windows(2) {
+        let control = window[0];
+        let end = midpoint(control, window[1]);
+        write!(
+            data,
+            " Q {} {} {} {}",
+            svg_scalar(control.x),
+            svg_scalar(control.y),
+            svg_scalar(end.x),
+            svg_scalar(end.y),
+        )
+        .expect("write into String should succeed");
+    }
+    let last = points[points.len() - 1];
+    write!(
+        data,
+        " Q {} {} {} {}",
+        svg_scalar(last.x),
+        svg_scalar(last.y),
+        svg_scalar(last.x),
+        svg_scalar(last.y),
+    )
+    .expect("write into String should succeed");
+    data
+}
+
+fn midpoint(left: PaintPoint, right: PaintPoint) -> PaintPoint {
+    PaintPoint::new((left.x + right.x) * 0.5, (left.y + right.y) * 0.5)
 }
 
 fn append_svg_shape(svg: &mut String, shape: &ShapeElement) {
@@ -605,7 +708,7 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{
         RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
-        render_document_png, render_document_svg, sample_document_color,
+        render_document_png, render_document_svg, sample_document_color, svg_stroke_export_passes,
     };
     use crate::model::{
         CanvasSize, FillElement, FillSpan, GroupElement, GuideAxis, PaintDocument, PaintElement,
@@ -967,6 +1070,47 @@ mod tests {
 
         assert!(svg.contains("stroke=\"#dc4040\""));
         assert!(!svg.contains("stroke=\"#4060dc\""));
+    }
+
+    #[test]
+    fn svg_export_smooths_freehand_stroke_into_quadratic_path() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(64.0, 64.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::new(32, 80, 220, 255), 6.0);
+        stroke.push_point(PaintPoint::new(6.0, 18.0));
+        stroke.push_point(PaintPoint::new(16.0, 24.0));
+        stroke.push_point(PaintPoint::new(28.0, 16.0));
+        stroke.push_point(PaintPoint::new(40.0, 28.0));
+        stroke.push_point(PaintPoint::new(56.0, 20.0));
+        document.push_stroke(stroke);
+
+        let svg = String::from_utf8(render_document_svg(&document).expect("svg export"))
+            .expect("svg should be utf-8");
+
+        assert!(svg.contains(r#"<path d="M 6 18 Q 16 24"#));
+        assert!(svg.contains(" Q "));
+    }
+
+    #[test]
+    fn svg_export_reflects_brush_kinds_with_light_pass_differences() {
+        let pencil = svg_stroke_export_passes(&Stroke::new(
+            ToolKind::Pencil,
+            RgbaColor::new(40, 60, 80, 255),
+            10.0,
+        ));
+        let marker = svg_stroke_export_passes(&Stroke::new(
+            ToolKind::Marker,
+            RgbaColor::new(40, 60, 80, 255),
+            10.0,
+        ));
+
+        assert_eq!(pencil.len(), 2);
+        assert_eq!(marker.len(), 2);
+        assert!(pencil[0].width < marker[0].width);
+        assert!(marker[0].color.a < pencil[0].color.a);
     }
 
     #[test]
