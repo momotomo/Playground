@@ -452,27 +452,80 @@ fn append_svg_fill(svg: &mut String, fill: &FillElement) {
     }
 
     // バケツ塗り結果は PNG 向けの見た目を優先して内部では scanline spans を持つため、
-    // SVG では 1px 高の矩形列へ素直に落として安全側で持ち出します。
+    // SVG では同じ見た目を保ちやすい矩形 path へまとめて安全側で持ち出します。
+    let rects = svg_fill_rects(fill);
+    if rects.is_empty() {
+        return;
+    }
+    let data = svg_fill_rects_to_path_data(&rects);
     let fill_opacity = svg_opacity(fill.color);
     let fill_rgb = svg_rgb(fill.color);
-    svg.push_str("<g data-fill=\"bucket\">\n");
-    for span in &fill.spans {
-        let width = span.width();
-        if width == 0 {
+    writeln!(
+        svg,
+        r#"<path data-fill="bucket" d="{}" fill="{}" fill-opacity="{}" stroke="none" shape-rendering="crispEdges" />"#,
+        data,
+        fill_rgb,
+        fill_opacity,
+    )
+    .expect("write into String should succeed");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SvgFillRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn svg_fill_rects(fill: &FillElement) -> Vec<SvgFillRect> {
+    let mut spans = fill.spans.to_vec();
+    spans.sort_by_key(|span| (span.y, span.x_start, span.x_end));
+
+    let mut rects: Vec<SvgFillRect> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let width = span.width() as f32;
+        if width <= 0.0 {
             continue;
         }
-        writeln!(
-            svg,
-            r#"<rect x="{}" y="{}" width="{}" height="1" fill="{}" fill-opacity="{}" stroke="none" />"#,
-            svg_scalar(fill.origin.x + span.x_start as f32),
-            svg_scalar(fill.origin.y + span.y as f32),
-            svg_scalar(width as f32),
-            fill_rgb,
-            fill_opacity,
+
+        let x = fill.origin.x + span.x_start as f32;
+        let y = fill.origin.y + span.y as f32;
+        if let Some(last) = rects.last_mut()
+            && (last.x - x).abs() <= f32::EPSILON
+            && (last.width - width).abs() <= f32::EPSILON
+            && (last.y + last.height - y).abs() <= f32::EPSILON
+        {
+            last.height += 1.0;
+            continue;
+        }
+
+        rects.push(SvgFillRect {
+            x,
+            y,
+            width,
+            height: 1.0,
+        });
+    }
+
+    rects
+}
+
+fn svg_fill_rects_to_path_data(rects: &[SvgFillRect]) -> String {
+    let mut data = String::new();
+    for rect in rects {
+        write!(
+            data,
+            "M {} {} h {} v {} h -{} Z ",
+            svg_scalar(rect.x),
+            svg_scalar(rect.y),
+            svg_scalar(rect.width),
+            svg_scalar(rect.height),
+            svg_scalar(rect.width),
         )
         .expect("write into String should succeed");
     }
-    svg.push_str("</g>\n");
+    data.trim_end().to_owned()
 }
 
 fn points_to_path_data(points: &[PaintPoint], close: bool) -> String {
@@ -768,7 +821,8 @@ mod tests {
     use super::{
         RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
         render_document_png, render_document_svg, sample_document_color,
-        simplify_stroke_points_for_svg, svg_stroke_export_passes,
+        simplify_stroke_points_for_svg, svg_fill_rects, svg_fill_rects_to_path_data,
+        svg_stroke_export_passes,
     };
     use crate::model::{
         CanvasSize, FillElement, FillSpan, GroupElement, GuideAxis, PaintDocument, PaintElement,
@@ -1068,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn svg_export_serializes_bucket_fill_as_scanline_rects() {
+    fn svg_export_serializes_bucket_fill_as_compact_path() {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(32.0, 32.0),
             background: RgbaColor::white(),
@@ -1095,8 +1149,41 @@ mod tests {
             .expect("svg should be utf-8");
 
         assert!(svg.contains(r#"data-fill="bucket""#));
-        assert!(svg.contains(r#"<rect x="6" y="7" width="4" height="1""#));
+        assert!(svg.contains(r#"<path data-fill="bucket" d="M 6 7 h 4 v 1 h -4 Z"#));
         assert!(svg.contains(r#"fill-opacity="0.7059""#));
+    }
+
+    #[test]
+    fn svg_export_merges_bucket_fill_runs_with_same_width() {
+        let fill = FillElement::new(
+            RgbaColor::from_rgba(48, 140, 220, 180),
+            PaintPoint::new(6.0, 7.0),
+            vec![
+                FillSpan {
+                    y: 0,
+                    x_start: 0,
+                    x_end: 4,
+                },
+                FillSpan {
+                    y: 1,
+                    x_start: 0,
+                    x_end: 4,
+                },
+                FillSpan {
+                    y: 2,
+                    x_start: 2,
+                    x_end: 5,
+                },
+            ],
+        );
+
+        let rects = svg_fill_rects(&fill);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].height, 2.0);
+
+        let data = svg_fill_rects_to_path_data(&rects);
+        assert!(data.contains("M 6 7 h 4 v 2 h -4 Z"));
+        assert!(data.contains("M 8 9 h 3 v 1 h -3 Z"));
     }
 
     #[test]
