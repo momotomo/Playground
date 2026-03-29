@@ -15,7 +15,8 @@ use crate::model::{
     PaintElement, RgbaColor, ShapeElement, ShapeKind, StackOrderCommand,
 };
 use crate::storage::{
-    ExportedImage, LoadedDocument, PngExportKind, SavedDocument, StorageError, StorageFacade,
+    ExportedImage, ExportedVectorGraphic, LoadedDocument, PngExportKind, SavedDocument,
+    StorageError, StorageFacade,
 };
 
 const MIN_BRUSH_WIDTH: f32 = 1.0;
@@ -161,6 +162,7 @@ enum WebStorageResult {
         image: ExportedImage,
         kind: PngExportKind,
     },
+    ExportedSvg(ExportedVectorGraphic),
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -676,6 +678,7 @@ impl PaintApp {
         ui.label(RichText::new("ドキュメント").strong());
         ui.label(self.document_name.as_str());
         ui.small(dirty_suffix);
+        ui.small("PNG: 見たまま共有 · SVG: 図形や線の再利用");
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
@@ -1277,16 +1280,16 @@ impl PaintApp {
             ui.label(RichText::new("保存と書き出し").strong());
             let response = help_icon_button(
                 ui,
-                "JSON保存は再編集用、PNG書き出しは共有用です。上部バーから使えます。",
+                "JSON保存は再編集用、PNG書き出しは見たまま共有、透過PNGは素材、SVG書き出しは図形や線の再利用向けです。上部バーから使えます。",
             );
             if response.clicked() {
                 self.set_info(
-                    "JSON保存は続きから再編集、PNG書き出しは画像として共有したいときに使います。",
+                    "JSON保存は続きから再編集、PNG書き出しは見たまま共有、SVG書き出しは図形や線の再利用に向いています。",
                 );
             }
         });
-        ui.small("JSONは再編集用、PNGは共有用です。");
-        ui.small("PNG書き出しは背景あり、透過PNGは透明背景で保存します。");
+        ui.small("JSONは再編集用、PNGは見たまま共有用、SVGは拡大や再利用向けです。");
+        ui.small("PNG書き出しは背景あり、透過PNGは透明背景、SVGは図形と線を中心に書き出します。");
         ui.small(self.storage.storage_strategy_summary());
     }
 
@@ -1906,6 +1909,14 @@ impl PaintApp {
                     self.export_png(ctx, PngExportKind::Transparent);
                 }
 
+                if ui
+                    .add_enabled(can_file_io, egui::Button::new("SVG書き出し"))
+                    .on_hover_text("図形や線を拡大しやすい SVG として書き出します。")
+                    .clicked()
+                {
+                    self.export_svg(ctx);
+                }
+
                 ui.separator();
 
                 ui.add_enabled_ui(can_align, |ui| {
@@ -2057,11 +2068,11 @@ impl PaintApp {
                 ui.small("色: スポイト、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
-                ui.small("保存: JSON保存は再編集用、PNG書き出しは共有用、透過PNGは素材用です。");
+                ui.small("保存: JSON保存は再編集用、PNGは共有用、透過PNGは素材用、SVGは再利用向けです。");
                 ui.small("レイヤー: 右側で現在のレイヤー、表示、ロックを切り替えます。");
                 ui.small("左パネル: 下までスクロールすると配置補助や保存メモが見られます。");
                 #[cfg(target_arch = "wasm32")]
-                ui.small("Web版: JSON保存 と PNG書き出し / 透過PNG はダウンロード、JSONを開く はファイル選択です。");
+                ui.small("Web版: JSON保存 と PNG / 透過PNG / SVG はダウンロード、JSONを開く はファイル選択です。");
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("ショートカット").strong());
@@ -2722,12 +2733,20 @@ impl PaintApp {
         });
     }
 
+    fn finish_svg_export(&mut self, exported: ExportedVectorGraphic) {
+        self.set_info(format!(
+            "SVG を {} として書き出しました。図形や線は再利用向けに出力し、ブラシ質感や消しゴムは簡略化されることがあります。",
+            exported.file_name
+        ));
+    }
+
     fn storage_action_title(action: &'static str) -> &'static str {
         match action {
             "save" => "JSON保存",
             "load" => "JSONを開く",
             "export" => "PNG書き出し",
             "export-transparent" => "透過PNG",
+            "export-svg" => "SVG書き出し",
             _ => "ファイル操作",
         }
     }
@@ -2741,6 +2760,7 @@ impl PaintApp {
             "load" => "ブラウザのファイル選択を開きました。.paint.json を選んでください。",
             "export" => "ブラウザで PNG ダウンロードを準備しています...",
             "export-transparent" => "ブラウザで透過PNGダウンロードを準備しています...",
+            "export-svg" => "ブラウザで SVG ダウンロードを準備しています...",
             _ => "ブラウザのファイル操作を待っています...",
         }
     }
@@ -2902,6 +2922,43 @@ impl PaintApp {
         }
     }
 
+    fn export_svg(&mut self, _ctx: &egui::Context) {
+        let suggested_name = self.storage.suggested_svg_file_name(&self.document_name);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let result = self
+                .storage
+                .export_svg_via_dialog(self.document(), &suggested_name)
+                .map(|exported| self.finish_svg_export(exported));
+            self.report_storage_result("export-svg", result);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let slot = Rc::new(RefCell::new(None));
+            let task_slot = slot.clone();
+            let storage = self.storage;
+            let document = self.document().clone();
+            let ctx = _ctx.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = storage
+                    .export_svg_via_dialog(&document, &suggested_name)
+                    .await
+                    .map(WebStorageResult::ExportedSvg);
+                *task_slot.borrow_mut() = Some(result);
+                ctx.request_repaint();
+            });
+
+            self.pending_web_task = Some(PendingWebStorageTask {
+                label: "export-svg",
+                slot,
+            });
+            self.set_info(Self::storage_pending_message("export-svg"));
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let has_canvas_interaction = self.canvas.has_active_interaction();
 
@@ -3029,6 +3086,7 @@ impl PaintApp {
                 Ok(WebStorageResult::Saved(saved)) => self.finish_save(saved),
                 Ok(WebStorageResult::Loaded(loaded)) => self.finish_load(loaded),
                 Ok(WebStorageResult::Exported { image, kind }) => self.finish_export(image, kind),
+                Ok(WebStorageResult::ExportedSvg(exported)) => self.finish_svg_export(exported),
                 Err(error) => match &error {
                     StorageError::Cancelled => {
                         self.set_info(Self::storage_error_message(task.label, &error));
@@ -3314,8 +3372,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
         },
         _ => TutorialStepContent {
             title: "保存方法は 2 つです",
-            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は画像共有用、透過PNG は素材向けです。迷ったらヘルプからもう一度見直せます。",
-            action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」「透過PNG」を覚えておけば、ひとまず困りません。",
+            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は見たままの画像共有用、透過PNG は素材向け、SVG書き出し は図形や線の再利用向けです。迷ったらヘルプからもう一度見直せます。",
+            action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」「透過PNG」「SVG書き出し」を覚えておけば、ひとまず困りません。",
         },
     }
 }

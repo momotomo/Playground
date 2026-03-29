@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use crate::model::{PaintDocument, PaintElement, Stroke};
-use crate::render::{RasterBackground, render_document_png_with_background};
+use crate::render::{RasterBackground, render_document_png_with_background, render_document_svg};
 use serde::{Deserialize, Serialize};
 
 const EDITABLE_FORMAT_ID: &str = "rust-paint-foundation/document";
@@ -14,14 +14,17 @@ const EARLIER_EDITABLE_FORMAT_VERSION: u32 = 2;
 const LEGACY_EDITABLE_FORMAT_VERSION: u32 = 1;
 const DEFAULT_FILE_NAME: &str = "untitled.paint.json";
 const DEFAULT_PNG_FILE_NAME: &str = "untitled.png";
+const DEFAULT_SVG_FILE_NAME: &str = "untitled.svg";
 const JSON_EXTENSION: &str = "json";
 const PNG_EXTENSION: &str = "png";
+const SVG_EXTENSION: &str = "svg";
 const TRANSPARENT_PNG_SUFFIX: &str = "-transparent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageFeature {
     WorkingDocument,
     PngExport,
+    SvgExport,
 }
 
 impl StorageFeature {
@@ -29,6 +32,7 @@ impl StorageFeature {
         match self {
             Self::WorkingDocument => "再編集用のローカル保存形式",
             Self::PngExport => "PNG書き出し",
+            Self::SvgExport => "SVG書き出し",
         }
     }
 }
@@ -101,9 +105,12 @@ pub struct SavedDocument {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExportedImage {
+pub struct ExportedAsset {
     pub file_name: String,
 }
+
+pub type ExportedImage = ExportedAsset;
+pub type ExportedVectorGraphic = ExportedAsset;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedDocument {
@@ -170,6 +177,10 @@ impl StorageFacade {
             .map_err(|error| StorageError::Render(error.to_string()))
     }
 
+    pub fn export_svg_bytes(&self, document: &PaintDocument) -> Result<Vec<u8>, StorageError> {
+        render_document_svg(document).map_err(|error| StorageError::Render(error.to_string()))
+    }
+
     pub const fn suggested_file_name(&self) -> &'static str {
         DEFAULT_FILE_NAME
     }
@@ -189,16 +200,20 @@ impl StorageFacade {
         }
     }
 
+    pub fn suggested_svg_file_name(&self, document_name: &str) -> String {
+        to_svg_file_name(document_name)
+    }
+
     pub const fn editable_format_label(&self) -> &'static str {
         "再編集用 JSON 形式 v4 (.paint.json)"
     }
 
     pub const fn planned_export_format(&self) -> &'static str {
-        "PNG書き出し (.png)"
+        "PNG / SVG 書き出し (.png / .svg)"
     }
 
     pub const fn storage_strategy_summary(&self) -> &'static str {
-        "native はファイルダイアログ、web はブラウザの保存 / 読込を使います。"
+        "native はファイルダイアログ、web はブラウザの保存 / 読込 / ダウンロードを使います。"
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -236,7 +251,22 @@ impl StorageFacade {
         let path = ensure_png_file_name(path.as_ref().to_path_buf());
         std::fs::write(&path, bytes).map_err(|error| StorageError::Io(error.to_string()))?;
 
-        Ok(ExportedImage {
+        Ok(ExportedAsset {
+            file_name: file_name_from_path(&path),
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_svg_to_path<P: AsRef<Path>>(
+        &self,
+        document: &PaintDocument,
+        path: P,
+    ) -> Result<ExportedVectorGraphic, StorageError> {
+        let bytes = self.export_svg_bytes(document)?;
+        let path = ensure_svg_file_name(path.as_ref().to_path_buf());
+        std::fs::write(&path, bytes).map_err(|error| StorageError::Io(error.to_string()))?;
+
+        Ok(ExportedAsset {
             file_name: file_name_from_path(&path),
         })
     }
@@ -296,6 +326,22 @@ impl StorageFacade {
             .ok_or(StorageError::Cancelled)?;
 
         self.export_png_to_path_with_kind(document, path, kind)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_svg_via_dialog(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+    ) -> Result<ExportedVectorGraphic, StorageError> {
+        let path = rfd::FileDialog::new()
+            .set_title("SVGを書き出し")
+            .set_file_name(suggested_name)
+            .add_filter("SVG画像", &[SVG_EXTENSION])
+            .save_file()
+            .ok_or(StorageError::Cancelled)?;
+
+        self.export_svg_to_path(document, path)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -363,8 +409,32 @@ impl StorageFacade {
             .await
             .map_err(|error| StorageError::Io(error.to_string()))?;
 
-        Ok(ExportedImage {
+        Ok(ExportedAsset {
             file_name: normalize_file_name(file.file_name(), DEFAULT_PNG_FILE_NAME),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn export_svg_via_dialog(
+        &self,
+        document: &PaintDocument,
+        suggested_name: &str,
+    ) -> Result<ExportedVectorGraphic, StorageError> {
+        let bytes = self.export_svg_bytes(document)?;
+        let file = rfd::AsyncFileDialog::new()
+            .set_title("SVGを書き出し")
+            .set_file_name(suggested_name)
+            .add_filter("SVG画像", &[SVG_EXTENSION])
+            .save_file()
+            .await
+            .ok_or(StorageError::Cancelled)?;
+
+        file.write(&bytes)
+            .await
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+
+        Ok(ExportedAsset {
+            file_name: normalize_file_name(file.file_name(), DEFAULT_SVG_FILE_NAME),
         })
     }
 
@@ -494,6 +564,15 @@ fn ensure_png_file_name(path: PathBuf) -> PathBuf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_svg_file_name(path: PathBuf) -> PathBuf {
+    if file_name_from_path(&path).ends_with(".svg") {
+        path
+    } else {
+        path.with_extension(SVG_EXTENSION)
+    }
+}
+
 fn to_png_file_name(document_name: &str) -> String {
     if let Some(stripped) = document_name.strip_suffix(".paint.json") {
         format!("{stripped}.png")
@@ -514,6 +593,22 @@ fn to_transparent_png_file_name(document_name: &str) -> String {
         format!("{stripped}{TRANSPARENT_PNG_SUFFIX}.png")
     } else {
         format!("{base}{TRANSPARENT_PNG_SUFFIX}.png")
+    }
+}
+
+fn to_svg_file_name(document_name: &str) -> String {
+    if let Some(stripped) = document_name.strip_suffix(".paint.json") {
+        format!("{stripped}.svg")
+    } else if let Some(stripped) = document_name.strip_suffix(".json") {
+        format!("{stripped}.svg")
+    } else if let Some(stripped) = document_name.strip_suffix(".png") {
+        format!("{stripped}.svg")
+    } else if let Some(stripped) = document_name.strip_suffix(".svg") {
+        format!("{stripped}.svg")
+    } else if document_name.is_empty() {
+        DEFAULT_SVG_FILE_NAME.to_owned()
+    } else {
+        format!("{document_name}.svg")
     }
 }
 
@@ -888,6 +983,30 @@ mod tests {
         let background = pixmap.pixel(0, 0).expect("background pixel");
 
         assert_eq!(background.alpha(), 0);
+    }
+
+    #[test]
+    fn export_svg_bytes_contains_vector_markup() {
+        let storage = StorageFacade::new();
+        let bytes = storage
+            .export_svg_bytes(&sample_document())
+            .expect("svg export should succeed");
+        let svg = String::from_utf8(bytes).expect("svg should be utf-8");
+
+        assert!(svg.starts_with("<?xml version=\"1.0\""));
+        assert!(svg.contains("<svg "));
+        assert!(svg.contains("stroke="));
+    }
+
+    #[test]
+    fn exported_svg_file_name_tracks_document_name() {
+        let storage = StorageFacade::new();
+
+        assert_eq!(
+            storage.suggested_svg_file_name("untitled.paint.json"),
+            "untitled.svg"
+        );
+        assert_eq!(storage.suggested_svg_file_name("sketch.png"), "sketch.svg");
     }
 
     #[test]

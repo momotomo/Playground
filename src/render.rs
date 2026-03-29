@@ -1,11 +1,11 @@
 use std::error::Error;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Write};
 
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke as TinyStroke, Transform};
 
 use crate::model::{
-    GroupElement, PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement,
-    ShapeKind, Stroke, ToolKind,
+    GroupElement, PaintDocument, PaintElement, PaintLayer, PaintPoint, PaintVector, RgbaColor,
+    ShapeElement, ShapeKind, Stroke, ToolKind,
 };
 
 // Raster export options stay separate from document traversal so future SVG export can
@@ -72,6 +72,37 @@ pub fn render_document_png(document: &PaintDocument) -> Result<Vec<u8>, RenderEr
     render_document_png_with_background(document, RasterBackground::Opaque)
 }
 
+pub fn render_document_svg(document: &PaintDocument) -> Result<Vec<u8>, RenderError> {
+    let (width, height) = raster_dimensions(document)?;
+    let mut svg = String::new();
+    writeln!(
+        svg,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>"#
+    )
+    .expect("write into String should succeed");
+    writeln!(
+        svg,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">"#
+    )
+    .expect("write into String should succeed");
+
+    let mut skipped_eraser = false;
+    for layer in document.visible_layers() {
+        append_svg_layer(&mut svg, layer, &mut skipped_eraser);
+    }
+
+    if skipped_eraser {
+        writeln!(
+            svg,
+            "<!-- 消しゴムストロークは SVG では簡略化せず省略しています。PNG は見たまま出力向けです。 -->"
+        )
+        .expect("write into String should succeed");
+    }
+
+    svg.push_str("</svg>\n");
+    Ok(svg.into_bytes())
+}
+
 pub fn sample_document_color(document: &PaintDocument, point: PaintPoint) -> Option<RgbaColor> {
     let (width, height) = raster_dimensions(document).ok()?;
     if point.x < 0.0 || point.y < 0.0 || point.x >= width as f32 || point.y >= height as f32 {
@@ -125,6 +156,169 @@ fn render_group(
     for element in &group.elements {
         render_element(pixmap, element, background, raster_background);
     }
+}
+
+fn append_svg_layer(svg: &mut String, layer: &PaintLayer, skipped_eraser: &mut bool) {
+    writeln!(svg, r#"<g data-layer="{}">"#, escape_svg_attr(&layer.name))
+        .expect("write into String should succeed");
+    for element in &layer.elements {
+        append_svg_element(svg, element, skipped_eraser);
+    }
+    svg.push_str("</g>\n");
+}
+
+fn append_svg_element(svg: &mut String, element: &PaintElement, skipped_eraser: &mut bool) {
+    match element {
+        PaintElement::Stroke(stroke) => append_svg_stroke(svg, stroke, skipped_eraser),
+        PaintElement::Shape(shape) => append_svg_shape(svg, shape),
+        PaintElement::Group(group) => append_svg_group(svg, group, skipped_eraser),
+    }
+}
+
+fn append_svg_group(svg: &mut String, group: &GroupElement, skipped_eraser: &mut bool) {
+    svg.push_str("<g>\n");
+    for element in &group.elements {
+        append_svg_element(svg, element, skipped_eraser);
+    }
+    svg.push_str("</g>\n");
+}
+
+fn append_svg_stroke(svg: &mut String, stroke: &Stroke, skipped_eraser: &mut bool) {
+    if matches!(stroke.tool, ToolKind::Eraser) {
+        *skipped_eraser = true;
+        return;
+    }
+
+    let color = stroke.tool.styled_color(stroke.color);
+    let width = stroke.effective_width();
+    match stroke.points.as_slice() {
+        [] => {}
+        [point] => {
+            writeln!(
+                svg,
+                r#"<circle cx="{}" cy="{}" r="{}" fill="{}" fill-opacity="{}" />"#,
+                svg_scalar(point.x),
+                svg_scalar(point.y),
+                svg_scalar((width * 0.5).max(0.5)),
+                svg_rgb(color),
+                svg_opacity(color),
+            )
+            .expect("write into String should succeed");
+        }
+        [first, rest @ ..] => {
+            let mut data = format!("M {} {}", svg_scalar(first.x), svg_scalar(first.y));
+            for point in rest {
+                write!(data, " L {} {}", svg_scalar(point.x), svg_scalar(point.y))
+                    .expect("write into String should succeed");
+            }
+            writeln!(
+                svg,
+                r#"<path d="{}" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" />"#,
+                data,
+                svg_rgb(color),
+                svg_opacity(color),
+                svg_scalar(width),
+            )
+            .expect("write into String should succeed");
+        }
+    }
+}
+
+fn append_svg_shape(svg: &mut String, shape: &ShapeElement) {
+    let style = shape_render_style(shape);
+    match shape.kind {
+        ShapeKind::Line => {
+            writeln!(
+                svg,
+                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" fill="none" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" />"#,
+                svg_scalar(shape.start.x),
+                svg_scalar(shape.start.y),
+                svg_scalar(shape.end.x),
+                svg_scalar(shape.end.y),
+                svg_rgb(style.stroke_color),
+                svg_opacity(style.stroke_color),
+                svg_scalar(style.stroke_width),
+            )
+            .expect("write into String should succeed");
+        }
+        ShapeKind::Rectangle => {
+            append_svg_closed_shape(
+                svg,
+                &points_to_path_data(&shape.rotated_box_corners(), true),
+                style,
+            );
+        }
+        ShapeKind::Ellipse => {
+            let points = ellipse_outline_points(shape);
+            if !points.is_empty() {
+                append_svg_closed_shape(svg, &points_to_path_data(&points, true), style);
+            }
+        }
+    }
+}
+
+fn append_svg_closed_shape(svg: &mut String, d: &str, style: ShapeRenderStyle) {
+    let fill = style.fill_color.unwrap_or(RgbaColor::from_rgba(0, 0, 0, 0));
+    writeln!(
+        svg,
+        r#"<path d="{}" fill="{}" fill-opacity="{}" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linejoin="round" />"#,
+        d,
+        if style.fill_color.is_some() {
+            svg_rgb(fill)
+        } else {
+            "none".to_owned()
+        },
+        if style.fill_color.is_some() {
+            svg_opacity(fill)
+        } else {
+            "0".to_owned()
+        },
+        svg_rgb(style.stroke_color),
+        svg_opacity(style.stroke_color),
+        svg_scalar(style.stroke_width),
+    )
+    .expect("write into String should succeed");
+}
+
+fn points_to_path_data(points: &[PaintPoint], close: bool) -> String {
+    let Some((first, rest)) = points.split_first() else {
+        return String::new();
+    };
+
+    let mut data = format!("M {} {}", svg_scalar(first.x), svg_scalar(first.y));
+    for point in rest {
+        write!(data, " L {} {}", svg_scalar(point.x), svg_scalar(point.y))
+            .expect("write into String should succeed");
+    }
+    if close {
+        data.push_str(" Z");
+    }
+    data
+}
+
+fn svg_rgb(color: RgbaColor) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn svg_opacity(color: RgbaColor) -> String {
+    format!("{:.4}", (color.a as f32 / 255.0).clamp(0.0, 1.0))
+}
+
+fn svg_scalar(value: f32) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    if rounded.fract().abs() < 0.005 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.2}")
+    }
+}
+
+fn escape_svg_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn render_stroke(
@@ -300,20 +494,24 @@ fn polygon_path(points: &[PaintPoint]) -> Option<tiny_skia::Path> {
 }
 
 fn ellipse_path(shape: &ShapeElement) -> Option<tiny_skia::Path> {
+    let points = ellipse_outline_points(shape);
+    polygon_path(&points)
+}
+
+fn ellipse_outline_points(shape: &ShapeElement) -> Vec<PaintPoint> {
     let center = shape.center();
     let half = shape.half_extents();
     if half.dx <= f32::EPSILON || half.dy <= f32::EPSILON {
-        return None;
+        return Vec::new();
     }
 
-    let points: Vec<PaintPoint> = (0..96)
+    (0..96)
         .map(|step| {
             let t = step as f32 / 96.0 * std::f32::consts::TAU;
             let local = PaintVector::new(half.dx * t.cos(), half.dy * t.sin());
             center.offset(rotate_vector(local, shape.rotation_radians))
         })
-        .collect();
-    polygon_path(&points)
+        .collect()
 }
 
 fn stroke_style(width: f32) -> TinyStroke {
@@ -342,7 +540,7 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{
         RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
-        render_document_png, sample_document_color,
+        render_document_png, render_document_svg, sample_document_color,
     };
     use crate::model::{
         CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
@@ -620,5 +818,76 @@ mod tests {
 
         assert!(pixel.alpha() > 0);
         assert!(pixel.alpha() < 255);
+    }
+
+    #[test]
+    fn svg_export_contains_shape_fill_and_line_geometry() {
+        let mut document = sample_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::new(32, 80, 220, 255),
+            4.0,
+            PaintPoint::new(6.0, 48.0),
+            PaintPoint::new(58.0, 58.0),
+        ));
+
+        let svg = String::from_utf8(render_document_svg(&document).expect("svg export"))
+            .expect("svg should be utf-8");
+
+        assert!(svg.contains(r#"<line x1="6" y1="48" x2="58" y2="58""#));
+        assert!(svg.contains("fill=\"#ffc440\""));
+        assert!(svg.contains("stroke=\"#dc4040\""));
+    }
+
+    #[test]
+    fn svg_export_skips_hidden_layers() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(32.0, 32.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(220, 64, 64, 255),
+            4.0,
+            PaintPoint::new(4.0, 4.0),
+            PaintPoint::new(28.0, 28.0),
+        ));
+        let (mut layered, hidden_id) = document.add_layer_document();
+        layered.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::new(64, 96, 220, 255),
+            4.0,
+            PaintPoint::new(6.0, 6.0),
+            PaintPoint::new(26.0, 26.0),
+        ));
+        layered = layered
+            .toggled_layer_visibility_document(hidden_id)
+            .expect("hide layer");
+
+        let svg = String::from_utf8(render_document_svg(&layered).expect("svg export"))
+            .expect("svg should be utf-8");
+
+        assert!(svg.contains("stroke=\"#dc4040\""));
+        assert!(!svg.contains("stroke=\"#4060dc\""));
+    }
+
+    #[test]
+    fn svg_export_omits_eraser_strokes_with_comment() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(32.0, 32.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        let mut stroke = Stroke::new(ToolKind::Eraser, RgbaColor::white(), 8.0);
+        stroke.push_point(PaintPoint::new(4.0, 16.0));
+        stroke.push_point(PaintPoint::new(28.0, 16.0));
+        document.push_stroke(stroke);
+
+        let svg = String::from_utf8(render_document_svg(&document).expect("svg export"))
+            .expect("svg should be utf-8");
+
+        assert!(svg.contains("消しゴムストロークは SVG では簡略化せず省略"));
+        assert!(!svg.contains("<path"));
     }
 }
