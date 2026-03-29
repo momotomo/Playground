@@ -374,6 +374,53 @@ impl ShapeStyleContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectionArrangeContext {
+    selection_count: usize,
+    can_reorder: bool,
+    can_align: bool,
+    can_distribute: bool,
+}
+
+impl SelectionArrangeContext {
+    fn from_state(selection_count: usize, has_canvas_interaction: bool) -> Self {
+        Self {
+            selection_count,
+            can_reorder: !has_canvas_interaction && selection_count >= 1,
+            can_align: !has_canvas_interaction && selection_count >= 2,
+            can_distribute: !has_canvas_interaction && selection_count >= 3,
+        }
+    }
+
+    fn show_panel(self) -> bool {
+        self.can_align
+    }
+
+    fn summary_chip_label(self, compact: bool) -> Option<String> {
+        if !self.show_panel() {
+            None
+        } else if self.can_distribute {
+            Some(if compact {
+                "整列・等間隔".to_owned()
+            } else {
+                "整列・等間隔・順序".to_owned()
+            })
+        } else if compact {
+            Some("整列・順序".to_owned())
+        } else {
+            Some("整列・重なり順".to_owned())
+        }
+    }
+
+    fn panel_status_label(self) -> String {
+        if self.can_distribute {
+            format!("{}個選択中 · 整列 / 等間隔", self.selection_count)
+        } else {
+            format!("{}個選択中 · 整列 / 順序", self.selection_count)
+        }
+    }
+}
+
 pub struct PaintApp {
     history: DocumentHistory,
     canvas: CanvasController,
@@ -894,6 +941,10 @@ impl PaintApp {
     fn show_tools(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 8.0;
         let shape_context = self.current_shape_style_context();
+        let arrange_context = SelectionArrangeContext::from_state(
+            self.canvas.selection_count(),
+            self.canvas.has_active_interaction(),
+        );
 
         ui.horizontal(|ui| {
             ui.heading("ツール");
@@ -932,6 +983,9 @@ impl PaintApp {
             ui.small(self.canvas.selection_summary(self.document()));
             if let Some(selection_context) = self.selection_layer_context() {
                 ui.small(selection_context);
+            }
+            if arrange_context.show_panel() {
+                ui.small(arrange_context.panel_status_label());
             }
             if let Some(shape_context) = shape_context {
                 if shape_context.is_selection_target() {
@@ -1045,6 +1099,11 @@ impl PaintApp {
         }
 
         ui.add_space(12.0);
+        if arrange_context.show_panel() {
+            self.show_selection_actions(ui, arrange_context);
+            ui.add_space(12.0);
+        }
+
         ui.label(RichText::new("描画ツール設定").strong());
         match self.active_tool {
             CanvasToolKind::Brush
@@ -1741,6 +1800,120 @@ impl PaintApp {
         ui.small("JSONは再編集用、PNGは見たまま共有用、SVGは拡大や再利用向けです。");
         ui.small("PNG書き出しは背景あり、透過PNGは透明背景、SVGは図形と線を中心に書き出します。");
         ui.small(self.storage.storage_strategy_summary());
+    }
+
+    fn show_selection_actions(&mut self, ui: &mut egui::Ui, context: SelectionArrangeContext) {
+        let selection_summary = self.canvas.selection_summary(self.document());
+        let align_button_width = ((ui.available_width() - 16.0) / 3.0).max(54.0);
+        let pair_button_width = ((ui.available_width() - 8.0) / 2.0).max(90.0);
+
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("整列と順序").strong());
+                layer_status_chip(ui, &selection_summary, true);
+                if context.can_distribute {
+                    summary_chip(ui, "整列・等間隔", false);
+                } else {
+                    summary_chip(ui, "整列できます", false);
+                }
+            });
+            ui.small("複数選択した要素をそろえたり、前後関係をまとめて整えられます。");
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("横位置").strong());
+            ui.horizontal_wrapped(|ui| {
+                for alignment in [
+                    AlignmentKind::Left,
+                    AlignmentKind::HorizontalCenter,
+                    AlignmentKind::Right,
+                ] {
+                    let response = ui
+                        .add_sized(
+                            [align_button_width, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new(arrangement_button_label(alignment)),
+                        )
+                        .on_hover_text(alignment.label());
+                    if response.clicked() {
+                        self.apply_alignment(alignment);
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("縦位置").strong());
+            ui.horizontal_wrapped(|ui| {
+                for alignment in [
+                    AlignmentKind::Top,
+                    AlignmentKind::VerticalCenter,
+                    AlignmentKind::Bottom,
+                ] {
+                    let response = ui
+                        .add_sized(
+                            [align_button_width, LAYER_ACTION_BUTTON_HEIGHT],
+                            egui::Button::new(arrangement_button_label(alignment)),
+                        )
+                        .on_hover_text(alignment.label());
+                    if response.clicked() {
+                        self.apply_alignment(alignment);
+                    }
+                }
+            });
+
+            if context.can_distribute {
+                ui.add_space(6.0);
+                ui.label(RichText::new("等間隔").strong());
+                ui.horizontal_wrapped(|ui| {
+                    for distribution in [DistributionKind::Horizontal, DistributionKind::Vertical] {
+                        let response = ui
+                            .add_sized(
+                                [pair_button_width, LAYER_ACTION_BUTTON_HEIGHT],
+                                egui::Button::new(distribution_button_label(distribution)),
+                            )
+                            .on_hover_text(distribution.label());
+                        if response.clicked() {
+                            self.apply_distribution(distribution);
+                        }
+                    }
+                });
+            }
+
+            if context.can_reorder {
+                ui.add_space(6.0);
+                ui.label(RichText::new("重なり順").strong());
+                ui.horizontal_wrapped(|ui| {
+                    for command in [
+                        StackOrderCommand::BringToFront,
+                        StackOrderCommand::BringForward,
+                    ] {
+                        let response = ui
+                            .add_sized(
+                                [pair_button_width, LAYER_ACTION_BUTTON_HEIGHT],
+                                egui::Button::new(stack_order_button_label(command)),
+                            )
+                            .on_hover_text(command.label());
+                        if response.clicked() {
+                            self.apply_stack_order(command);
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for command in [
+                        StackOrderCommand::SendBackward,
+                        StackOrderCommand::SendToBack,
+                    ] {
+                        let response = ui
+                            .add_sized(
+                                [pair_button_width, LAYER_ACTION_BUTTON_HEIGHT],
+                                egui::Button::new(stack_order_button_label(command)),
+                            )
+                            .on_hover_text(command.label());
+                        if response.clicked() {
+                            self.apply_stack_order(command);
+                        }
+                    }
+                });
+            }
+        });
     }
 
     fn show_canvas_aids(&mut self, ui: &mut egui::Ui) {
@@ -2559,6 +2732,13 @@ impl PaintApp {
                 }
                 if let Some(style_chip) = &multi_shape_style_chip {
                     summary_chip(ui, style_chip.clone(), false);
+                }
+                if self.canvas.current_operation_label().is_none() {
+                    let arrange_context =
+                        SelectionArrangeContext::from_state(selection_count, has_canvas_interaction);
+                    if let Some(arrange_chip) = arrange_context.summary_chip_label(compact_summary) {
+                        summary_chip(ui, arrange_chip, false);
+                    }
                 }
                 if self.canvas.current_operation_label().is_none() && selection_count > 0 {
                     summary_chip(
@@ -3858,6 +4038,33 @@ fn summary_chip(ui: &mut egui::Ui, text: impl Into<String>, accent: bool) {
     ui.label(text);
 }
 
+fn arrangement_button_label(alignment: AlignmentKind) -> &'static str {
+    match alignment {
+        AlignmentKind::Left => "左",
+        AlignmentKind::HorizontalCenter => "中央",
+        AlignmentKind::Right => "右",
+        AlignmentKind::Top => "上",
+        AlignmentKind::VerticalCenter => "中央",
+        AlignmentKind::Bottom => "下",
+    }
+}
+
+fn distribution_button_label(distribution: DistributionKind) -> &'static str {
+    match distribution {
+        DistributionKind::Horizontal => "横等間隔",
+        DistributionKind::Vertical => "縦等間隔",
+    }
+}
+
+fn stack_order_button_label(command: StackOrderCommand) -> &'static str {
+    match command {
+        StackOrderCommand::BringToFront => "最前面",
+        StackOrderCommand::BringForward => "前へ",
+        StackOrderCommand::SendBackward => "後ろへ",
+        StackOrderCommand::SendToBack => "最背面",
+    }
+}
+
 fn panel_widths_for_window(window_width: f32) -> (f32, f32) {
     if window_width < 980.0 {
         (198.0, 212.0)
@@ -3918,7 +4125,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, panel_widths_for_window,
+        CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, SelectionArrangeContext,
+        panel_widths_for_window,
     };
     use crate::fill::FillTolerancePreset;
     use crate::model::{
@@ -4275,6 +4483,34 @@ mod tests {
             app.status_message
                 .text
                 .contains("選択は新しいレイヤーに合わせて解除")
+        );
+    }
+
+    #[test]
+    fn selection_arrange_context_only_shows_panel_for_multi_selection() {
+        let single = SelectionArrangeContext::from_state(1, false);
+        assert!(!single.show_panel());
+        assert!(single.can_reorder);
+        assert!(!single.can_align);
+
+        let multi = SelectionArrangeContext::from_state(2, false);
+        assert!(multi.show_panel());
+        assert!(multi.can_align);
+        assert!(!multi.can_distribute);
+    }
+
+    #[test]
+    fn selection_arrange_context_summary_prefers_distribution_for_three_items() {
+        let two = SelectionArrangeContext::from_state(2, false);
+        let three = SelectionArrangeContext::from_state(3, false);
+
+        assert_eq!(
+            two.summary_chip_label(false).as_deref(),
+            Some("整列・重なり順")
+        );
+        assert_eq!(
+            three.summary_chip_label(false).as_deref(),
+            Some("整列・等間隔・順序")
         );
     }
 
