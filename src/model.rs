@@ -337,8 +337,8 @@ impl ToolKind {
     pub const fn width_scale(self) -> f32 {
         match self {
             Self::Brush => 1.0,
-            Self::Pencil => 0.85,
-            Self::Marker => 1.35,
+            Self::Pencil => 0.8,
+            Self::Marker => 1.45,
             Self::Eraser => 1.0,
         }
     }
@@ -346,8 +346,8 @@ impl ToolKind {
     pub const fn alpha_scale(self) -> f32 {
         match self {
             Self::Brush => 1.0,
-            Self::Pencil => 0.72,
-            Self::Marker => 0.48,
+            Self::Pencil => 0.66,
+            Self::Marker => 0.42,
             Self::Eraser => 1.0,
         }
     }
@@ -517,34 +517,39 @@ impl Stroke {
                 offset: PaintVector::default(),
             }],
             ToolKind::Pencil => {
-                let offset = stroke_texture_offset(&self.points, base_width * 0.12);
+                let offset = stroke_texture_offset(&self.points, base_width * 0.18);
                 vec![
                     StrokeRenderPass {
-                        color: base_color,
-                        width: base_width.max(1.0),
+                        color: base_color.with_alpha_scaled(0.92),
+                        width: (base_width * 0.92).max(0.95),
                         offset: PaintVector::default(),
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.42),
-                        width: (base_width * 0.52).max(0.9),
+                        color: base_color.with_alpha_scaled(0.34),
+                        width: (base_width * 0.5).max(0.85),
                         offset,
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.28),
-                        width: (base_width * 0.34).max(0.8),
+                        color: base_color.with_alpha_scaled(0.22),
+                        width: (base_width * 0.3).max(0.75),
                         offset: PaintVector::new(-offset.dx, -offset.dy),
                     },
                 ]
             }
             ToolKind::Marker => vec![
                 StrokeRenderPass {
-                    color: base_color.with_alpha_scaled(0.78),
-                    width: (base_width * 1.18).max(1.0),
+                    color: base_color.with_alpha_scaled(0.62),
+                    width: (base_width * 1.22).max(1.0),
                     offset: PaintVector::default(),
                 },
                 StrokeRenderPass {
-                    color: base_color,
-                    width: (base_width * 0.82).max(0.9),
+                    color: base_color.with_alpha_scaled(0.44),
+                    width: (base_width * 0.98).max(0.95),
+                    offset: PaintVector::default(),
+                },
+                StrokeRenderPass {
+                    color: base_color.with_alpha_scaled(0.94),
+                    width: (base_width * 0.72).max(0.9),
                     offset: PaintVector::default(),
                 },
             ],
@@ -2539,7 +2544,9 @@ mod tests {
         assert!(ToolKind::Marker.styled_color(color).a < ToolKind::Pencil.styled_color(color).a);
         assert_eq!(pen.render_passes().len(), 1);
         assert_eq!(pencil.render_passes().len(), 3);
-        assert_eq!(marker.render_passes().len(), 2);
+        assert_eq!(marker.render_passes().len(), 3);
+        assert!(marker.render_passes()[0].width > marker.render_passes()[2].width);
+        assert!(pencil.render_passes()[2].color.a < pencil.render_passes()[0].color.a);
     }
 
     #[test]
