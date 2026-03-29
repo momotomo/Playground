@@ -1055,14 +1055,66 @@ impl PaintApp {
                 );
             }
         });
-        let multi_select_response = ui
-            .add_sized(
-                [ui.available_width(), TOOL_BUTTON_HEIGHT],
-                egui::Button::new("複数選択モード").selected(self.multi_select_mode),
-            )
-            .on_hover_text("タップ / クリックで追加選択や解除をします。");
-        if multi_select_response.clicked() {
-            self.set_multi_select_mode(!self.multi_select_mode);
+        ui.horizontal_wrapped(|ui| {
+            layer_status_chip(
+                ui,
+                if self.multi_select_mode {
+                    "複数選択オン"
+                } else {
+                    "複数選択オフ"
+                },
+                self.multi_select_mode,
+            );
+            layer_status_chip(
+                ui,
+                if self.finger_draw_enabled {
+                    "指描きオン"
+                } else {
+                    "指描きオフ"
+                },
+                self.finger_draw_enabled,
+            );
+            layer_status_chip(
+                ui,
+                if self.active_tool == CanvasToolKind::Pan {
+                    "手のひら"
+                } else {
+                    "通常操作"
+                },
+                self.active_tool == CanvasToolKind::Pan,
+            );
+        });
+        let tablet_columns = tablet_button_columns(ui.available_width());
+        let tablet_button_width = if tablet_columns == 2 {
+            ((ui.available_width() - 8.0) / 2.0).max(110.0)
+        } else {
+            ui.available_width()
+        };
+        let mut tablet_action = None;
+        ui.horizontal_wrapped(|ui| {
+            let multi_select_response = ui
+                .add_sized(
+                    [tablet_button_width, TOOL_BUTTON_HEIGHT],
+                    egui::Button::new("複数選択モード").selected(self.multi_select_mode),
+                )
+                .on_hover_text("タップ / クリックで追加選択や解除をします。");
+            if multi_select_response.clicked() {
+                tablet_action = Some("toggle-multi");
+            }
+            let finger_draw_response = ui
+                .add_sized(
+                    [tablet_button_width, TOOL_BUTTON_HEIGHT],
+                    egui::Button::new("指でも描く").selected(self.finger_draw_enabled),
+                )
+                .on_hover_text("指でもそのまま描画できるようにします。");
+            if finger_draw_response.clicked() {
+                tablet_action = Some("toggle-finger-draw");
+            }
+        });
+        match tablet_action {
+            Some("toggle-multi") => self.set_multi_select_mode(!self.multi_select_mode),
+            Some("toggle-finger-draw") => self.set_finger_draw_enabled(!self.finger_draw_enabled),
+            _ => {}
         }
         if self.multi_select_mode && self.canvas.selection_count() > 0 {
             let keep_selection_response = ui
@@ -1075,18 +1127,9 @@ impl PaintApp {
                 self.exit_multi_select_mode_for_editing();
             }
         }
-        let finger_draw_response = ui
-            .add_sized(
-                [ui.available_width(), TOOL_BUTTON_HEIGHT],
-                egui::Button::new("指でも描く").selected(self.finger_draw_enabled),
-            )
-            .on_hover_text("指でもそのまま描画できるようにします。");
-        if finger_draw_response.clicked() {
-            self.set_finger_draw_enabled(!self.finger_draw_enabled);
-        }
         ui.add_space(8.0);
 
-        for tool in [
+        let tools = [
             CanvasToolKind::Select,
             CanvasToolKind::Pan,
             CanvasToolKind::Brush,
@@ -1098,21 +1141,40 @@ impl PaintApp {
             CanvasToolKind::Ellipse,
             CanvasToolKind::Line,
             CanvasToolKind::Eraser,
-        ] {
-            let is_selected = self.active_tool == tool;
-            let response = ui
-                .add_sized(
-                    [ui.available_width(), TOOL_BUTTON_HEIGHT],
-                    egui::Button::new(tool.label()).selected(is_selected),
-                )
-                .on_hover_text(tool_button_tooltip(tool));
-            let can_activate =
-                !is_selected || (tool == CanvasToolKind::Select && self.multi_select_mode);
-            if response.clicked() && can_activate {
-                self.apply_tool_button_selection(tool);
-            }
+        ];
+        let tool_columns = tablet_button_columns(ui.available_width());
+        let tool_button_width = if tool_columns == 2 {
+            ((ui.available_width() - 8.0) / 2.0).max(104.0)
+        } else {
+            ui.available_width()
+        };
+        for row in tools.chunks(tool_columns) {
+            ui.horizontal_wrapped(|ui| {
+                for tool in row {
+                    let is_selected = self.active_tool == *tool;
+                    let response = ui
+                        .add_sized(
+                            [tool_button_width, TOOL_BUTTON_HEIGHT],
+                            egui::Button::new(tool.label()).selected(is_selected),
+                        )
+                        .on_hover_text(tool_button_tooltip(*tool));
+                    let can_activate =
+                        !is_selected || (*tool == CanvasToolKind::Select && self.multi_select_mode);
+                    if response.clicked() && can_activate {
+                        self.apply_tool_button_selection(*tool);
+                    }
+                }
+            });
+            ui.add_space(4.0);
         }
 
+        ui.add_space(8.0);
+        if matches!(
+            self.active_tool,
+            CanvasToolKind::Select | CanvasToolKind::Pan
+        ) {
+            ui.small("選択や手のひらは、上の切り替えと合わせるとタブレットで使いやすくなります。");
+        }
         ui.add_space(12.0);
         if arrange_context.show_panel() {
             self.show_selection_actions(ui, arrange_context);
@@ -4007,6 +4069,10 @@ fn brush_kind_summary(tool: CanvasToolKind) -> &'static str {
     }
 }
 
+fn tablet_button_columns(available_width: f32) -> usize {
+    if available_width >= 250.0 { 2 } else { 1 }
+}
+
 fn color_swatch_button(
     ui: &mut egui::Ui,
     color: RgbaColor,
@@ -4219,7 +4285,7 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
 mod tests {
     use super::{
         CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, SelectionArrangeContext,
-        panel_widths_for_window,
+        panel_widths_for_window, tablet_button_columns,
     };
     use crate::fill::FillTolerancePreset;
     use crate::model::{
@@ -4616,5 +4682,12 @@ mod tests {
         assert_eq!(panel_widths_for_window(900.0), (198.0, 212.0));
         assert_eq!(panel_widths_for_window(1100.0), (208.0, 224.0));
         assert_eq!(panel_widths_for_window(1400.0), (220.0, 240.0));
+    }
+
+    #[test]
+    fn tablet_button_columns_expand_on_roomy_panels() {
+        assert_eq!(tablet_button_columns(220.0), 1);
+        assert_eq!(tablet_button_columns(250.0), 2);
+        assert_eq!(tablet_button_columns(320.0), 2);
     }
 }
