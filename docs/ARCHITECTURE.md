@@ -60,16 +60,16 @@
   - `PaintDocument` から PNG 用ピクセルデータを生成
   - 表示倍率に依存しない作品基準のラスタライズ
   - 通常 PNG と透過 PNG の背景モード切り替え
+  - 図形中心の SVG バイト列生成
   - スポイト用のキャンバス色サンプリング
   - freehand stroke の tool 種別ごとの見た目差の反映
-  - shape の vector path / style 分離による将来の SVG export 足場
-  - 将来の SVG export を足しやすい export 分岐の土台
+  - shape の vector path / style 分離による SVG / 将来の fill 拡張の土台
 - `src/storage.rs`
   - JSON encode / decode
   - 保存形式 version 管理
   - 旧 format v1 の読込互換
   - native / web の保存導線差分吸収
-  - PNG / 透過PNG export のバイト列生成と保存
+  - PNG / 透過PNG / SVG export のバイト列生成と保存
 
 ## 図形データモデルの拡張
 
@@ -88,6 +88,7 @@
   - `tool` は `pen / pencil / marker / eraser` を表せる
   - tool ごとに最小限の幅係数 / alpha 係数を持ち、重いブラシエンジンなしで描き味の差を出す
   - pencil / marker は deterministic な multi-pass 描画で、少しラフさや重ね感を出す
+  - SVG export では freehand path として安全に簡略化し、質感差は PNG より控えめに扱う
 - `GroupElement`
   - `elements: Vec<PaintElement>` を持つ
   - 子要素を再帰的に保持し、内部順序もそのまま描画順として扱う
@@ -104,6 +105,7 @@
   - `rotation_radians` を中心回りに適用する
   - `fill_color` があれば線とは別に塗りを持てる
   - `paint_mode_label()` で `線だけ / 線と塗り` を UI に短く渡せる
+  - SVG export では `effective_fill_color()` をそのまま `fill` として再利用できる
 - 直線
   - `start` と `end` を endpoint として扱う
   - 回転は endpoint を中心回りに回した結果で表現する
@@ -213,6 +215,19 @@
 - 図形作成と resize はドラッグ中 pointer をグリッド / ガイドへ寄せて preview を更新する
 - guide drag は preview 中だけ `GuideMove` を持ち、リリース時にだけ document へ反映する
 - grid / guides / smart guide / ruler の表示は canvas UI 専用で、PNG render には含めない
+
+## PNG / SVG export の役割分担
+
+- PNG / 透過PNG
+  - 見たまま共有向け
+  - multi-pass のブラシ質感や消しゴム結果も含めてラスタライズする
+  - UI 補助表示は含めない
+- SVG
+  - 図形 / 線の再利用や拡大向け
+  - `直線` / `四角形` / `楕円` は shape geometry から安全に書き出す
+  - freehand は path として簡略化し、`ペン / えんぴつ / マーカー` の質感差は PNG より単純化する
+  - `消しゴム` は SVG では安全な再現が難しいため省略し、見たまま共有は PNG 系に寄せる
+  - raster export と vector export を `src/render.rs` 内で分け、`src/storage.rs` は保存導線だけを担当する
 
 ## リサイズ / 回転操作の設計
 
