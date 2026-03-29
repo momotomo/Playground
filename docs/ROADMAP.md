@@ -28,3 +28,8 @@
 - [x] SVG export 本格強化
 - [x] freehand / fill の一括編集拡張
 - [x] ブラシ種別の追加
+
+## 現在の状態
+
+- [x] ROADMAP の既存項目は一通り完了
+- [ ] 次の改善は `docs/OPEN_QUESTIONS.md` から、小さく安全な論点を切り出して進める
