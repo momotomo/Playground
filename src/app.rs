@@ -519,7 +519,7 @@ impl Default for PaintApp {
             tool_colors: ToolColorSettings::default(),
             tool_widths: ToolWidthSettings::default(),
             status_message: StatusMessage::info(
-                "描く準備ができました。ペンや図形ツールを選んで、必要ならヘルプを開いてください。",
+                "まずは左のペンか図形ツールで 1 つ描いてみましょう。困ったらヘルプを開けます。",
             ),
             document_name: storage.suggested_file_name().to_owned(),
             saved_snapshot: document,
@@ -550,8 +550,9 @@ impl PaintApp {
         app.ui_state.recent_colors.truncate(RECENT_COLOR_LIMIT);
         app.tutorial.visible = !app.ui_state.tutorial_dismissed;
         if app.tutorial.visible {
-            app.status_message =
-                StatusMessage::info("最初の操作はミニチュートリアルで確認できます。");
+            app.status_message = StatusMessage::info(
+                "最初は「描く → 選ぶ → 保存」の流れをミニチュートリアルで確認できます。",
+            );
         }
         app
     }
@@ -1189,6 +1190,20 @@ impl PaintApp {
 
         ui.group(|ui| {
             ui.label(RichText::new("今の状態").strong());
+            if self.document().total_element_count() == 0 {
+                ui.horizontal_wrapped(|ui| {
+                    summary_chip(ui, "まずは 1 つ描く", true);
+                    summary_chip(ui, "選択で動かす", false);
+                    summary_chip(ui, "続きは JSON保存", false);
+                });
+                ui.small("左のペン・えんぴつ・クレヨン・マーカーか図形ツールを選んで、中央でドラッグすると始めやすいです。");
+                if !self.tutorial.visible
+                    && ui.button("ミニチュートリアルを開く").clicked()
+                {
+                    self.open_tutorial();
+                }
+                ui.add_space(6.0);
+            }
             ui.small(format!("道具: {}", self.active_tool.label()));
             if matches!(
                 self.active_tool,
@@ -3292,6 +3307,12 @@ impl PaintApp {
             .resizable(false)
             .default_width(380.0)
             .show(ctx, |ui| {
+                ui.label(RichText::new("最初の流れ").strong());
+                ui.small("1. まずは左のペンか図形ツールで 1 つ描きます。");
+                ui.small("2. 選択に切り替えると、動かしたり変形したりできます。");
+                ui.small("3. 続きを残すなら JSON保存、共有するなら PNG や SVG を使います。");
+
+                ui.add_space(8.0);
                 ui.label(RichText::new("短く確認する").strong());
                 ui.small("描く: ペン / えんぴつ / クレヨン / マーカーか図形ツールを選んでドラッグします。");
                 ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。バケツ塗りは塗りのゆるさも変えられます。");
@@ -4634,8 +4655,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
     match step_index {
         0 => TutorialStepContent {
             title: "まずは 1 つ描いてみましょう",
-            body: "ペン、えんぴつ、クレヨン、マーカーか図形ツールを選んで、キャンバスをドラッグします。線色、塗り色、不透明度を少し変えるだけでも印象が変わります。",
-            action: "左の「ペン」「えんぴつ」「クレヨン」「マーカー」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
+            body: "ペン、えんぴつ、クレヨン、マーカーか図形ツールを選んで、キャンバスをドラッグします。まずは色を大きくいじらず、1 つ描くだけでも十分です。",
+            action: "左の道具から 1 つ選んで、中央でドラッグしてみます。迷ったら「ペン」か「四角形」から始めると自然です。",
         },
         1 => TutorialStepContent {
             title: "選んで動かせます",
@@ -4649,8 +4670,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
         },
         _ => TutorialStepContent {
             title: "保存方法は 2 つです",
-            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は見たままの画像共有用、透過PNG は素材向け、SVG書き出し は図形や線の再利用向けです。バケツ塗りで作った面も PNG では見たまま書き出せます。",
-            action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」「透過PNG」「SVG書き出し」を覚えておけば、ひとまず困りません。",
+            body: "JSON保存 は続きから再編集したいとき用です。PNG書き出し は見たままの共有用、透過PNG は素材向け、SVG書き出し は図形や線の再利用向けです。",
+            action: "まず覚えるなら「JSON保存」と「PNG書き出し」で十分です。必要になったら透過PNGやSVGも使えます。",
         },
     }
 }
