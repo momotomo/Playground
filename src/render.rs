@@ -275,17 +275,40 @@ fn simplify_stroke_points_for_svg(points: &[PaintPoint], width: f32) -> Vec<Pain
         return points.to_vec();
     }
 
-    let min_step = (width * 0.18).clamp(0.75, 3.5);
-    let mut simplified = Vec::with_capacity(points.len());
-    simplified.push(first);
+    let min_step = (width * 0.18).clamp(0.75, 3.25);
+    let mut sampled = Vec::with_capacity(points.len());
+    sampled.push(first);
 
     for &point in rest.iter().take(rest.len().saturating_sub(1)) {
-        if point.distance_to(*simplified.last().expect("first point exists")) >= min_step {
-            simplified.push(point);
+        if point.distance_to(*sampled.last().expect("first point exists")) >= min_step {
+            sampled.push(point);
         }
     }
 
     let last = *points.last().expect("split_first guarantees one point");
+    if sampled.last().copied() != Some(last) {
+        sampled.push(last);
+    }
+
+    if sampled.len() <= 2 {
+        return sampled;
+    }
+
+    let deviation = (width * 0.08).clamp(0.18, 1.2);
+    let mut simplified = Vec::with_capacity(sampled.len());
+    simplified.push(sampled[0]);
+
+    for index in 1..sampled.len() - 1 {
+        let previous = *simplified
+            .last()
+            .expect("simplified contains the first sampled point");
+        let current = sampled[index];
+        let next = sampled[index + 1];
+        if point_line_distance(current, previous, next) > deviation {
+            simplified.push(current);
+        }
+    }
+
     if simplified.last().copied() != Some(last) {
         simplified.push(last);
     }
@@ -301,34 +324,62 @@ fn stroke_points_to_svg_path_data(points: &[PaintPoint]) -> String {
     }
 
     let mut data = format!("M {} {}", svg_scalar(first.x), svg_scalar(first.y));
-    for window in points[1..].windows(2) {
-        let control = window[0];
-        let end = midpoint(control, window[1]);
+    for index in 0..points.len() - 1 {
+        let previous = if index == 0 {
+            points[index]
+        } else {
+            points[index - 1]
+        };
+        let start = points[index];
+        let end = points[index + 1];
+        let next = points.get(index + 2).copied().unwrap_or(end);
+        let control_a = cubic_control_point(previous, start, end);
+        let control_b = cubic_control_point(start, end, next).mirrored_around(end);
         write!(
             data,
-            " Q {} {} {} {}",
-            svg_scalar(control.x),
-            svg_scalar(control.y),
+            " C {} {} {} {} {} {}",
+            svg_scalar(control_a.x),
+            svg_scalar(control_a.y),
+            svg_scalar(control_b.x),
+            svg_scalar(control_b.y),
             svg_scalar(end.x),
             svg_scalar(end.y),
         )
         .expect("write into String should succeed");
     }
-    let last = points[points.len() - 1];
-    write!(
-        data,
-        " Q {} {} {} {}",
-        svg_scalar(last.x),
-        svg_scalar(last.y),
-        svg_scalar(last.x),
-        svg_scalar(last.y),
-    )
-    .expect("write into String should succeed");
     data
 }
 
-fn midpoint(left: PaintPoint, right: PaintPoint) -> PaintPoint {
-    PaintPoint::new((left.x + right.x) * 0.5, (left.y + right.y) * 0.5)
+fn cubic_control_point(previous: PaintPoint, current: PaintPoint, next: PaintPoint) -> PaintPoint {
+    let smoothing = 1.0 / 6.0;
+    PaintPoint::new(
+        current.x + (next.x - previous.x) * smoothing,
+        current.y + (next.y - previous.y) * smoothing,
+    )
+}
+
+fn point_line_distance(point: PaintPoint, line_start: PaintPoint, line_end: PaintPoint) -> f32 {
+    let dx = line_end.x - line_start.x;
+    let dy = line_end.y - line_start.y;
+    let length_sq = dx * dx + dy * dy;
+    if length_sq <= f32::EPSILON {
+        return point.distance_to(line_start);
+    }
+
+    let projection = ((point.x - line_start.x) * dx + (point.y - line_start.y) * dy) / length_sq;
+    let clamped = projection.clamp(0.0, 1.0);
+    let projected = PaintPoint::new(line_start.x + dx * clamped, line_start.y + dy * clamped);
+    point.distance_to(projected)
+}
+
+trait MirroredAround {
+    fn mirrored_around(self, center: PaintPoint) -> PaintPoint;
+}
+
+impl MirroredAround for PaintPoint {
+    fn mirrored_around(self, center: PaintPoint) -> PaintPoint {
+        PaintPoint::new(center.x * 2.0 - self.x, center.y * 2.0 - self.y)
+    }
 }
 
 fn append_svg_shape(svg: &mut String, shape: &ShapeElement) {
@@ -708,7 +759,8 @@ fn rotate_vector(vector: PaintVector, angle_radians: f32) -> PaintVector {
 mod tests {
     use super::{
         RasterBackground, render_document_pixmap, render_document_pixmap_with_background,
-        render_document_png, render_document_svg, sample_document_color, svg_stroke_export_passes,
+        render_document_png, render_document_svg, sample_document_color,
+        simplify_stroke_points_for_svg, svg_stroke_export_passes,
     };
     use crate::model::{
         CanvasSize, FillElement, FillSpan, GroupElement, GuideAxis, PaintDocument, PaintElement,
@@ -1073,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn svg_export_smooths_freehand_stroke_into_quadratic_path() {
+    fn svg_export_smooths_freehand_stroke_into_cubic_path() {
         let mut document = PaintDocument {
             canvas_size: CanvasSize::new(64.0, 64.0),
             background: RgbaColor::white(),
@@ -1090,8 +1142,25 @@ mod tests {
         let svg = String::from_utf8(render_document_svg(&document).expect("svg export"))
             .expect("svg should be utf-8");
 
-        assert!(svg.contains(r#"<path d="M 6 18 Q 16 24"#));
-        assert!(svg.contains(" Q "));
+        assert!(svg.contains(r#"<path d="M 6 18 C "#));
+        assert!(svg.contains(" C "));
+    }
+
+    #[test]
+    fn svg_export_simplification_removes_collinear_middle_points() {
+        let points = vec![
+            PaintPoint::new(0.0, 0.0),
+            PaintPoint::new(1.0, 0.0),
+            PaintPoint::new(2.0, 0.0),
+            PaintPoint::new(3.0, 0.0),
+            PaintPoint::new(10.0, 0.0),
+        ];
+
+        let simplified = simplify_stroke_points_for_svg(&points, 6.0);
+
+        assert_eq!(simplified.first().copied(), Some(PaintPoint::new(0.0, 0.0)));
+        assert_eq!(simplified.last().copied(), Some(PaintPoint::new(10.0, 0.0)));
+        assert!(simplified.len() < points.len());
     }
 
     #[test]

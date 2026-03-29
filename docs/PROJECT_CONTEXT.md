@@ -25,6 +25,7 @@
 - 再利用向け: SVG
   - 図形と線を中心に持ち出す
   - freehand やバケツ塗りは安全側で簡略化する
+  - freehand は軽い簡略化と smoothing をかけた path として出力する
 
 ## UX 方針
 
