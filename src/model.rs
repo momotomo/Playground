@@ -663,6 +663,21 @@ impl ShapeElement {
         self
     }
 
+    pub fn effective_fill_color(&self) -> Option<RgbaColor> {
+        self.kind
+            .supports_fill()
+            .then_some(self.fill_color)
+            .flatten()
+    }
+
+    pub fn paint_mode_label(&self) -> &'static str {
+        if self.effective_fill_color().is_some() {
+            "線と塗り"
+        } else {
+            "線だけ"
+        }
+    }
+
     pub fn center(&self) -> PaintPoint {
         self.start.midpoint(self.end)
     }
@@ -2422,6 +2437,35 @@ mod tests {
         assert_eq!(pen.render_passes().len(), 1);
         assert_eq!(pencil.render_passes().len(), 3);
         assert_eq!(marker.render_passes().len(), 2);
+    }
+
+    #[test]
+    fn shape_paint_mode_label_follows_fill_support() {
+        let rectangle = ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            4.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(30.0, 30.0),
+        );
+        assert_eq!(rectangle.paint_mode_label(), "線だけ");
+        assert_eq!(
+            rectangle
+                .with_fill_color(Some(RgbaColor::from_rgba(255, 180, 60, 180)))
+                .paint_mode_label(),
+            "線と塗り"
+        );
+
+        let line = ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::charcoal(),
+            4.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(30.0, 30.0),
+        )
+        .with_fill_color(Some(RgbaColor::from_rgba(255, 180, 60, 180)));
+        assert_eq!(line.effective_fill_color(), None);
+        assert_eq!(line.paint_mode_label(), "線だけ");
     }
 
     #[test]

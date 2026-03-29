@@ -22,6 +22,7 @@
   - パネル構成
   - ツール状態
   - 線色 / 塗り色 / 不透明度の保持
+  - 単一選択図形に対する線 / 塗り / 太さの直接編集
   - 最近使った色と簡易パレット
   - 現在ツール / 現在レイヤーが分かる UI summary
   - ボタン操作
@@ -61,6 +62,7 @@
   - 通常 PNG と透過 PNG の背景モード切り替え
   - スポイト用のキャンバス色サンプリング
   - freehand stroke の tool 種別ごとの見た目差の反映
+  - shape の vector path / style 分離による将来の SVG export 足場
   - 将来の SVG export を足しやすい export 分岐の土台
 - `src/storage.rs`
   - JSON encode / decode
@@ -101,6 +103,7 @@
   - `start` と `end` は未回転 bbox の対角点
   - `rotation_radians` を中心回りに適用する
   - `fill_color` があれば線とは別に塗りを持てる
+  - `paint_mode_label()` で `線だけ / 線と塗り` を UI に短く渡せる
 - 直線
   - `start` と `end` を endpoint として扱う
   - 回転は endpoint を中心回りに回した結果で表現する

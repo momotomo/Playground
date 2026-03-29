@@ -109,7 +109,7 @@ impl CanvasToolKind {
         )
     }
 
-    fn shape_kind(self) -> Option<ShapeKind> {
+    pub const fn shape_kind(self) -> Option<ShapeKind> {
         match self {
             Self::Rectangle => Some(ShapeKind::Rectangle),
             Self::Ellipse => Some(ShapeKind::Ellipse),
