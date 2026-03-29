@@ -10,44 +10,60 @@ use crate::render::{RasterBackground, render_document_pixmap_with_background};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FillTolerancePreset {
+    VeryStrict,
     Strict,
     #[default]
     Standard,
     Relaxed,
+    VeryRelaxed,
 }
 
 impl FillTolerancePreset {
-    pub const ALL: [Self; 3] = [Self::Strict, Self::Standard, Self::Relaxed];
+    pub const ALL: [Self; 5] = [
+        Self::VeryStrict,
+        Self::Strict,
+        Self::Standard,
+        Self::Relaxed,
+        Self::VeryRelaxed,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::VeryStrict => "きっちり",
             Self::Strict => "細かく",
             Self::Standard => "ふつう",
             Self::Relaxed => "広め",
+            Self::VeryRelaxed => "かなり広め",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
+            Self::VeryStrict => "境界をかなり厳密に見て、ほとんど色差を広げずに塗ります。",
             Self::Strict => "色差をほとんど広げず、きっちり塗ります。",
             Self::Standard => "少し色が違っても、ふつうにまとまって塗ります。",
             Self::Relaxed => "境界の少しの途切れや色差をまたぎやすくします。",
+            Self::VeryRelaxed => "細い途切れや antialias の色差も、かなり広めにまとめて塗ります。",
         }
     }
 
     pub const fn channel_tolerance(self) -> u8 {
         match self {
-            Self::Strict => 0,
-            Self::Standard => 12,
-            Self::Relaxed => 24,
+            Self::VeryStrict => 0,
+            Self::Strict => 6,
+            Self::Standard => 14,
+            Self::Relaxed => 26,
+            Self::VeryRelaxed => 40,
         }
     }
 
     pub const fn next_more_permissive(self) -> Option<Self> {
         match self {
+            Self::VeryStrict => Some(Self::Strict),
             Self::Strict => Some(Self::Standard),
             Self::Standard => Some(Self::Relaxed),
-            Self::Relaxed => None,
+            Self::Relaxed => Some(Self::VeryRelaxed),
+            Self::VeryRelaxed => None,
         }
     }
 }
@@ -510,13 +526,55 @@ mod tests {
     }
 
     #[test]
+    fn very_relaxed_tolerance_crosses_wider_color_gap_inside_closed_area() {
+        let mut document = closed_shape_document();
+        document.push_fill(FillElement::new(
+            RgbaColor::from_rgba(226, 226, 226, 255),
+            PaintPoint::new(32.0, 12.0),
+            (0..40)
+                .map(|y| FillSpan {
+                    y,
+                    x_start: 0,
+                    x_end: 20,
+                })
+                .collect(),
+        ));
+
+        let relaxed = flood_fill_document(
+            &document,
+            PaintPoint::new(20.0, 32.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::Relaxed),
+        )
+        .expect("relaxed fill should still work");
+        let very_relaxed = flood_fill_document(
+            &document,
+            PaintPoint::new(20.0, 32.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::VeryRelaxed),
+        )
+        .expect("very relaxed fill should bridge the wider gap");
+
+        let relaxed_bounds = relaxed.element.bounds().expect("relaxed bounds");
+        let very_relaxed_bounds = very_relaxed.element.bounds().expect("very relaxed bounds");
+        assert!(
+            very_relaxed_bounds.max.x > relaxed_bounds.max.x + 8.0,
+            "very relaxed should cross farther into the more strongly tinted area"
+        );
+        assert!(very_relaxed.pixel_count > relaxed.pixel_count);
+    }
+
+    #[test]
     fn region_not_found_message_suggests_more_permissive_fill() {
+        let very_strict_message = FloodFillFailure::RegionNotFound
+            .user_message(FloodFillOptions::new(FillTolerancePreset::VeryStrict));
         let strict_message = FloodFillFailure::RegionNotFound
             .user_message(FloodFillOptions::new(FillTolerancePreset::Strict));
         let relaxed_message = FloodFillFailure::RegionNotFound
             .user_message(FloodFillOptions::new(FillTolerancePreset::Relaxed));
 
+        assert!(very_strict_message.contains("細かく"));
         assert!(strict_message.contains("ふつう"));
-        assert!(relaxed_message.contains("境界が大きく途切れている"));
+        assert!(relaxed_message.contains("かなり広め"));
     }
 }

@@ -1142,7 +1142,13 @@ impl PaintApp {
             ui.group(|ui| {
                 ui.label(RichText::new("バケツ塗り設定").strong());
                 ui.small("少し色が違う場所まで、どのくらいまとめて塗るかを切り替えます。");
-                let preset_width = ((ui.available_width() - 16.0) / 3.0).max(88.0);
+                let columns = if ui.available_width() < 340.0 {
+                    2.0
+                } else {
+                    3.0
+                };
+                let preset_width =
+                    ((ui.available_width() - (columns - 1.0) * 8.0) / columns).max(92.0);
                 ui.horizontal_wrapped(|ui| {
                     for preset in FillTolerancePreset::ALL {
                         let response = ui
@@ -1159,6 +1165,7 @@ impl PaintApp {
                 });
                 ui.small(self.ui_state.bucket_fill_tolerance.description());
                 ui.small("判定は見えている全レイヤーを使い、塗り結果は現在のレイヤーへ入ります。");
+                ui.small("迷ったら「ふつう」か「広め」から試すと自然です。");
             });
         }
 
