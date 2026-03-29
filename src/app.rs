@@ -1192,7 +1192,10 @@ impl PaintApp {
             ui.small(format!("道具: {}", self.active_tool.label()));
             if matches!(
                 self.active_tool,
-                CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+                CanvasToolKind::Brush
+                    | CanvasToolKind::Pencil
+                    | CanvasToolKind::Crayon
+                    | CanvasToolKind::Marker
             ) {
                 ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
             } else if self.active_tool == CanvasToolKind::Bucket {
@@ -1353,6 +1356,7 @@ impl PaintApp {
             CanvasToolKind::Pan,
             CanvasToolKind::Brush,
             CanvasToolKind::Pencil,
+            CanvasToolKind::Crayon,
             CanvasToolKind::Marker,
             CanvasToolKind::Eyedropper,
             CanvasToolKind::Bucket,
@@ -1404,6 +1408,7 @@ impl PaintApp {
         match self.active_tool {
             CanvasToolKind::Brush
             | CanvasToolKind::Pencil
+            | CanvasToolKind::Crayon
             | CanvasToolKind::Marker
             | CanvasToolKind::Eyedropper
             | CanvasToolKind::Bucket
@@ -2190,7 +2195,9 @@ impl PaintApp {
                     &mut draw_width,
                     MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
                 ))
-                .on_hover_text("ペン、えんぴつ、マーカー、四角形、楕円、直線の太さを変えます。")
+                .on_hover_text(
+                    "ペン、えんぴつ、クレヨン、マーカー、四角形、楕円、直線の太さを変えます。",
+                )
                 .changed()
             {
                 self.tool_widths.draw_width = draw_width;
@@ -2200,7 +2207,7 @@ impl PaintApp {
                 ));
             }
             ui.small(format!(
-                "{:.1}px · ペン / えんぴつ / マーカー / 四角形 / 楕円 / 直線",
+                "{:.1}px · ペン / えんぴつ / クレヨン / マーカー / 四角形 / 楕円 / 直線",
                 draw_width
             ));
         }
@@ -2226,7 +2233,10 @@ impl PaintApp {
         ui.small(format!("ツール: {}", self.active_tool.label()));
         if matches!(
             self.active_tool,
-            CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+            CanvasToolKind::Brush
+                | CanvasToolKind::Pencil
+                | CanvasToolKind::Crayon
+                | CanvasToolKind::Marker
         ) {
             ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
         } else if self.active_tool == CanvasToolKind::Bucket {
@@ -3204,7 +3214,10 @@ impl PaintApp {
                 }
                 if matches!(
                     self.active_tool,
-                    CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
+                    CanvasToolKind::Brush
+                        | CanvasToolKind::Pencil
+                        | CanvasToolKind::Crayon
+                        | CanvasToolKind::Marker
                 ) && !compact_summary
                 {
                     summary_chip(ui, brush_kind_summary(self.active_tool), false);
@@ -3280,7 +3293,7 @@ impl PaintApp {
             .default_width(380.0)
             .show(ctx, |ui| {
                 ui.label(RichText::new("短く確認する").strong());
-                ui.small("描く: ペン / えんぴつ / マーカーか図形ツールを選んでドラッグします。");
+                ui.small("描く: ペン / えんぴつ / クレヨン / マーカーか図形ツールを選んでドラッグします。");
                 ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。バケツ塗りは塗りのゆるさも変えられます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
@@ -3294,7 +3307,7 @@ impl PaintApp {
                 ui.label(RichText::new("ショートカット").strong());
                 ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
                 ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
-                ui.small("ツール: V 選択 · H 手のひら · B ペン · N えんぴつ · M マーカー · I スポイト · F バケツ塗り · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
+                ui.small("ツール: V 選択 · H 手のひら · B ペン · N えんぴつ · C クレヨン · M マーカー · I スポイト · F バケツ塗り · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
 
                 ui.add_space(10.0);
                 if ui.button("チュートリアルをもう一度見る").clicked() {
@@ -4264,6 +4277,8 @@ impl PaintApp {
             self.set_active_tool(CanvasToolKind::Brush, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::N)) {
             self.set_active_tool(CanvasToolKind::Pencil, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::C)) {
+            self.set_active_tool(CanvasToolKind::Crayon, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::M)) {
             self.set_active_tool(CanvasToolKind::Marker, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::I)) {
@@ -4421,6 +4436,7 @@ fn brush_kind_summary(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Brush => "くっきり描けるペン",
         CanvasToolKind::Pencil => "やや薄く軽いえんぴつ",
+        CanvasToolKind::Crayon => "少し太くラフなクレヨン",
         CanvasToolKind::Marker => "重ねやすい半透明マーカー",
         _ => "",
     }
@@ -4597,6 +4613,7 @@ fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
         CanvasToolKind::Pan => "キャンバスをドラッグして移動します。",
         CanvasToolKind::Brush => "はっきり描けるペンです。",
         CanvasToolKind::Pencil => "少し軽いタッチのえんぴつです。",
+        CanvasToolKind::Crayon => "少し太く、少しラフなクレヨンです。",
         CanvasToolKind::Marker => "重ねやすい半透明のマーカーです。",
         CanvasToolKind::Eyedropper => "見えている色を拾って線色や塗り色に使います。",
         CanvasToolKind::Bucket => {
@@ -4617,8 +4634,8 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
     match step_index {
         0 => TutorialStepContent {
             title: "まずは 1 つ描いてみましょう",
-            body: "ペン、えんぴつ、マーカーか図形ツールを選んで、キャンバスをドラッグします。線色、塗り色、不透明度を少し変えるだけでも印象が変わります。",
-            action: "左の「ペン」「えんぴつ」「マーカー」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
+            body: "ペン、えんぴつ、クレヨン、マーカーか図形ツールを選んで、キャンバスをドラッグします。線色、塗り色、不透明度を少し変えるだけでも印象が変わります。",
+            action: "左の「ペン」「えんぴつ」「クレヨン」「マーカー」「四角形」「楕円」「直線」のどれかを選んで、中央でドラッグしてみます。",
         },
         1 => TutorialStepContent {
             title: "選んで動かせます",
@@ -4704,12 +4721,15 @@ mod tests {
     }
 
     #[test]
-    fn pencil_and_marker_reuse_draw_width_setting() {
+    fn freehand_brushes_reuse_draw_width_setting() {
         let mut app = PaintApp::default();
         app.tool_widths.draw_width = 11.0;
         app.tool_widths.eraser_width = 21.0;
 
         app.set_active_tool(CanvasToolKind::Pencil, false);
+        assert_eq!(app.tool_settings().width, 11.0);
+
+        app.set_active_tool(CanvasToolKind::Crayon, false);
         assert_eq!(app.tool_settings().width, 11.0);
 
         app.set_active_tool(CanvasToolKind::Marker, false);

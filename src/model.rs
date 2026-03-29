@@ -320,6 +320,7 @@ impl ElementBounds {
 pub enum ToolKind {
     Brush,
     Pencil,
+    Crayon,
     Marker,
     Eraser,
 }
@@ -329,6 +330,7 @@ impl ToolKind {
         match self {
             Self::Brush => "ペン",
             Self::Pencil => "えんぴつ",
+            Self::Crayon => "クレヨン",
             Self::Marker => "マーカー",
             Self::Eraser => "消しゴム",
         }
@@ -338,6 +340,7 @@ impl ToolKind {
         match self {
             Self::Brush => 1.0,
             Self::Pencil => 0.8,
+            Self::Crayon => 1.18,
             Self::Marker => 1.45,
             Self::Eraser => 1.0,
         }
@@ -347,6 +350,7 @@ impl ToolKind {
         match self {
             Self::Brush => 1.0,
             Self::Pencil => 0.66,
+            Self::Crayon => 0.74,
             Self::Marker => 0.42,
             Self::Eraser => 1.0,
         }
@@ -354,7 +358,7 @@ impl ToolKind {
 
     pub fn styled_color(self, color: RgbaColor) -> RgbaColor {
         match self {
-            Self::Brush | Self::Pencil | Self::Marker => {
+            Self::Brush | Self::Pencil | Self::Crayon | Self::Marker => {
                 color.with_alpha_scaled(self.alpha_scale())
             }
             Self::Eraser => color,
@@ -533,6 +537,26 @@ impl Stroke {
                         color: base_color.with_alpha_scaled(0.22),
                         width: (base_width * 0.3).max(0.75),
                         offset: PaintVector::new(-offset.dx, -offset.dy),
+                    },
+                ]
+            }
+            ToolKind::Crayon => {
+                let offset = stroke_texture_offset(&self.points, base_width * 0.22);
+                vec![
+                    StrokeRenderPass {
+                        color: base_color.with_alpha_scaled(0.9),
+                        width: (base_width * 1.08).max(1.0),
+                        offset: PaintVector::default(),
+                    },
+                    StrokeRenderPass {
+                        color: base_color.with_alpha_scaled(0.32),
+                        width: (base_width * 0.76).max(0.95),
+                        offset,
+                    },
+                    StrokeRenderPass {
+                        color: base_color.with_alpha_scaled(0.22),
+                        width: (base_width * 0.52).max(0.85),
+                        offset: PaintVector::new(-offset.dx * 0.65, -offset.dy * 0.65),
                     },
                 ]
             }
@@ -2535,16 +2559,26 @@ mod tests {
         let color = RgbaColor::from_rgba(120, 80, 40, 200);
         let pen = Stroke::new(ToolKind::Brush, color, 10.0);
         let pencil = Stroke::new(ToolKind::Pencil, color, 10.0);
+        let crayon = Stroke::new(ToolKind::Crayon, color, 10.0);
         let marker = Stroke::new(ToolKind::Marker, color, 10.0);
 
         assert_eq!(pen.effective_width(), 10.0);
         assert!(pencil.effective_width() < pen.effective_width());
+        assert!(crayon.effective_width() > pen.effective_width());
+        assert!(crayon.effective_width() < marker.effective_width());
         assert!(marker.effective_width() > pen.effective_width());
         assert!(ToolKind::Pencil.styled_color(color).a < color.a);
+        assert!(ToolKind::Crayon.styled_color(color).a > ToolKind::Marker.styled_color(color).a);
         assert!(ToolKind::Marker.styled_color(color).a < ToolKind::Pencil.styled_color(color).a);
         assert_eq!(pen.render_passes().len(), 1);
         assert_eq!(pencil.render_passes().len(), 3);
+        assert_eq!(crayon.render_passes().len(), 3);
         assert_eq!(marker.render_passes().len(), 3);
+        assert!(crayon.render_passes()[0].width > pencil.render_passes()[0].width);
+        assert!(
+            crayon.render_passes()[1].offset.dx != 0.0
+                || crayon.render_passes()[1].offset.dy != 0.0
+        );
         assert!(marker.render_passes()[0].width > marker.render_passes()[2].width);
         assert!(pencil.render_passes()[2].color.a < pencil.render_passes()[0].color.a);
     }

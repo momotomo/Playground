@@ -786,6 +786,11 @@ mod tests {
         pencil.push_point(PaintPoint::new(30.0, 18.0));
         document.push_stroke(pencil);
 
+        let mut crayon = Stroke::new(ToolKind::Crayon, RgbaColor::new(210, 120, 40, 190), 8.0);
+        crayon.push_point(PaintPoint::new(12.0, 22.0));
+        crayon.push_point(PaintPoint::new(32.0, 28.0));
+        document.push_stroke(crayon);
+
         let mut marker = Stroke::new(ToolKind::Marker, RgbaColor::new(32, 140, 220, 220), 10.0);
         marker.push_point(PaintPoint::new(8.0, 30.0));
         marker.push_point(PaintPoint::new(40.0, 34.0));

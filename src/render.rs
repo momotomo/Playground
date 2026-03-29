@@ -257,6 +257,20 @@ fn svg_stroke_export_passes(stroke: &Stroke) -> Vec<SvgStrokePass> {
                 width: (base_width * 0.28).max(0.65),
             },
         ],
+        ToolKind::Crayon => vec![
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.9),
+                width: (base_width * 1.08).max(0.95),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.32),
+                width: (base_width * 0.76).max(0.85),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.22),
+                width: (base_width * 0.52).max(0.75),
+            },
+        ],
         ToolKind::Marker => vec![
             SvgStrokePass {
                 color: base_color.with_alpha_scaled(0.62),
@@ -576,7 +590,7 @@ fn render_stroke(
     raster_background: RasterBackground,
 ) {
     match stroke.tool {
-        ToolKind::Brush | ToolKind::Pencil | ToolKind::Marker => {
+        ToolKind::Brush | ToolKind::Pencil | ToolKind::Crayon | ToolKind::Marker => {
             for pass in stroke.render_passes() {
                 render_stroke_pass(pixmap, &stroke.points, pass.width, pass.color, pass.offset);
             }
@@ -1265,6 +1279,11 @@ mod tests {
             RgbaColor::new(40, 60, 80, 255),
             10.0,
         ));
+        let crayon = svg_stroke_export_passes(&Stroke::new(
+            ToolKind::Crayon,
+            RgbaColor::new(40, 60, 80, 255),
+            10.0,
+        ));
         let marker = svg_stroke_export_passes(&Stroke::new(
             ToolKind::Marker,
             RgbaColor::new(40, 60, 80, 255),
@@ -1272,11 +1291,16 @@ mod tests {
         ));
 
         assert_eq!(pencil.len(), 3);
+        assert_eq!(crayon.len(), 3);
         assert_eq!(marker.len(), 3);
+        assert!(pencil[0].width < crayon[0].width);
+        assert!(crayon[0].width < marker[0].width);
+        assert!(marker[0].color.a < crayon[0].color.a);
         assert!(pencil[0].width < marker[0].width);
         assert!(marker[0].color.a < pencil[0].color.a);
         assert!(marker[0].width > marker[2].width);
         assert!(pencil[2].color.a < pencil[0].color.a);
+        assert!(crayon[2].color.a < crayon[0].color.a);
     }
 
     #[test]
