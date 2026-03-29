@@ -339,9 +339,9 @@ impl ToolKind {
     pub const fn width_scale(self) -> f32 {
         match self {
             Self::Brush => 1.0,
-            Self::Pencil => 0.8,
-            Self::Crayon => 1.18,
-            Self::Marker => 1.45,
+            Self::Pencil => 0.74,
+            Self::Crayon => 1.24,
+            Self::Marker => 1.52,
             Self::Eraser => 1.0,
         }
     }
@@ -349,9 +349,9 @@ impl ToolKind {
     pub const fn alpha_scale(self) -> f32 {
         match self {
             Self::Brush => 1.0,
-            Self::Pencil => 0.66,
-            Self::Crayon => 0.74,
-            Self::Marker => 0.42,
+            Self::Pencil => 0.58,
+            Self::Crayon => 0.79,
+            Self::Marker => 0.46,
             Self::Eraser => 1.0,
         }
     }
@@ -521,59 +521,59 @@ impl Stroke {
                 offset: PaintVector::default(),
             }],
             ToolKind::Pencil => {
-                let offset = stroke_texture_offset(&self.points, base_width * 0.18);
+                let offset = stroke_texture_offset(&self.points, base_width * 0.22);
                 vec![
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.92),
-                        width: (base_width * 0.92).max(0.95),
+                        color: base_color.with_alpha_scaled(0.88),
+                        width: (base_width * 0.88).max(0.9),
                         offset: PaintVector::default(),
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.34),
-                        width: (base_width * 0.5).max(0.85),
+                        color: base_color.with_alpha_scaled(0.28),
+                        width: (base_width * 0.46).max(0.8),
                         offset,
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.22),
-                        width: (base_width * 0.3).max(0.75),
+                        color: base_color.with_alpha_scaled(0.16),
+                        width: (base_width * 0.24).max(0.7),
                         offset: PaintVector::new(-offset.dx, -offset.dy),
                     },
                 ]
             }
             ToolKind::Crayon => {
-                let offset = stroke_texture_offset(&self.points, base_width * 0.22);
+                let offset = stroke_texture_offset(&self.points, base_width * 0.28);
                 vec![
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.9),
-                        width: (base_width * 1.08).max(1.0),
+                        color: base_color.with_alpha_scaled(0.86),
+                        width: (base_width * 1.12).max(1.0),
                         offset: PaintVector::default(),
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.32),
-                        width: (base_width * 0.76).max(0.95),
+                        color: base_color.with_alpha_scaled(0.34),
+                        width: (base_width * 0.82).max(0.95),
                         offset,
                     },
                     StrokeRenderPass {
-                        color: base_color.with_alpha_scaled(0.22),
-                        width: (base_width * 0.52).max(0.85),
-                        offset: PaintVector::new(-offset.dx * 0.65, -offset.dy * 0.65),
+                        color: base_color.with_alpha_scaled(0.2),
+                        width: (base_width * 0.58).max(0.85),
+                        offset: PaintVector::new(-offset.dx * 0.75, -offset.dy * 0.75),
                     },
                 ]
             }
             ToolKind::Marker => vec![
                 StrokeRenderPass {
-                    color: base_color.with_alpha_scaled(0.62),
-                    width: (base_width * 1.22).max(1.0),
+                    color: base_color.with_alpha_scaled(0.58),
+                    width: (base_width * 1.26).max(1.05),
                     offset: PaintVector::default(),
                 },
                 StrokeRenderPass {
-                    color: base_color.with_alpha_scaled(0.44),
-                    width: (base_width * 0.98).max(0.95),
+                    color: base_color.with_alpha_scaled(0.46),
+                    width: (base_width * 1.08).max(0.95),
                     offset: PaintVector::default(),
                 },
                 StrokeRenderPass {
-                    color: base_color.with_alpha_scaled(0.94),
-                    width: (base_width * 0.72).max(0.9),
+                    color: base_color.with_alpha_scaled(0.82),
+                    width: (base_width * 0.9).max(0.9),
                     offset: PaintVector::default(),
                 },
             ],
@@ -2570,17 +2570,21 @@ mod tests {
         assert!(ToolKind::Pencil.styled_color(color).a < color.a);
         assert!(ToolKind::Crayon.styled_color(color).a > ToolKind::Marker.styled_color(color).a);
         assert!(ToolKind::Marker.styled_color(color).a < ToolKind::Pencil.styled_color(color).a);
+        assert!(ToolKind::Crayon.styled_color(color).a > ToolKind::Pencil.styled_color(color).a);
         assert_eq!(pen.render_passes().len(), 1);
         assert_eq!(pencil.render_passes().len(), 3);
         assert_eq!(crayon.render_passes().len(), 3);
         assert_eq!(marker.render_passes().len(), 3);
         assert!(crayon.render_passes()[0].width > pencil.render_passes()[0].width);
+        assert!(marker.render_passes()[1].width > crayon.render_passes()[1].width);
+        assert!(pencil.render_passes()[0].width < pen.render_passes()[0].width);
         assert!(
             crayon.render_passes()[1].offset.dx != 0.0
                 || crayon.render_passes()[1].offset.dy != 0.0
         );
         assert!(marker.render_passes()[0].width > marker.render_passes()[2].width);
         assert!(pencil.render_passes()[2].color.a < pencil.render_passes()[0].color.a);
+        assert!(crayon.render_passes()[1].color.a > pencil.render_passes()[1].color.a);
     }
 
     #[test]

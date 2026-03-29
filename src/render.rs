@@ -245,44 +245,44 @@ fn svg_stroke_export_passes(stroke: &Stroke) -> Vec<SvgStrokePass> {
         }],
         ToolKind::Pencil => vec![
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.92),
-                width: (base_width * 0.92).max(0.85),
+                color: base_color.with_alpha_scaled(0.88),
+                width: (base_width * 0.88).max(0.8),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.32),
-                width: (base_width * 0.5).max(0.75),
+                color: base_color.with_alpha_scaled(0.28),
+                width: (base_width * 0.46).max(0.7),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.2),
-                width: (base_width * 0.28).max(0.65),
+                color: base_color.with_alpha_scaled(0.16),
+                width: (base_width * 0.24).max(0.6),
             },
         ],
         ToolKind::Crayon => vec![
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.9),
-                width: (base_width * 1.08).max(0.95),
+                color: base_color.with_alpha_scaled(0.86),
+                width: (base_width * 1.12).max(0.95),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.32),
-                width: (base_width * 0.76).max(0.85),
+                color: base_color.with_alpha_scaled(0.34),
+                width: (base_width * 0.82).max(0.85),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.22),
-                width: (base_width * 0.52).max(0.75),
+                color: base_color.with_alpha_scaled(0.2),
+                width: (base_width * 0.58).max(0.75),
             },
         ],
         ToolKind::Marker => vec![
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.62),
-                width: (base_width * 1.22).max(1.0),
+                color: base_color.with_alpha_scaled(0.58),
+                width: (base_width * 1.26).max(1.0),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.44),
-                width: (base_width * 0.98).max(0.9),
+                color: base_color.with_alpha_scaled(0.46),
+                width: (base_width * 1.08).max(0.9),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.94),
-                width: (base_width * 0.72).max(0.85),
+                color: base_color.with_alpha_scaled(0.82),
+                width: (base_width * 0.9).max(0.85),
             },
         ],
         ToolKind::Eraser => Vec::new(),
@@ -1298,6 +1298,8 @@ mod tests {
         assert!(marker[0].color.a < crayon[0].color.a);
         assert!(pencil[0].width < marker[0].width);
         assert!(marker[0].color.a < pencil[0].color.a);
+        assert!(crayon[1].color.a > pencil[1].color.a);
+        assert!(marker[1].width > crayon[1].width);
         assert!(marker[0].width > marker[2].width);
         assert!(pencil[2].color.a < pencil[0].color.a);
         assert!(crayon[2].color.a < crayon[0].color.a);

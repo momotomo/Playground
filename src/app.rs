@@ -4434,10 +4434,10 @@ fn set_alpha_percent(color: RgbaColor, percent: u8) -> RgbaColor {
 
 fn brush_kind_summary(tool: CanvasToolKind) -> &'static str {
     match tool {
-        CanvasToolKind::Brush => "くっきり描けるペン",
-        CanvasToolKind::Pencil => "やや薄く軽いえんぴつ",
-        CanvasToolKind::Crayon => "少し太くラフなクレヨン",
-        CanvasToolKind::Marker => "重ねやすい半透明マーカー",
+        CanvasToolKind::Brush => "もっとも素直でくっきり",
+        CanvasToolKind::Pencil => "細めで少しラフなえんぴつ",
+        CanvasToolKind::Crayon => "やや太くざらっとしたクレヨン",
+        CanvasToolKind::Marker => "太めで重ねやすいマーカー",
         _ => "",
     }
 }
@@ -4611,10 +4611,10 @@ fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
     match tool {
         CanvasToolKind::Select => "選ぶ・動かす・変形するツールです。",
         CanvasToolKind::Pan => "キャンバスをドラッグして移動します。",
-        CanvasToolKind::Brush => "はっきり描けるペンです。",
-        CanvasToolKind::Pencil => "少し軽いタッチのえんぴつです。",
-        CanvasToolKind::Crayon => "少し太く、少しラフなクレヨンです。",
-        CanvasToolKind::Marker => "重ねやすい半透明のマーカーです。",
+        CanvasToolKind::Brush => "もっとも素直でくっきり描けるペンです。",
+        CanvasToolKind::Pencil => "細めで少しラフなえんぴつです。",
+        CanvasToolKind::Crayon => "やや太く、少しざらっとしたクレヨンです。",
+        CanvasToolKind::Marker => "太めで重ねやすい半透明のマーカーです。",
         CanvasToolKind::Eyedropper => "見えている色を拾って線色や塗り色に使います。",
         CanvasToolKind::Bucket => {
             "塗り色で閉じた領域を塗ります。塗りのゆるさで少し広めにも塗れます。"
