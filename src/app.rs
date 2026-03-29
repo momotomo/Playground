@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::canvas::{
-    CanvasController, CanvasToolKind, CommittedDocumentEdit, DocumentEditMode, ToolSettings,
-    color32_from_rgba, rgba_from_color32,
+    CanvasController, CanvasMessageKind, CanvasToolKind, CommittedDocumentEdit, DocumentEditMode,
+    ToolSettings, color32_from_rgba, rgba_from_color32,
 };
 use crate::fonts::install_japanese_fonts;
 use crate::model::{
@@ -411,13 +411,17 @@ impl PaintApp {
     }
 
     fn tool_settings(&self) -> ToolSettings {
+        let fill_color = if self.active_tool == CanvasToolKind::Bucket {
+            Some(self.tool_colors.fill_color)
+        } else {
+            self.tool_colors
+                .fill_enabled
+                .then_some(self.tool_colors.fill_color)
+        };
         ToolSettings {
             tool: self.active_tool,
             stroke_color: self.tool_colors.stroke_color,
-            fill_color: self
-                .tool_colors
-                .fill_enabled
-                .then_some(self.tool_colors.fill_color),
+            fill_color,
             width: self.active_tool_width(),
             multi_select_mode: self.multi_select_mode,
             finger_draw_enabled: self.finger_draw_enabled,
@@ -431,7 +435,10 @@ impl PaintApp {
     fn tool_uses_fill(&self) -> bool {
         matches!(
             self.active_tool,
-            CanvasToolKind::Rectangle | CanvasToolKind::Ellipse | CanvasToolKind::Eyedropper
+            CanvasToolKind::Rectangle
+                | CanvasToolKind::Ellipse
+                | CanvasToolKind::Eyedropper
+                | CanvasToolKind::Bucket
         )
     }
 
@@ -706,6 +713,8 @@ impl PaintApp {
                 CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
             ) {
                 ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
+            } else if self.active_tool == CanvasToolKind::Bucket {
+                ui.small("塗り色で閉じた領域を塗ります。");
             }
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
@@ -797,6 +806,7 @@ impl PaintApp {
             CanvasToolKind::Pencil,
             CanvasToolKind::Marker,
             CanvasToolKind::Eyedropper,
+            CanvasToolKind::Bucket,
             CanvasToolKind::Rectangle,
             CanvasToolKind::Ellipse,
             CanvasToolKind::Line,
@@ -823,13 +833,18 @@ impl PaintApp {
             | CanvasToolKind::Pencil
             | CanvasToolKind::Marker
             | CanvasToolKind::Eyedropper
+            | CanvasToolKind::Bucket
             | CanvasToolKind::Rectangle
             | CanvasToolKind::Ellipse
             | CanvasToolKind::Line => {
-                ui.small(format!(
-                    "今のツールは描く太さ {:.1}px を使います。",
-                    self.tool_widths.draw_width
-                ));
+                if self.active_tool == CanvasToolKind::Bucket {
+                    ui.small("今のツールは塗り色を使って、閉じた領域を塗ります。");
+                } else {
+                    ui.small(format!(
+                        "今のツールは描く太さ {:.1}px を使います。",
+                        self.tool_widths.draw_width
+                    ));
+                }
             }
             CanvasToolKind::Eraser => {
                 ui.small(format!(
@@ -944,8 +959,10 @@ impl PaintApp {
         ui.label(RichText::new("色と不透明度").strong());
         if let Some(shape_context) = shape_context {
             ui.small(shape_context.edit_summary());
+        } else if self.active_tool == CanvasToolKind::Bucket {
+            ui.small("バケツ塗りは塗り色を使います。スポイトや色パレットからすぐ変更できます。");
         } else {
-            ui.small("線色は描画と図形、塗り色は四角形と楕円に使います。");
+            ui.small("線色は描画と図形、塗り色は四角形・楕円・バケツ塗りに使います。");
         }
 
         let editing_selected_shape =
@@ -1911,7 +1928,7 @@ impl PaintApp {
 
                 if ui
                     .add_enabled(can_file_io, egui::Button::new("SVG書き出し"))
-                    .on_hover_text("図形や線を拡大しやすい SVG として書き出します。")
+                    .on_hover_text("図形や線を拡大しやすい SVG として書き出します。バケツ塗りやブラシ質感は簡略化されます。")
                     .clicked()
                 {
                     self.export_svg(ctx);
@@ -2065,7 +2082,7 @@ impl PaintApp {
             .show(ctx, |ui| {
                 ui.label(RichText::new("短く確認する").strong());
                 ui.small("描く: ペン / えんぴつ / マーカーか図形ツールを選んでドラッグします。");
-                ui.small("色: スポイト、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。");
+                ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
                 ui.small("保存: JSON保存は再編集用、PNGは共有用、透過PNGは素材用、SVGは再利用向けです。");
@@ -2078,7 +2095,7 @@ impl PaintApp {
                 ui.label(RichText::new("ショートカット").strong());
                 ui.small("元に戻す: Ctrl/Cmd+Z · やり直す: Ctrl/Cmd+Shift+Z または Ctrl/Cmd+Y");
                 ui.small("JSON保存: Ctrl/Cmd+S · JSONを開く: Ctrl/Cmd+O · PNG書き出し: Ctrl/Cmd+Shift+E");
-                ui.small("ツール: V 選択 · H 手のひら · B ペン · N えんぴつ · M マーカー · I スポイト · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
+                ui.small("ツール: V 選択 · H 手のひら · B ペン · N えんぴつ · M マーカー · I スポイト · F バケツ塗り · R 四角形 · O 楕円 · L 直線 · E 消しゴム");
 
                 ui.add_space(10.0);
                 if ui.button("チュートリアルをもう一度見る").clicked() {
@@ -2260,6 +2277,7 @@ impl PaintApp {
                         "選択中の図形を回転しました。"
                     }
                 }
+                DocumentEditMode::Fill => "閉じた領域を塗りました。",
                 DocumentEditMode::Guide => "ガイドを移動しました。",
                 DocumentEditMode::Group => "選択中の要素をグループ化しました。",
                 DocumentEditMode::Ungroup => "選択中のグループを解除しました。",
@@ -2735,7 +2753,7 @@ impl PaintApp {
 
     fn finish_svg_export(&mut self, exported: ExportedVectorGraphic) {
         self.set_info(format!(
-            "SVG を {} として書き出しました。図形や線は再利用向けに出力し、ブラシ質感や消しゴムは簡略化されることがあります。",
+            "SVG を {} として書き出しました。図形や線は再利用向けに出力し、ブラシ質感は簡略化、バケツ塗りは行ごとの矩形へ整えて出力します。",
             exported.file_name
         ));
     }
@@ -3051,6 +3069,8 @@ impl PaintApp {
             self.set_active_tool(CanvasToolKind::Marker, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::I)) {
             self.set_active_tool(CanvasToolKind::Eyedropper, true);
+        } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F)) {
+            self.set_active_tool(CanvasToolKind::Bucket, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::R)) {
             self.set_active_tool(CanvasToolKind::Rectangle, true);
         } else if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::O)) {
@@ -3148,6 +3168,13 @@ impl eframe::App for PaintApp {
 
             if let Some(color) = output.picked_color {
                 self.apply_picked_color(color);
+            }
+
+            if let Some(message) = output.message {
+                match message.kind {
+                    CanvasMessageKind::Info => self.set_info(message.text),
+                    CanvasMessageKind::Error => self.set_error(message.text),
+                }
             }
 
             if let Some(tool) = output.requested_tool
@@ -3342,6 +3369,7 @@ fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
         CanvasToolKind::Pencil => "少し軽いタッチのえんぴつです。",
         CanvasToolKind::Marker => "重ねやすい半透明のマーカーです。",
         CanvasToolKind::Eyedropper => "見えている色を拾って線色や塗り色に使います。",
+        CanvasToolKind::Bucket => "塗り色で閉じた領域を塗ります。",
         CanvasToolKind::Eraser => "背景色でなぞって消します。",
         CanvasToolKind::Rectangle => "四角形の線と塗りを描きます。",
         CanvasToolKind::Ellipse => "楕円の線と塗りを描きます。",
@@ -3372,7 +3400,7 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
         },
         _ => TutorialStepContent {
             title: "保存方法は 2 つです",
-            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は見たままの画像共有用、透過PNG は素材向け、SVG書き出し は図形や線の再利用向けです。迷ったらヘルプからもう一度見直せます。",
+            body: "JSON保存 は続きから再編集したいとき用、PNG書き出し は見たままの画像共有用、透過PNG は素材向け、SVG書き出し は図形や線の再利用向けです。バケツ塗りで作った面も PNG では見たまま書き出せます。",
             action: "上部バーの「JSON保存」「JSONを開く」「PNG書き出し」「透過PNG」「SVG書き出し」を覚えておけば、ひとまず困りません。",
         },
     }

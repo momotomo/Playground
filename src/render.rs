@@ -1,11 +1,13 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter, Write};
 
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke as TinyStroke, Transform};
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, Pixmap, Rect as TinyRect, Stroke as TinyStroke, Transform,
+};
 
 use crate::model::{
-    GroupElement, PaintDocument, PaintElement, PaintLayer, PaintPoint, PaintVector, RgbaColor,
-    ShapeElement, ShapeKind, Stroke, ToolKind,
+    FillElement, GroupElement, PaintDocument, PaintElement, PaintLayer, PaintPoint, PaintVector,
+    RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
 };
 
 // Raster export options stay separate from document traversal so future SVG export can
@@ -143,6 +145,7 @@ fn render_element(
             render_stroke(pixmap, stroke, background, raster_background)
         }
         PaintElement::Shape(shape) => render_shape(pixmap, shape),
+        PaintElement::Fill(fill) => render_fill(pixmap, fill),
         PaintElement::Group(group) => render_group(pixmap, group, background, raster_background),
     }
 }
@@ -171,6 +174,7 @@ fn append_svg_element(svg: &mut String, element: &PaintElement, skipped_eraser: 
     match element {
         PaintElement::Stroke(stroke) => append_svg_stroke(svg, stroke, skipped_eraser),
         PaintElement::Shape(shape) => append_svg_shape(svg, shape),
+        PaintElement::Fill(fill) => append_svg_fill(svg, fill),
         PaintElement::Group(group) => append_svg_group(svg, group, skipped_eraser),
     }
 }
@@ -278,6 +282,35 @@ fn append_svg_closed_shape(svg: &mut String, d: &str, style: ShapeRenderStyle) {
         svg_scalar(style.stroke_width),
     )
     .expect("write into String should succeed");
+}
+
+fn append_svg_fill(svg: &mut String, fill: &FillElement) {
+    if fill.spans.is_empty() {
+        return;
+    }
+
+    // バケツ塗り結果は PNG 向けの見た目を優先して内部では scanline spans を持つため、
+    // SVG では 1px 高の矩形列へ素直に落として安全側で持ち出します。
+    let fill_opacity = svg_opacity(fill.color);
+    let fill_rgb = svg_rgb(fill.color);
+    svg.push_str("<g data-fill=\"bucket\">\n");
+    for span in &fill.spans {
+        let width = span.width();
+        if width == 0 {
+            continue;
+        }
+        writeln!(
+            svg,
+            r#"<rect x="{}" y="{}" width="{}" height="1" fill="{}" fill-opacity="{}" stroke="none" />"#,
+            svg_scalar(fill.origin.x + span.x_start as f32),
+            svg_scalar(fill.origin.y + span.y as f32),
+            svg_scalar(width as f32),
+            fill_rgb,
+            fill_opacity,
+        )
+        .expect("write into String should succeed");
+    }
+    svg.push_str("</g>\n");
 }
 
 fn points_to_path_data(points: &[PaintPoint], close: bool) -> String {
@@ -450,6 +483,38 @@ fn render_shape(pixmap: &mut Pixmap, shape: &ShapeElement) {
     );
 }
 
+fn render_fill(pixmap: &mut Pixmap, fill: &FillElement) {
+    if fill.spans.is_empty() {
+        return;
+    }
+
+    let mut paint = Paint {
+        anti_alias: false,
+        ..Paint::default()
+    };
+    paint.set_color_rgba8(fill.color.r, fill.color.g, fill.color.b, fill.color.a);
+
+    for span in &fill.spans {
+        let width = span.width() as f32;
+        if width <= 0.0 {
+            continue;
+        }
+        let x = fill.origin.x + span.x_start as f32;
+        let y = fill.origin.y + span.y as f32;
+        let Some(rect) = TinyRect::from_xywh(x, y, width, 1.0) else {
+            continue;
+        };
+        let path = PathBuilder::from_rect(rect);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ShapeRenderStyle {
     stroke_color: RgbaColor,
@@ -543,8 +608,8 @@ mod tests {
         render_document_png, render_document_svg, sample_document_color,
     };
     use crate::model::{
-        CanvasSize, GroupElement, GuideAxis, PaintDocument, PaintElement, PaintPoint, RgbaColor,
-        ShapeElement, ShapeKind, Stroke, ToolKind,
+        CanvasSize, FillElement, FillSpan, GroupElement, GuideAxis, PaintDocument, PaintElement,
+        PaintPoint, RgbaColor, ShapeElement, ShapeKind, Stroke, ToolKind,
     };
     use tiny_skia::Pixmap;
 
@@ -837,6 +902,38 @@ mod tests {
         assert!(svg.contains(r#"<line x1="6" y1="48" x2="58" y2="58""#));
         assert!(svg.contains("fill=\"#ffc440\""));
         assert!(svg.contains("stroke=\"#dc4040\""));
+    }
+
+    #[test]
+    fn svg_export_serializes_bucket_fill_as_scanline_rects() {
+        let mut document = PaintDocument {
+            canvas_size: CanvasSize::new(32.0, 32.0),
+            background: RgbaColor::white(),
+            ..PaintDocument::default()
+        };
+        document.push_fill(FillElement::new(
+            RgbaColor::from_rgba(48, 140, 220, 180),
+            PaintPoint::new(6.0, 7.0),
+            vec![
+                FillSpan {
+                    y: 0,
+                    x_start: 0,
+                    x_end: 4,
+                },
+                FillSpan {
+                    y: 1,
+                    x_start: 1,
+                    x_end: 5,
+                },
+            ],
+        ));
+
+        let svg = String::from_utf8(render_document_svg(&document).expect("svg export"))
+            .expect("svg should be utf-8");
+
+        assert!(svg.contains(r#"data-fill="bucket""#));
+        assert!(svg.contains(r#"<rect x="6" y="7" width="4" height="1""#));
+        assert!(svg.contains(r#"fill-opacity="0.7059""#));
     }
 
     #[test]
