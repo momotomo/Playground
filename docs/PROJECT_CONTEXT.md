@@ -13,6 +13,7 @@
 - `eframe`
 - native / `wasm32-unknown-unknown`
 - GitHub Pages で Web 公開
+- ソースコードは `MIT License`
 
 ## 保存と export
 
