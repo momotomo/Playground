@@ -245,22 +245,30 @@ fn svg_stroke_export_passes(stroke: &Stroke) -> Vec<SvgStrokePass> {
         }],
         ToolKind::Pencil => vec![
             SvgStrokePass {
-                color: base_color,
-                width: (base_width * 0.92).max(0.9),
+                color: base_color.with_alpha_scaled(0.92),
+                width: (base_width * 0.92).max(0.85),
             },
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.38),
-                width: (base_width * 0.46).max(0.75),
+                color: base_color.with_alpha_scaled(0.32),
+                width: (base_width * 0.5).max(0.75),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.2),
+                width: (base_width * 0.28).max(0.65),
             },
         ],
         ToolKind::Marker => vec![
             SvgStrokePass {
-                color: base_color.with_alpha_scaled(0.72),
-                width: (base_width * 1.18).max(1.0),
+                color: base_color.with_alpha_scaled(0.62),
+                width: (base_width * 1.22).max(1.0),
+            },
+            SvgStrokePass {
+                color: base_color.with_alpha_scaled(0.44),
+                width: (base_width * 0.98).max(0.9),
             },
             SvgStrokePass {
                 color: base_color.with_alpha_scaled(0.94),
-                width: (base_width * 0.84).max(0.9),
+                width: (base_width * 0.72).max(0.85),
             },
         ],
         ToolKind::Eraser => Vec::new(),
@@ -1176,10 +1184,12 @@ mod tests {
             10.0,
         ));
 
-        assert_eq!(pencil.len(), 2);
-        assert_eq!(marker.len(), 2);
+        assert_eq!(pencil.len(), 3);
+        assert_eq!(marker.len(), 3);
         assert!(pencil[0].width < marker[0].width);
         assert!(marker[0].color.a < pencil[0].color.a);
+        assert!(marker[0].width > marker[2].width);
+        assert!(pencil[2].color.a < pencil[0].color.a);
     }
 
     #[test]
