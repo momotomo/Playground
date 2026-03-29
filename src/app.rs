@@ -1163,7 +1163,7 @@ impl PaintApp {
         ui.label(RichText::new("ドキュメント").strong());
         ui.label(self.document_name.as_str());
         ui.small(dirty_suffix);
-        ui.small("PNG: 見たまま共有 · SVG: 図形や線の再利用");
+        ui.small("続きは JSON保存 · 共有は PNG / 透過PNG · 再利用は SVG");
     }
 
     fn show_tools(&mut self, ui: &mut egui::Ui) {
@@ -2484,25 +2484,24 @@ impl PaintApp {
             );
             if response.clicked() {
                 self.set_info(
-                    "配置補助ではグリッド、ガイド、ルーラー、スマートガイドを切り替えられます。",
+                    "グリッドやガイドで位置をそろえ、スマートガイドは移動中だけ目安を出します。",
                 );
             }
         });
         ui.small(format!(
-            "ルーラー: {} · グリッド: {:.0}px · スマートガイド: {} · ガイド: {}本",
+            "ルーラー: {} · グリッド: {:.0}px · 吸着: {} · ガイド: {}本",
             if rulers_visible {
                 "表示"
             } else {
                 "非表示"
             },
             grid.spacing,
-            if smart_guides_visible {
-                "オン"
-            } else {
-                "オフ"
-            },
+            snap_summary_label(grid.snap_enabled, guides_snap),
             guides.len(),
         ));
+        if smart_guides_visible {
+            ui.small("スマートガイドは移動や整列の時だけ表示されます。");
+        }
 
         ui.add_enabled_ui(!has_canvas_interaction, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -3535,7 +3534,9 @@ impl PaintApp {
                         "選択中の図形を回転しました。"
                     }
                 }
-                DocumentEditMode::Fill => "閉じた領域を塗りました。",
+                DocumentEditMode::Fill => {
+                    "閉じた領域を塗りました。結果は現在のレイヤーに入ります。"
+                }
                 DocumentEditMode::Guide => "ガイドを移動しました。",
                 DocumentEditMode::Group => "選択中の要素をグループ化しました。",
                 DocumentEditMode::Ungroup => "選択中のグループを解除しました。",
@@ -4488,6 +4489,15 @@ fn brush_kind_summary(tool: CanvasToolKind) -> &'static str {
     }
 }
 
+fn snap_summary_label(grid_snap: bool, guides_snap: bool) -> &'static str {
+    match (grid_snap, guides_snap) {
+        (true, true) => "グリッド・ガイド",
+        (true, false) => "グリッド",
+        (false, true) => "ガイド",
+        (false, false) => "オフ",
+    }
+}
+
 fn tablet_button_columns(available_width: f32) -> usize {
     if available_width >= 250.0 { 2 } else { 1 }
 }
@@ -4705,7 +4715,7 @@ fn tutorial_step(step_index: usize) -> TutorialStepContent {
 mod tests {
     use super::{
         CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, SelectionArrangeContext,
-        panel_widths_for_window, tablet_button_columns,
+        panel_widths_for_window, snap_summary_label, tablet_button_columns,
     };
     use crate::fill::FillTolerancePreset;
     use crate::model::{
@@ -5227,6 +5237,14 @@ mod tests {
         assert_eq!(panel_widths_for_window(900.0), (198.0, 212.0));
         assert_eq!(panel_widths_for_window(1100.0), (208.0, 224.0));
         assert_eq!(panel_widths_for_window(1400.0), (220.0, 240.0));
+    }
+
+    #[test]
+    fn snap_summary_label_describes_active_snap_targets() {
+        assert_eq!(snap_summary_label(true, true), "グリッド・ガイド");
+        assert_eq!(snap_summary_label(true, false), "グリッド");
+        assert_eq!(snap_summary_label(false, true), "ガイド");
+        assert_eq!(snap_summary_label(false, false), "オフ");
     }
 
     #[test]
