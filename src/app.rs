@@ -3224,7 +3224,7 @@ impl PaintApp {
                     } else {
                         "ヘルプ"
                     })
-                    .on_hover_text("操作説明やチュートリアル再表示を開きます。")
+                    .on_hover_text("操作の流れ、保存の使い分け、チュートリアル再表示を開きます。")
                     .clicked()
                 {
                     self.show_help = !self.show_help;
@@ -3370,14 +3370,24 @@ impl PaintApp {
                 ui.small("3. 続きを残すなら JSON保存、共有するなら PNG や SVG を使います。");
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("短く確認する").strong());
+                ui.label(RichText::new("道具と操作").strong());
                 ui.small("描く: ペン / えんぴつ / クレヨン / マーカーか図形ツールを選んでドラッグします。");
                 ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。バケツ塗りは塗りのゆるさも変えられます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
-                ui.small("保存: JSON保存は再編集用、PNGは共有用、透過PNGは素材用、SVGは再利用向けです。");
                 ui.small("レイヤー: 右側で現在のレイヤー、表示、ロックを切り替えます。");
                 ui.small("左パネル: 下までスクロールすると配置補助や保存メモが見られます。");
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("保存の使い分け").strong());
+                ui.small("JSON保存: 続きから再編集するときに使います。");
+                ui.small("PNG / 透過PNG: 見たまま共有したり、透明素材として使うときに向いています。");
+                ui.small("SVG書き出し: 図形や線を拡大や再利用しやすい形で持ち出すときに向いています。");
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("困ったとき").strong());
+                ui.small("ボタンの上ではツールチップ、左パネルでは短い状態表示が見られます。");
+                ui.small("最初の流れをもう一度確認したい時は、下のボタンからチュートリアルを開けます。");
                 #[cfg(target_arch = "wasm32")]
                 ui.small("Web版: JSON保存 と PNG / 透過PNG / SVG はダウンロード、JSONを開く はファイル選択です。");
 
