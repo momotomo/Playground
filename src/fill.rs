@@ -1,12 +1,67 @@
 use std::collections::VecDeque;
 use std::ops::RangeInclusive;
 
+use serde::{Deserialize, Serialize};
 use tiny_skia::Pixmap;
 
 use crate::model::{FillElement, FillSpan, PaintDocument, PaintPoint, RgbaColor};
 use crate::render::{RasterBackground, render_document_pixmap_with_background};
 
-const FILL_TOLERANCE: u8 = 6;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FillTolerancePreset {
+    Strict,
+    #[default]
+    Standard,
+    Relaxed,
+}
+
+impl FillTolerancePreset {
+    pub const ALL: [Self; 3] = [Self::Strict, Self::Standard, Self::Relaxed];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Strict => "細かく",
+            Self::Standard => "ふつう",
+            Self::Relaxed => "広め",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Strict => "色差をほとんど広げず、きっちり塗ります。",
+            Self::Standard => "少し色が違っても、ふつうにまとまって塗ります。",
+            Self::Relaxed => "境界の少しの途切れや色差をまたぎやすくします。",
+        }
+    }
+
+    pub const fn channel_tolerance(self) -> u8 {
+        match self {
+            Self::Strict => 0,
+            Self::Standard => 12,
+            Self::Relaxed => 24,
+        }
+    }
+
+    pub const fn next_more_permissive(self) -> Option<Self> {
+        match self {
+            Self::Strict => Some(Self::Standard),
+            Self::Standard => Some(Self::Relaxed),
+            Self::Relaxed => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloodFillOptions {
+    pub tolerance: FillTolerancePreset,
+}
+
+impl FloodFillOptions {
+    pub const fn new(tolerance: FillTolerancePreset) -> Self {
+        Self { tolerance }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloodFillFailure {
@@ -27,6 +82,23 @@ impl FloodFillFailure {
             Self::SameColor => "同じ色なので見た目は変わりませんでした。",
             Self::RegionNotFound => "閉じた領域が見つかりませんでした。",
             Self::RenderFailed => "塗りの準備中に失敗しました。",
+        }
+    }
+
+    pub fn user_message(self, options: FloodFillOptions) -> String {
+        match self {
+            Self::RegionNotFound => {
+                if let Some(next) = options.tolerance.next_more_permissive() {
+                    format!(
+                        "閉じた領域が見つかりませんでした。境界が少し途切れているか、塗りのゆるさを「{}」にすると塗れることがあります。",
+                        next.label()
+                    )
+                } else {
+                    "閉じた領域が見つかりませんでした。境界が大きく途切れている可能性があります。"
+                        .to_owned()
+                }
+            }
+            _ => self.message().to_owned(),
         }
     }
 }
@@ -54,6 +126,7 @@ pub fn flood_fill_document(
     document: &PaintDocument,
     seed: PaintPoint,
     fill_color: RgbaColor,
+    options: FloodFillOptions,
 ) -> Result<FloodFillResult, FloodFillFailure> {
     // 第一版のバケツ塗りは「見えている作品結果」を境界判定に使い、
     // 作業レイヤーへ scanline span として保存することで JSON / PNG / wasm を壊さず扱います。
@@ -72,13 +145,14 @@ pub fn flood_fill_document(
 
     let seed_x = seed.x.floor() as u32;
     let seed_y = seed.y.floor() as u32;
+    let tolerance = options.tolerance.channel_tolerance();
     let target_color =
         pixel_color(&pixmap, seed_x, seed_y).ok_or(FloodFillFailure::OutsideCanvas)?;
-    if rgba_within_tolerance(target_color, fill_color, FILL_TOLERANCE) {
+    if target_color == fill_color {
         return Err(FloodFillFailure::SameColor);
     }
 
-    let spans = extract_fill_region(&pixmap, seed_x, seed_y, target_color, FILL_TOLERANCE);
+    let spans = extract_fill_region(&pixmap, seed_x, seed_y, target_color, tolerance);
     if spans.is_empty() {
         return Err(FloodFillFailure::RegionNotFound);
     }
@@ -276,10 +350,10 @@ fn channel_distance(left: u8, right: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{FloodFillFailure, flood_fill_document};
+    use super::{FillTolerancePreset, FloodFillFailure, FloodFillOptions, flood_fill_document};
     use crate::model::{
-        CanvasSize, PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement, ShapeKind,
-        Stroke, ToolKind,
+        CanvasSize, FillElement, FillSpan, PaintDocument, PaintElement, PaintPoint, RgbaColor,
+        ShapeElement, ShapeKind, Stroke, ToolKind,
     };
     use crate::render::{RasterBackground, render_document_pixmap_with_background};
 
@@ -307,6 +381,7 @@ mod tests {
             &document,
             PaintPoint::new(32.0, 32.0),
             RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::default(),
         )
         .expect("fill should succeed");
 
@@ -328,6 +403,7 @@ mod tests {
             &layered,
             PaintPoint::new(32.0, 32.0),
             RgbaColor::from_rgba(64, 120, 220, 180),
+            FloodFillOptions::default(),
         )
         .expect("fill should respect visible upper layer");
 
@@ -360,7 +436,12 @@ mod tests {
     #[test]
     fn flood_fill_rejects_same_color_target() {
         let document = PaintDocument::default();
-        let result = flood_fill_document(&document, PaintPoint::new(4.0, 4.0), RgbaColor::white());
+        let result = flood_fill_document(
+            &document,
+            PaintPoint::new(4.0, 4.0),
+            RgbaColor::white(),
+            FloodFillOptions::default(),
+        );
 
         assert_eq!(result, Err(FloodFillFailure::SameColor));
     }
@@ -381,10 +462,61 @@ mod tests {
             &document,
             PaintPoint::new(8.0, 32.0),
             RgbaColor::from_rgba(255, 180, 60, 220),
+            FloodFillOptions::default(),
         )
         .expect("fill should succeed");
 
         let bounds = result.element.bounds().expect("fill bounds");
         assert!(bounds.max.x < 20.0, "fill should stay on the left side");
+    }
+
+    #[test]
+    fn standard_tolerance_crosses_small_color_gap_inside_closed_area() {
+        let mut document = closed_shape_document();
+        document.push_fill(FillElement::new(
+            RgbaColor::from_rgba(248, 248, 248, 255),
+            PaintPoint::new(32.0, 12.0),
+            (0..40)
+                .map(|y| FillSpan {
+                    y,
+                    x_start: 0,
+                    x_end: 20,
+                })
+                .collect(),
+        ));
+
+        let strict = flood_fill_document(
+            &document,
+            PaintPoint::new(20.0, 32.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::Strict),
+        )
+        .expect("strict fill should still work");
+        let standard = flood_fill_document(
+            &document,
+            PaintPoint::new(20.0, 32.0),
+            RgbaColor::from_rgba(255, 64, 64, 200),
+            FloodFillOptions::new(FillTolerancePreset::Standard),
+        )
+        .expect("standard fill should bridge the small gap");
+
+        let strict_bounds = strict.element.bounds().expect("strict bounds");
+        let standard_bounds = standard.element.bounds().expect("standard bounds");
+        assert!(
+            standard_bounds.max.x > strict_bounds.max.x + 8.0,
+            "standard should cross farther into the lightly tinted area"
+        );
+        assert!(standard.pixel_count > strict.pixel_count);
+    }
+
+    #[test]
+    fn region_not_found_message_suggests_more_permissive_fill() {
+        let strict_message = FloodFillFailure::RegionNotFound
+            .user_message(FloodFillOptions::new(FillTolerancePreset::Strict));
+        let relaxed_message = FloodFillFailure::RegionNotFound
+            .user_message(FloodFillOptions::new(FillTolerancePreset::Relaxed));
+
+        assert!(strict_message.contains("ふつう"));
+        assert!(relaxed_message.contains("境界が大きく途切れている"));
     }
 }

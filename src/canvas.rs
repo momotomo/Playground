@@ -3,7 +3,7 @@ use eframe::egui::{
     Vec2,
 };
 
-use crate::fill::{FloodFillFailure, flood_fill_document};
+use crate::fill::{FillTolerancePreset, FloodFillFailure, FloodFillOptions, flood_fill_document};
 use crate::model::{
     AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, GuideLine, LayerId,
     PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
@@ -128,6 +128,7 @@ pub struct ToolSettings {
     pub stroke_color: RgbaColor,
     pub fill_color: Option<RgbaColor>,
     pub width: f32,
+    pub fill_tolerance: FillTolerancePreset,
     pub multi_select_mode: bool,
     pub finger_draw_enabled: bool,
 }
@@ -1524,8 +1525,9 @@ impl CanvasController {
                 ..Default::default()
             };
         };
+        let fill_options = FloodFillOptions::new(tool_settings.fill_tolerance);
 
-        match flood_fill_document(document, world, fill_color) {
+        match flood_fill_document(document, world, fill_color, fill_options) {
             Ok(result) => {
                 let mut next = document.clone();
                 if next.insert_element_at(0, PaintElement::Fill(result.element)) {
@@ -1542,7 +1544,7 @@ impl CanvasController {
                 } else {
                     CanvasOutput {
                         message: Some(CanvasMessage::error(
-                            FloodFillFailure::ActiveLayerNotEditable.message(),
+                            FloodFillFailure::ActiveLayerNotEditable.user_message(fill_options),
                         )),
                         ..Default::default()
                     }
@@ -1550,8 +1552,10 @@ impl CanvasController {
             }
             Err(error) => CanvasOutput {
                 message: Some(match error {
-                    FloodFillFailure::SameColor => CanvasMessage::info(error.message()),
-                    _ => CanvasMessage::error(error.message()),
+                    FloodFillFailure::SameColor => {
+                        CanvasMessage::info(error.user_message(fill_options))
+                    }
+                    _ => CanvasMessage::error(error.user_message(fill_options)),
                 }),
                 ..Default::default()
             },

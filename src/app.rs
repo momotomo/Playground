@@ -9,6 +9,7 @@ use crate::canvas::{
     CanvasController, CanvasMessageKind, CanvasToolKind, CommittedDocumentEdit, DocumentEditMode,
     ToolSettings, color32_from_rgba, rgba_from_color32,
 };
+use crate::fill::FillTolerancePreset;
 use crate::fonts::install_japanese_fonts;
 use crate::model::{
     AlignmentKind, DistributionKind, DocumentHistory, GuideAxis, LayerId, PaintDocument,
@@ -170,6 +171,7 @@ enum WebStorageResult {
 struct UiStatePersistence {
     tutorial_dismissed: bool,
     recent_colors: Vec<RgbaColor>,
+    bucket_fill_tolerance: FillTolerancePreset,
 }
 
 #[derive(Clone, Default)]
@@ -423,6 +425,7 @@ impl PaintApp {
             stroke_color: self.tool_colors.stroke_color,
             fill_color,
             width: self.active_tool_width(),
+            fill_tolerance: self.ui_state.bucket_fill_tolerance,
             multi_select_mode: self.multi_select_mode,
             finger_draw_enabled: self.finger_draw_enabled,
         }
@@ -622,6 +625,19 @@ impl PaintApp {
         }
     }
 
+    fn set_bucket_fill_tolerance(&mut self, tolerance: FillTolerancePreset) {
+        if self.ui_state.bucket_fill_tolerance == tolerance {
+            return;
+        }
+
+        self.ui_state.bucket_fill_tolerance = tolerance;
+        self.ui_state_dirty = true;
+        self.set_info(format!(
+            "塗りのゆるさを「{}」にしました。",
+            tolerance.label()
+        ));
+    }
+
     fn sync_layer_name_draft(&mut self) {
         let Some((layer_id, layer_name)) = self
             .document()
@@ -715,6 +731,10 @@ impl PaintApp {
                 ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
             } else if self.active_tool == CanvasToolKind::Bucket {
                 ui.small("塗り色で閉じた領域を塗ります。");
+                ui.small(format!(
+                    "塗りのゆるさ: {}",
+                    self.ui_state.bucket_fill_tolerance.label()
+                ));
             }
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
@@ -838,7 +858,10 @@ impl PaintApp {
             | CanvasToolKind::Ellipse
             | CanvasToolKind::Line => {
                 if self.active_tool == CanvasToolKind::Bucket {
-                    ui.small("今のツールは塗り色を使って、閉じた領域を塗ります。");
+                    ui.small(format!(
+                        "今のツールは塗り色で閉じた領域を塗ります。塗りのゆるさは「{}」です。",
+                        self.ui_state.bucket_fill_tolerance.label()
+                    ));
                 } else {
                     ui.small(format!(
                         "今のツールは描く太さ {:.1}px を使います。",
@@ -855,6 +878,30 @@ impl PaintApp {
             CanvasToolKind::Select | CanvasToolKind::Pan => {
                 ui.small("描く太さは描画ツールと図形、消しゴム太さは消しゴムに使います。");
             }
+        }
+
+        if self.active_tool == CanvasToolKind::Bucket {
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.label(RichText::new("バケツ塗り設定").strong());
+                ui.small("少し色が違う場所まで、どのくらいまとめて塗るかを切り替えます。");
+                ui.horizontal_wrapped(|ui| {
+                    for preset in FillTolerancePreset::ALL {
+                        let response = ui
+                            .add_sized(
+                                [88.0, 34.0],
+                                egui::Button::new(preset.label())
+                                    .selected(self.ui_state.bucket_fill_tolerance == preset),
+                            )
+                            .on_hover_text(preset.description());
+                        if response.clicked() {
+                            self.set_bucket_fill_tolerance(preset);
+                        }
+                    }
+                });
+                ui.small(self.ui_state.bucket_fill_tolerance.description());
+                ui.small("判定は見えている全レイヤーを使い、塗り結果は現在のレイヤーへ入ります。");
+            });
         }
 
         if let Some(shape_context) = shape_context {
@@ -960,7 +1007,7 @@ impl PaintApp {
         if let Some(shape_context) = shape_context {
             ui.small(shape_context.edit_summary());
         } else if self.active_tool == CanvasToolKind::Bucket {
-            ui.small("バケツ塗りは塗り色を使います。スポイトや色パレットからすぐ変更できます。");
+            ui.small("バケツ塗りは塗り色を使います。スポイトや色パレットで色を変え、塗りのゆるさで塗れ方を調整できます。");
         } else {
             ui.small("線色は描画と図形、塗り色は四角形・楕円・バケツ塗りに使います。");
         }
@@ -1262,6 +1309,11 @@ impl PaintApp {
             CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
         ) {
             ui.small(format!("描き味: {}", brush_kind_summary(self.active_tool)));
+        } else if self.active_tool == CanvasToolKind::Bucket {
+            ui.small(format!(
+                "塗りのゆるさ: {}",
+                self.ui_state.bucket_fill_tolerance.label()
+            ));
         }
         ui.small(format!(
             "複数選択モード {} / 指でも描く {}",
@@ -2055,6 +2107,12 @@ impl PaintApp {
                     CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
                 ) {
                     summary_chip(ui, brush_kind_summary(self.active_tool), false);
+                } else if self.active_tool == CanvasToolKind::Bucket {
+                    summary_chip(
+                        ui,
+                        format!("ゆるさ: {}", self.ui_state.bucket_fill_tolerance.label()),
+                        false,
+                    );
                 }
                 if let Some(layer) = self.document().active_layer() {
                     summary_chip(ui, format!("作業: {}", layer.name), false);
@@ -2082,7 +2140,7 @@ impl PaintApp {
             .show(ctx, |ui| {
                 ui.label(RichText::new("短く確認する").strong());
                 ui.small("描く: ペン / えんぴつ / マーカーか図形ツールを選んでドラッグします。");
-                ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。");
+                ui.small("色: スポイト、バケツ塗り、最近使った色、簡易パレットで線色や塗り色をすぐ使い回せます。バケツ塗りは塗りのゆるさも変えられます。");
                 ui.small("選ぶ: 選択ツールで移動や変形、複数選択でまとめて整理できます。");
                 ui.small("パンとズーム: 手のひら、Space+Drag、2本指ドラッグ、ピンチが使えます。");
                 ui.small("保存: JSON保存は再編集用、PNGは共有用、透過PNGは素材用、SVGは再利用向けです。");
@@ -3369,7 +3427,9 @@ fn tool_button_tooltip(tool: CanvasToolKind) -> &'static str {
         CanvasToolKind::Pencil => "少し軽いタッチのえんぴつです。",
         CanvasToolKind::Marker => "重ねやすい半透明のマーカーです。",
         CanvasToolKind::Eyedropper => "見えている色を拾って線色や塗り色に使います。",
-        CanvasToolKind::Bucket => "塗り色で閉じた領域を塗ります。",
+        CanvasToolKind::Bucket => {
+            "塗り色で閉じた領域を塗ります。塗りのゆるさで少し広めにも塗れます。"
+        }
         CanvasToolKind::Eraser => "背景色でなぞって消します。",
         CanvasToolKind::Rectangle => "四角形の線と塗りを描きます。",
         CanvasToolKind::Ellipse => "楕円の線と塗りを描きます。",
@@ -3411,6 +3471,7 @@ mod tests {
     use super::{
         CanvasToolKind, ColorTarget, PaintApp, RECENT_COLOR_LIMIT, panel_widths_for_window,
     };
+    use crate::fill::FillTolerancePreset;
     use crate::model::{
         PaintDocument, PaintElement, PaintPoint, RgbaColor, ShapeElement, ShapeKind,
     };
@@ -3514,6 +3575,18 @@ mod tests {
             app.tool_colors.fill_color,
             RgbaColor::from_rgba(120, 90, 60, 180)
         );
+    }
+
+    #[test]
+    fn bucket_tool_settings_include_fill_tolerance() {
+        let mut app = PaintApp::default();
+        app.ui_state.bucket_fill_tolerance = FillTolerancePreset::Relaxed;
+        app.set_active_tool(CanvasToolKind::Bucket, false);
+
+        let settings = app.tool_settings();
+
+        assert_eq!(settings.tool, CanvasToolKind::Bucket);
+        assert_eq!(settings.fill_tolerance, FillTolerancePreset::Relaxed);
     }
 
     #[test]
