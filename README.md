@@ -8,7 +8,7 @@ MVP 完成版として、再編集用 `JSON保存`、共有用 `PNG書き出し`
 
 ## Web デモ
 
-- 公開 URL: [https://momotomo.github.io/Playground/](https://momotomo.github.io/Playground/)
+- 公開 URL: [https://momotomo.github.io/rust-drawing/](https://momotomo.github.io/rust-drawing/)
 - GitHub Pages では、このリポジトリの WebAssembly 版をそのまま試せます
 
 ## OSS と公開方針
