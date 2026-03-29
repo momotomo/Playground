@@ -1223,6 +1223,23 @@ impl PaintApp {
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
             }
+            if matches!(
+                self.active_tool,
+                CanvasToolKind::Brush
+                    | CanvasToolKind::Pencil
+                    | CanvasToolKind::Crayon
+                    | CanvasToolKind::Marker
+                    | CanvasToolKind::Eraser
+                    | CanvasToolKind::Rectangle
+                    | CanvasToolKind::Ellipse
+                    | CanvasToolKind::Line
+            ) {
+                ui.small(if self.finger_draw_enabled {
+                    "指: そのまま描画できます。"
+                } else {
+                    "指: 長押しで選択 / 2本指でパン"
+                });
+            }
             if let Some(operation) = self.canvas.current_operation_summary(self.document()) {
                 ui.small(format!("操作: {operation}"));
             }
@@ -1351,6 +1368,22 @@ impl PaintApp {
             CanvasToolKind::Select | CanvasToolKind::Pan
         ) {
             ui.small("選択や手のひらは、上の切り替えと合わせるとタブレットで使いやすくなります。");
+        } else if matches!(
+            self.active_tool,
+            CanvasToolKind::Brush
+                | CanvasToolKind::Pencil
+                | CanvasToolKind::Crayon
+                | CanvasToolKind::Marker
+                | CanvasToolKind::Eraser
+                | CanvasToolKind::Rectangle
+                | CanvasToolKind::Ellipse
+                | CanvasToolKind::Line
+        ) {
+            ui.small(if self.finger_draw_enabled {
+                "指でもそのまま描けます。オフの時は長押しで選択に入れます。"
+            } else {
+                "指は長押しで選択、2本指ドラッグでパンに使えます。"
+            });
         }
         ui.add_space(6.0);
 
