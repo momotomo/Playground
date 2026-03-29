@@ -652,6 +652,16 @@ impl CanvasController {
             } else {
                 None
             };
+        let hovered_shape = if tool_settings.tool == CanvasToolKind::Select
+            && self.active_preview.is_none()
+            && self.selection_session.is_none()
+        {
+            hover_pos.and_then(|pointer| {
+                self.hovered_shape_element(document, canvas_rect, pointer, touch_active)
+            })
+        } else {
+            None
+        };
         let preview_guide = self
             .selection_session
             .as_ref()
@@ -691,6 +701,9 @@ impl CanvasController {
             preview_guide,
         );
         paint_smart_guides(&painter, canvas_rect, self.view.zoom, smart_guide_overlay);
+        if let Some((_, hovered_shape)) = hovered_shape {
+            paint_hovered_shape_overlay(&painter, canvas_rect, self.view.zoom, hovered_shape);
+        }
 
         if let Some(preview) = &self.active_preview {
             paint_preview(
@@ -1404,6 +1417,20 @@ impl CanvasController {
                 self.selection.set_only(document.active_layer_id(), index);
             }
             self.begin_move_session(document, pointer_world);
+        } else if let Some(index) =
+            self.topmost_shape_index_from_bounds(document, pointer_world, tolerance)
+        {
+            if extend_selection {
+                self.selection.toggle(document.active_layer_id(), index);
+                self.selection_session = None;
+                self.interaction_mode = InteractionMode::Idle;
+                return;
+            }
+
+            if !self.selection.contains(index) {
+                self.selection.set_only(document.active_layer_id(), index);
+            }
+            self.begin_move_session(document, pointer_world);
         } else if !extend_selection
             && let Some((guide_index, guide)) = self.hit_guide(
                 document,
@@ -1940,6 +1967,41 @@ impl CanvasController {
         }
     }
 
+    fn hovered_shape_element(
+        &self,
+        document: &PaintDocument,
+        canvas_rect: Rect,
+        pointer_screen: Pos2,
+        touch_active: bool,
+    ) -> Option<(usize, ShapeElement)> {
+        let pointer_world =
+            screen_to_canvas_from_canvas_rect(canvas_rect, self.view.zoom, pointer_screen);
+        let tolerance = hit_tolerance_world(
+            self.view.zoom,
+            touch_active,
+            HIT_TOLERANCE_SCREEN,
+            TOUCH_HIT_TOLERANCE_SCREEN,
+        );
+        let (index, shape) = document
+            .hit_test(pointer_world, tolerance)
+            .and_then(|index| match document.element(index).cloned()? {
+                PaintElement::Shape(shape) => Some((index, shape)),
+                PaintElement::Stroke(_) | PaintElement::Fill(_) | PaintElement::Group(_) => None,
+            })
+            .or_else(|| {
+                let index =
+                    self.topmost_shape_index_from_bounds(document, pointer_world, tolerance)?;
+                match document.element(index).cloned()? {
+                    PaintElement::Shape(shape) => Some((index, shape)),
+                    PaintElement::Stroke(_) | PaintElement::Fill(_) | PaintElement::Group(_) => {
+                        None
+                    }
+                }
+            })?;
+
+        (!self.selection.contains(index)).then_some((index, shape))
+    }
+
     fn selection_uses_group_controls(&self, document: &PaintDocument) -> bool {
         if self.selection.len() > 1 {
             return true;
@@ -1965,6 +2027,21 @@ impl CanvasController {
         } else {
             selection_bounds_from_elements(&self.selected_visual_elements(document))
         }
+    }
+
+    fn topmost_shape_index_from_bounds(
+        &self,
+        document: &PaintDocument,
+        pointer_world: PaintPoint,
+        tolerance: f32,
+    ) -> Option<usize> {
+        (0..document.element_count()).rev().find(|index| {
+            matches!(
+                document.element(*index),
+                Some(PaintElement::Shape(shape))
+                    if expand_bounds(shape.bounds(), tolerance).contains(pointer_world)
+            )
+        })
     }
 
     fn hit_selection_move_bounds(
@@ -2075,8 +2152,11 @@ impl CanvasController {
             egui::CursorIcon::Grabbing
         } else if let Some(session) = &self.selection_session {
             match session {
-                SelectionSession::SingleResize { .. } | SelectionSession::MultiResize { .. } => {
-                    egui::CursorIcon::ResizeNwSe
+                SelectionSession::SingleResize {
+                    handle, base_shape, ..
+                } => resize_cursor_icon(ControlTarget::SingleResize(*handle), Some(*base_shape)),
+                SelectionSession::MultiResize { handle, .. } => {
+                    resize_cursor_icon(ControlTarget::GroupResize(*handle), None)
                 }
                 SelectionSession::SingleRotate { .. }
                 | SelectionSession::MultiRotate { .. }
@@ -2101,31 +2181,49 @@ impl CanvasController {
                     pointer,
                     touch_active,
                 ) {
-                    Some(ControlTarget::SingleResize(_)) | Some(ControlTarget::GroupResize(_)) => {
-                        egui::CursorIcon::ResizeNwSe
-                    }
+                    Some(control @ ControlTarget::SingleResize(_))
+                    | Some(control @ ControlTarget::GroupResize(_)) => resize_cursor_icon(
+                        control,
+                        self.single_selected_shape_owned(document)
+                            .map(|(_, shape)| shape),
+                    ),
                     Some(ControlTarget::SingleRotate) | Some(ControlTarget::GroupRotate) => {
                         egui::CursorIcon::Crosshair
                     }
                     None => {
                         let pointer_world =
                             screen_to_canvas_from_canvas_rect(canvas_rect, self.view.zoom, pointer);
-                        if self.hit_selection_move_bounds(document, pointer_world, touch_active) {
+                        let tolerance = hit_tolerance_world(
+                            self.view.zoom,
+                            touch_active,
+                            HIT_TOLERANCE_SCREEN,
+                            TOUCH_HIT_TOLERANCE_SCREEN,
+                        );
+                        let can_grab_shape =
+                            self.hit_selection_move_bounds(document, pointer_world, touch_active)
+                                || (document.hit_test(pointer_world, tolerance).is_none()
+                                    && self
+                                        .topmost_shape_index_from_bounds(
+                                            document,
+                                            pointer_world,
+                                            tolerance,
+                                        )
+                                        .is_some());
+                        if can_grab_shape {
                             egui::CursorIcon::Grab
-                        } else {
-                            match self.hit_guide(
-                                document,
-                                canvas_rect,
-                                self.view.zoom,
-                                pointer,
-                                touch_active,
-                            ) {
-                                Some((_, guide)) => match guide.axis {
-                                    GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
-                                    GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
-                                },
-                                None => egui::CursorIcon::PointingHand,
+                        } else if let Some((_, guide)) = self.hit_guide(
+                            document,
+                            canvas_rect,
+                            self.view.zoom,
+                            pointer,
+                            touch_active,
+                        ) {
+                            match guide.axis {
+                                GuideAxis::Horizontal => egui::CursorIcon::ResizeVertical,
+                                GuideAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
                             }
+                        } else {
+                            egui::CursorIcon::PointingHand
                         }
                     }
                 }
@@ -2661,6 +2759,58 @@ fn paint_fill(painter: &Painter, rect: Rect, zoom: f32, fill: &crate::model::Fil
     }
 }
 
+fn paint_hovered_shape_overlay(painter: &Painter, rect: Rect, zoom: f32, shape: ShapeElement) {
+    let accent = Color32::from_rgba_unmultiplied(26, 115, 232, 170);
+    let soft_fill = Color32::from_rgba_unmultiplied(26, 115, 232, 14);
+
+    match shape.kind {
+        ShapeKind::Line => {
+            paint_selection_move_zone(
+                painter,
+                rect,
+                zoom,
+                shape.bounds(),
+                SelectionZoneStyle {
+                    fill: soft_fill,
+                    accent,
+                    expand: 5.0,
+                    stroke_width: 1.2,
+                },
+            );
+            painter.line_segment(
+                [
+                    canvas_to_screen(rect, zoom, shape.start),
+                    canvas_to_screen(rect, zoom, shape.end),
+                ],
+                EguiStroke::new(1.2, accent),
+            );
+        }
+        ShapeKind::Rectangle | ShapeKind::Ellipse => {
+            paint_selection_move_zone(
+                painter,
+                rect,
+                zoom,
+                shape.bounds(),
+                SelectionZoneStyle {
+                    fill: soft_fill,
+                    accent,
+                    expand: 5.0,
+                    stroke_width: 1.2,
+                },
+            );
+            let outline: Vec<Pos2> = shape
+                .selection_outline()
+                .into_iter()
+                .map(|point| canvas_to_screen(rect, zoom, point))
+                .collect();
+            painter.add(egui::Shape::closed_line(
+                outline,
+                EguiStroke::new(1.2, accent),
+            ));
+        }
+    }
+}
+
 fn paint_selection_overlay(
     painter: &Painter,
     rect: Rect,
@@ -3146,6 +3296,28 @@ fn multi_selection_badge_text(count: usize, active_control: Option<ControlTarget
         Some(ControlTarget::GroupResize(_)) => format!("{count}個を拡大縮小"),
         Some(ControlTarget::GroupRotate) => format!("{count}個を回転"),
         _ => format!("{count}個をまとめて移動"),
+    }
+}
+
+fn resize_cursor_icon(control: ControlTarget, shape: Option<ShapeElement>) -> egui::CursorIcon {
+    match control {
+        ControlTarget::SingleResize(handle) => resize_cursor_for_handle(handle, shape),
+        ControlTarget::GroupResize(handle) => resize_cursor_for_handle(handle, None),
+        ControlTarget::SingleRotate | ControlTarget::GroupRotate => egui::CursorIcon::Crosshair,
+    }
+}
+
+fn resize_cursor_for_handle(handle: ShapeHandle, shape: Option<ShapeElement>) -> egui::CursorIcon {
+    match handle {
+        ShapeHandle::TopLeft | ShapeHandle::BottomRight => egui::CursorIcon::ResizeNwSe,
+        ShapeHandle::TopRight | ShapeHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+        ShapeHandle::Start | ShapeHandle::End => {
+            if shape.is_some_and(|shape| shape.kind == ShapeKind::Line) {
+                egui::CursorIcon::Crosshair
+            } else {
+                egui::CursorIcon::ResizeNwSe
+            }
+        }
     }
 }
 
@@ -3960,6 +4132,81 @@ mod tests {
         assert!(matches!(
             controller.selection_session,
             Some(SelectionSession::Move { .. })
+        ));
+    }
+
+    #[test]
+    fn unselected_shape_bbox_can_start_move_without_outline_hit() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(80.0, 80.0),
+        ));
+
+        let mut controller = CanvasController::default();
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(50.0, 50.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert_eq!(controller.selection.single(), Some(0));
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::Move { .. })
+        ));
+    }
+
+    #[test]
+    fn stroke_does_not_gain_shape_bbox_move_behavior() {
+        let mut document = test_document();
+        let mut stroke = Stroke::new(ToolKind::Brush, RgbaColor::charcoal(), 2.0);
+        stroke.points.push(PaintPoint::new(20.0, 20.0));
+        stroke.points.push(PaintPoint::new(80.0, 80.0));
+        document.push_stroke(stroke);
+
+        let mut controller = CanvasController::default();
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let canvas_rect = canvas_rect(
+            viewport,
+            controller.view.pan,
+            controller.view.zoom,
+            document.canvas_size,
+        );
+        let pointer_world = PaintPoint::new(80.0, 20.0);
+        let pointer_screen = canvas_to_screen(canvas_rect, controller.view.zoom, pointer_world);
+
+        controller.begin_selection_interaction(
+            &document,
+            canvas_rect,
+            pointer_screen,
+            pointer_world,
+            false,
+            false,
+        );
+
+        assert!(controller.selection.is_empty());
+        assert!(matches!(
+            controller.selection_session,
+            Some(SelectionSession::Marquee { .. })
         ));
     }
 
