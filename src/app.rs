@@ -3325,6 +3325,17 @@ impl PaintApp {
                         false,
                     );
                 }
+                if self.is_dirty() {
+                    summary_chip(
+                        ui,
+                        if compact_summary {
+                            "未保存".to_owned()
+                        } else {
+                            "未保存あり".to_owned()
+                        },
+                        true,
+                    );
+                }
                 if operation_summary.is_none()
                     && let Some(shape_chip) = &selected_shape_chip
                 {
