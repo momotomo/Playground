@@ -341,25 +341,40 @@ impl ShapeStyleContext {
         }
     }
 
+    fn stroke_summary_label(self) -> String {
+        format!(
+            "線 {}% / {:.1}px",
+            alpha_percent(self.stroke_color),
+            self.width
+        )
+    }
+
+    fn fill_summary_label(self) -> String {
+        if !self.supports_fill() || !self.has_any_fill() {
+            "塗りなし".to_owned()
+        } else if self.fill_enabled() {
+            self.fill_color
+                .map(|fill| format!("塗り {}%", alpha_percent(fill)))
+                .unwrap_or_else(|| "塗りあり".to_owned())
+        } else {
+            "一部に塗り".to_owned()
+        }
+    }
+
     fn edit_summary(self) -> String {
         match self.target {
-            ShapeStyleTarget::SelectedShape => {
-                "ここで変えると選択中の図形へ反映されます。".to_owned()
-            }
+            ShapeStyleTarget::SelectedShape => "選択中の図形へすぐ反映されます。".to_owned(),
             ShapeStyleTarget::SelectedShapes => {
                 if self.total_selection_count == self.shape_count {
-                    format!(
-                        "ここで変えると、選択中の図形{}個へまとめて反映されます。",
-                        self.shape_count
-                    )
+                    format!("選択中の図形{}個へまとめて反映されます。", self.shape_count)
                 } else {
                     format!(
-                        "ここで変えると、選択中{}個のうち図形{}個へまとめて反映されます。",
+                        "選択中{}個のうち図形{}個へまとめて反映されます。",
                         self.total_selection_count, self.shape_count
                     )
                 }
             }
-            ShapeStyleTarget::NewShape => "ここで変えると次に描く図形へ反映されます。".to_owned(),
+            ShapeStyleTarget::NewShape => "次に描く図形へ反映されます。".to_owned(),
         }
     }
 
@@ -1185,6 +1200,9 @@ impl PaintApp {
                         shape_context.paint_mode_label(),
                         shape_context.has_any_fill(),
                     );
+                    if let Some(reflection_label) = shape_context.reflection_chip_label() {
+                        layer_status_chip(ui, &reflection_label, true);
+                    }
                 });
                 ui.small(shape_context.edit_summary());
                 if let Some(fill_scope_note) = shape_context.fill_scope_note() {
@@ -1193,23 +1211,13 @@ impl PaintApp {
                     ui.small("値が違う図形も、ここでまとめて上書きできます。");
                 }
                 ui.horizontal_wrapped(|ui| {
+                    summary_chip(ui, shape_context.stroke_summary_label(), false);
                     summary_chip(
                         ui,
-                        format!("線 {}%", alpha_percent(shape_context.stroke_color)),
-                        false,
+                        shape_context.fill_summary_label(),
+                        shape_context.has_any_fill(),
                     );
-                    summary_chip(ui, format!("線幅 {:.1}px", shape_context.width), false);
-                    if shape_context.supports_fill() {
-                        if let Some(fill_color) = shape_context.fill_color {
-                            summary_chip(
-                                ui,
-                                format!("塗り {}%", alpha_percent(fill_color)),
-                                shape_context.fill_enabled(),
-                            );
-                        } else {
-                            summary_chip(ui, "塗りなし", false);
-                        }
-                    } else {
+                    if !shape_context.supports_fill() {
                         summary_chip(ui, "直線は線のみ", false);
                     }
                 });
@@ -1380,6 +1388,9 @@ impl PaintApp {
         let fill_controls_available = shape_context
             .map(|context| context.supports_fill())
             .unwrap_or(true);
+        if !fill_controls_available && self.tool_colors.quick_color_target == ColorTarget::Fill {
+            self.tool_colors.quick_color_target = ColorTarget::Stroke;
+        }
         let shape_kind_label = shape_context.map(|context| context.kind.label().to_owned());
         let stroke_source = shape_context
             .map(|context| context.stroke_color)
@@ -1393,16 +1404,37 @@ impl PaintApp {
 
         ui.horizontal_wrapped(|ui| {
             ui.label("色の反映先");
-            ui.selectable_value(
-                &mut self.tool_colors.quick_color_target,
-                ColorTarget::Stroke,
-                "線色",
-            );
-            ui.selectable_value(
-                &mut self.tool_colors.quick_color_target,
-                ColorTarget::Fill,
-                "塗り色",
-            );
+            let target_button_width = if fill_controls_available {
+                ((ui.available_width() - 12.0) / 2.0).max(90.0)
+            } else {
+                ui.available_width().clamp(90.0, 180.0)
+            };
+            if ui
+                .add_sized(
+                    [target_button_width, 30.0],
+                    egui::Button::new("線色")
+                        .selected(self.tool_colors.quick_color_target == ColorTarget::Stroke),
+                )
+                .on_hover_text("線色を編集対象にします。")
+                .clicked()
+            {
+                self.tool_colors.quick_color_target = ColorTarget::Stroke;
+            }
+            if fill_controls_available {
+                if ui
+                    .add_sized(
+                        [target_button_width, 30.0],
+                        egui::Button::new("塗り色")
+                            .selected(self.tool_colors.quick_color_target == ColorTarget::Fill),
+                    )
+                    .on_hover_text("塗り色を編集対象にします。")
+                    .clicked()
+                {
+                    self.tool_colors.quick_color_target = ColorTarget::Fill;
+                }
+            } else {
+                summary_chip(ui, "塗りなし", false);
+            }
         });
         ui.horizontal_wrapped(|ui| {
             let stroke_selected = self.tool_colors.quick_color_target == ColorTarget::Stroke;
@@ -1439,6 +1471,15 @@ impl PaintApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("線").strong());
                 summary_chip(ui, format!("{}%", alpha_percent(stroke_source)), false);
+                summary_chip(
+                    ui,
+                    if self.tool_colors.quick_color_target == ColorTarget::Stroke {
+                        "編集中: 線色"
+                    } else {
+                        "線"
+                    },
+                    self.tool_colors.quick_color_target == ColorTarget::Stroke,
+                );
                 if let Some(shape_context) = shape_context
                     && let Some(reflection_label) = shape_context.reflection_chip_label()
                 {
@@ -1517,15 +1558,28 @@ impl PaintApp {
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("塗り").strong());
-                    if let Some(fill_color) = shape_context
-                        .filter(|context| context.has_any_fill())
-                        .map(|_| fill_color_source)
-                        .or(fill_enabled_source.then_some(fill_color_source))
-                    {
-                        summary_chip(ui, format!("{}%", alpha_percent(fill_color)), false);
-                    } else {
-                        summary_chip(ui, "塗りなし", false);
-                    }
+                    summary_chip(
+                        ui,
+                        shape_context
+                            .map(ShapeStyleContext::fill_summary_label)
+                            .unwrap_or_else(|| {
+                                if fill_enabled_source {
+                                    format!("塗り {}%", alpha_percent(fill_color_source))
+                                } else {
+                                    "塗りなし".to_owned()
+                                }
+                            }),
+                        fill_enabled_source,
+                    );
+                    summary_chip(
+                        ui,
+                        if self.tool_colors.quick_color_target == ColorTarget::Fill {
+                            "編集中: 塗り色"
+                        } else {
+                            "塗り"
+                        },
+                        self.tool_colors.quick_color_target == ColorTarget::Fill,
+                    );
                     if let Some(shape_context) = shape_context
                         && let Some(reflection_label) = shape_context.reflection_chip_label()
                     {
@@ -4304,6 +4358,8 @@ mod tests {
         assert!(context.is_selected_shape());
         assert_eq!(context.kind, ShapeKind::Rectangle);
         assert_eq!(context.paint_mode_label(), "線と塗り");
+        assert_eq!(context.stroke_summary_label(), "線 100% / 9.0px");
+        assert_eq!(context.fill_summary_label(), "塗り 55%");
         assert_eq!(context.stroke_color, RgbaColor::from_rgba(20, 40, 60, 255));
         assert_eq!(
             context.fill_color,
@@ -4336,6 +4392,7 @@ mod tests {
         assert_eq!(context.kind, ShapeKind::Line);
         assert!(!context.supports_fill());
         assert_eq!(context.paint_mode_label(), "線だけ");
+        assert_eq!(context.fill_summary_label(), "塗りなし");
         assert_eq!(context.fill_color, None);
     }
 
@@ -4399,6 +4456,7 @@ mod tests {
         assert_eq!(context.total_selection_count, 2);
         assert_eq!(context.fill_supported_count, 1);
         assert_eq!(context.paint_mode_label(), "線だけ");
+        assert_eq!(context.fill_summary_label(), "塗りなし");
         assert_eq!(
             context.fill_scope_note(),
             Some("直線には塗りを適用せず、四角形 / 楕円だけに反映します。")
