@@ -248,6 +248,7 @@ impl Default for ToolColorSettings {
 #[derive(Clone, Copy)]
 enum ShapeStyleTarget {
     SelectedShape,
+    SelectedShapes,
     NewShape,
 }
 
@@ -258,6 +259,10 @@ struct ShapeStyleContext {
     stroke_color: RgbaColor,
     fill_color: Option<RgbaColor>,
     width: f32,
+    shape_count: usize,
+    total_selection_count: usize,
+    fill_supported_count: usize,
+    fill_enabled_count: usize,
 }
 
 impl ShapeStyleContext {
@@ -265,26 +270,106 @@ impl ShapeStyleContext {
         matches!(self.target, ShapeStyleTarget::SelectedShape)
     }
 
+    fn is_selected_shapes(self) -> bool {
+        matches!(self.target, ShapeStyleTarget::SelectedShapes)
+    }
+
+    fn is_selection_target(self) -> bool {
+        matches!(
+            self.target,
+            ShapeStyleTarget::SelectedShape | ShapeStyleTarget::SelectedShapes
+        )
+    }
+
     fn supports_fill(self) -> bool {
-        self.kind.supports_fill()
+        self.fill_supported_count > 0
     }
 
     fn fill_enabled(self) -> bool {
-        self.fill_color.is_some()
+        self.supports_fill() && self.fill_enabled_count == self.fill_supported_count
     }
 
-    fn edit_summary(self) -> &'static str {
+    fn has_any_fill(self) -> bool {
+        self.fill_enabled_count > 0
+    }
+
+    fn selection_label(self) -> String {
         match self.target {
-            ShapeStyleTarget::SelectedShape => "ここで変えると選択中の図形へ反映されます。",
-            ShapeStyleTarget::NewShape => "ここで変えると次に描く図形へ反映されます。",
+            ShapeStyleTarget::SelectedShape => "選択中".to_owned(),
+            ShapeStyleTarget::SelectedShapes => {
+                if self.total_selection_count == self.shape_count {
+                    format!("{}個の図形", self.shape_count)
+                } else {
+                    format!(
+                        "{}個選択 / 図形{}個",
+                        self.total_selection_count, self.shape_count
+                    )
+                }
+            }
+            ShapeStyleTarget::NewShape => "次に描く図形".to_owned(),
+        }
+    }
+
+    fn kind_summary_label(self) -> String {
+        match self.target {
+            ShapeStyleTarget::SelectedShape | ShapeStyleTarget::NewShape => {
+                self.kind.label().to_owned()
+            }
+            ShapeStyleTarget::SelectedShapes => format!("図形 {}個", self.shape_count),
+        }
+    }
+
+    fn fill_scope_note(self) -> Option<&'static str> {
+        (self.supports_fill() && self.fill_supported_count < self.shape_count)
+            .then_some("直線には塗りを適用せず、四角形 / 楕円だけに反映します。")
+    }
+
+    fn reflection_chip_label(self) -> Option<String> {
+        match self.target {
+            ShapeStyleTarget::SelectedShape => Some("選択中へ反映".to_owned()),
+            ShapeStyleTarget::SelectedShapes => {
+                Some(if self.total_selection_count == self.shape_count {
+                    format!("図形{}個へ反映", self.shape_count)
+                } else {
+                    format!(
+                        "選択{}個中 図形{}個へ反映",
+                        self.total_selection_count, self.shape_count
+                    )
+                })
+            }
+            ShapeStyleTarget::NewShape => None,
+        }
+    }
+
+    fn edit_summary(self) -> String {
+        match self.target {
+            ShapeStyleTarget::SelectedShape => {
+                "ここで変えると選択中の図形へ反映されます。".to_owned()
+            }
+            ShapeStyleTarget::SelectedShapes => {
+                if self.total_selection_count == self.shape_count {
+                    format!(
+                        "ここで変えると、選択中の図形{}個へまとめて反映されます。",
+                        self.shape_count
+                    )
+                } else {
+                    format!(
+                        "ここで変えると、選択中{}個のうち図形{}個へまとめて反映されます。",
+                        self.total_selection_count, self.shape_count
+                    )
+                }
+            }
+            ShapeStyleTarget::NewShape => "ここで変えると次に描く図形へ反映されます。".to_owned(),
         }
     }
 
     fn paint_mode_label(self) -> &'static str {
-        if self.fill_enabled() {
+        if !self.supports_fill() || !self.has_any_fill() {
+            "線だけ"
+        } else if self.fill_enabled() {
             "線と塗り"
         } else {
-            "線だけ"
+            "一部に塗り"
         }
     }
 }
@@ -435,24 +520,68 @@ impl PaintApp {
             return None;
         }
 
-        let [index] = self.canvas.selection_indices() else {
+        let selected_shapes = self.selected_shape_edit_targets();
+        let [(index, shape)] = selected_shapes.as_slice() else {
             return None;
         };
 
-        match self.document().element(*index).cloned()? {
-            PaintElement::Shape(shape) => Some((*index, shape)),
-            _ => None,
+        Some((*index, *shape))
+    }
+
+    fn selected_shape_edit_targets(&self) -> Vec<(usize, ShapeElement)> {
+        if self.active_tool != CanvasToolKind::Select {
+            return Vec::new();
         }
+
+        self.canvas
+            .selection_indices()
+            .iter()
+            .filter_map(|index| match self.document().element(*index).cloned()? {
+                PaintElement::Shape(shape) => Some((*index, shape)),
+                _ => None,
+            })
+            .collect()
     }
 
     fn current_shape_style_context(&self) -> Option<ShapeStyleContext> {
-        if let Some((_, shape)) = self.selected_shape_edit_target() {
+        let selected_shapes = self.selected_shape_edit_targets();
+        let total_selection_count = self.canvas.selection_count();
+
+        if let [(_, shape)] = selected_shapes.as_slice()
+            && total_selection_count == 1
+        {
             return Some(ShapeStyleContext {
                 target: ShapeStyleTarget::SelectedShape,
                 kind: shape.kind,
                 stroke_color: shape.color,
                 fill_color: shape.effective_fill_color(),
                 width: shape.width,
+                shape_count: 1,
+                total_selection_count: 1,
+                fill_supported_count: usize::from(shape.kind.supports_fill()),
+                fill_enabled_count: usize::from(shape.effective_fill_color().is_some()),
+            });
+        }
+
+        if let Some((_, representative)) = selected_shapes.first().copied() {
+            let fill_supported_count = selected_shapes
+                .iter()
+                .filter(|(_, shape)| shape.kind.supports_fill())
+                .count();
+            let fill_enabled_count = selected_shapes
+                .iter()
+                .filter(|(_, shape)| shape.effective_fill_color().is_some())
+                .count();
+            return Some(ShapeStyleContext {
+                target: ShapeStyleTarget::SelectedShapes,
+                kind: representative.kind,
+                stroke_color: representative.color,
+                fill_color: representative.effective_fill_color(),
+                width: representative.width,
+                shape_count: selected_shapes.len(),
+                total_selection_count,
+                fill_supported_count,
+                fill_enabled_count,
             });
         }
 
@@ -466,6 +595,10 @@ impl PaintApp {
                 .fill_enabled
                 .then_some(self.tool_colors.fill_color),
             width: self.tool_widths.draw_width,
+            shape_count: 1,
+            total_selection_count: 0,
+            fill_supported_count: usize::from(kind.supports_fill()),
+            fill_enabled_count: usize::from(kind.supports_fill() && self.tool_colors.fill_enabled),
         })
     }
 
@@ -500,6 +633,45 @@ impl PaintApp {
         }
     }
 
+    fn replace_selected_shapes(
+        &mut self,
+        update: impl Fn(ShapeElement) -> ShapeElement,
+        message: impl Into<String>,
+    ) -> usize {
+        let message = message.into();
+        let targets = self.selected_shape_edit_targets();
+        if targets.is_empty() {
+            return 0;
+        }
+
+        let replacements: Vec<_> = targets
+            .iter()
+            .filter_map(|(index, shape)| {
+                let next_shape = update(*shape);
+                (next_shape != *shape).then_some((*index, PaintElement::Shape(next_shape)))
+            })
+            .collect();
+        if replacements.is_empty() {
+            return 0;
+        }
+
+        let mut document = self.document().clone();
+        let active_layer_id = document.active_layer_id();
+        let selection_indices = self.canvas.selection_indices().to_vec();
+        if !document.replace_elements(&replacements) {
+            return 0;
+        }
+
+        if self.history.replace_document(document) {
+            self.canvas
+                .set_selection_indices(active_layer_id, selection_indices);
+            self.set_info(message);
+            replacements.len()
+        } else {
+            0
+        }
+    }
+
     fn push_recent_color(&mut self, color: RgbaColor) {
         if self.ui_state.recent_colors.first().copied() == Some(color) {
             return;
@@ -515,36 +687,68 @@ impl PaintApp {
 
     fn apply_color_to_target(&mut self, color: RgbaColor, announce: impl Into<String>) {
         let announce = announce.into();
-        let mut applied_to_shape = None;
+        let mut applied_message = None;
         match self.tool_colors.quick_color_target {
             ColorTarget::Stroke => {
                 self.tool_colors.stroke_color = color;
-                if let Some((_, shape)) = self.selected_shape_edit_target()
+                let selected_shapes = self.selected_shape_edit_targets();
+                if selected_shapes.len() > 1 {
+                    let changed = self.replace_selected_shapes(
+                        |selected| ShapeElement { color, ..selected },
+                        format!(
+                            "選択中の図形{}個の線色を変更しました。",
+                            selected_shapes.len()
+                        ),
+                    );
+                    if changed > 0 {
+                        applied_message =
+                            Some(format!("選択中の図形{}個にも反映しました。", changed));
+                    }
+                } else if let Some((_, shape)) = selected_shapes.first().copied()
                     && self.replace_selected_shape(
                         |selected| ShapeElement { color, ..selected },
                         format!("選択中の{}の線色を変更しました。", shape.kind.label()),
                     )
                 {
-                    applied_to_shape = Some(shape.kind.label());
+                    applied_message =
+                        Some(format!("選択中の{}にも反映しました。", shape.kind.label()));
                 }
             }
             ColorTarget::Fill => {
                 self.tool_colors.fill_color = color;
                 self.tool_colors.fill_enabled = true;
-                if let Some((_, shape)) = self.selected_shape_edit_target()
+                let selected_shapes = self.selected_shape_edit_targets();
+                let fill_target_count = selected_shapes
+                    .iter()
+                    .filter(|(_, shape)| shape.kind.supports_fill())
+                    .count();
+                if selected_shapes.len() > 1 && fill_target_count > 0 {
+                    let changed = self.replace_selected_shapes(
+                        |selected| selected.with_fill_color(Some(color)),
+                        format!(
+                            "選択中の図形{}個の塗り色を変更しました。",
+                            fill_target_count
+                        ),
+                    );
+                    if changed > 0 {
+                        applied_message =
+                            Some(format!("塗り対応の図形{}個にも反映しました。", changed));
+                    }
+                } else if let Some((_, shape)) = selected_shapes.first().copied()
                     && shape.kind.supports_fill()
                     && self.replace_selected_shape(
                         |selected| selected.with_fill_color(Some(color)),
                         format!("選択中の{}の塗り色を変更しました。", shape.kind.label()),
                     )
                 {
-                    applied_to_shape = Some(shape.kind.label());
+                    applied_message =
+                        Some(format!("選択中の{}にも反映しました。", shape.kind.label()));
                 }
             }
         }
         self.push_recent_color(color);
-        if let Some(kind_label) = applied_to_shape {
-            self.set_info(format!("{announce} 選択中の{kind_label}にも反映しました。"));
+        if let Some(applied_message) = applied_message {
+            self.set_info(format!("{announce} {applied_message}"));
         } else {
             self.set_info(announce);
         }
@@ -730,12 +934,15 @@ impl PaintApp {
                 ui.small(selection_context);
             }
             if let Some(shape_context) = shape_context {
-                if shape_context.is_selected_shape() {
-                    ui.small(format!("選択図形: {}", shape_context.kind.label()));
+                if shape_context.is_selection_target() {
+                    ui.small(format!("選択図形: {}", shape_context.kind_summary_label()));
                 } else {
-                    ui.small(format!("次の図形: {}", shape_context.kind.label()));
+                    ui.small(format!("次の図形: {}", shape_context.kind_summary_label()));
                 }
                 ui.small(format!("見え方: {}", shape_context.paint_mode_label()));
+                if let Some(fill_scope_note) = shape_context.fill_scope_note() {
+                    ui.small(fill_scope_note);
+                }
             }
             ui.horizontal_wrapped(|ui| {
                 let show_fill_swatch = shape_context
@@ -901,23 +1108,24 @@ impl PaintApp {
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("図形スタイル").strong());
-                    if shape_context.is_selected_shape() {
-                        layer_status_chip(ui, "選択中", true);
+                    if shape_context.is_selection_target() {
+                        layer_status_chip(ui, &shape_context.selection_label(), true);
                     } else {
                         layer_status_chip(ui, "次に描く図形", false);
                     }
-                    summary_chip(ui, shape_context.kind.label(), true);
+                    summary_chip(ui, shape_context.kind_summary_label(), true);
                     summary_chip(
                         ui,
                         shape_context.paint_mode_label(),
-                        shape_context.fill_enabled(),
+                        shape_context.has_any_fill(),
                     );
                 });
-                ui.small(if shape_context.is_selected_shape() {
-                    "色・線幅・見え方を変えると、選択中の図形へすぐ反映されます。"
-                } else {
-                    "ここで整えた見え方が、次に描く図形へ反映されます。"
-                });
+                ui.small(shape_context.edit_summary());
+                if let Some(fill_scope_note) = shape_context.fill_scope_note() {
+                    ui.small(fill_scope_note);
+                } else if shape_context.is_selected_shapes() {
+                    ui.small("値が違う図形も、ここでまとめて上書きできます。");
+                }
                 ui.horizontal_wrapped(|ui| {
                     summary_chip(
                         ui,
@@ -946,24 +1154,36 @@ impl PaintApp {
                         if ui
                             .add_sized(
                                 [mode_button_width, 34.0],
-                                egui::Button::new("線だけ").selected(!shape_context.fill_enabled()),
+                                egui::Button::new("線だけ").selected(!shape_context.has_any_fill()),
                             )
                             .on_hover_text("塗りなしで、線だけの図形にします。")
                             .clicked()
                         {
                             self.tool_colors.fill_enabled = false;
-                            if shape_context.is_selected_shape() {
-                                if !self.replace_selected_shape(
+                            if shape_context.is_selection_target() {
+                                let changed = self.replace_selected_shapes(
                                     |shape| shape.with_fill_color(None),
-                                    format!(
-                                        "選択中の{}を線だけにしました。",
-                                        shape_context.kind.label()
-                                    ),
-                                ) {
-                                    self.set_info(format!(
-                                        "{}を線だけにします。",
-                                        shape_context.kind.label()
-                                    ));
+                                    if shape_context.is_selected_shape() {
+                                        format!(
+                                            "選択中の{}を線だけにしました。",
+                                            shape_context.kind.label()
+                                        )
+                                    } else {
+                                        format!(
+                                            "選択中の図形{}個を線だけにしました。",
+                                            shape_context.shape_count
+                                        )
+                                    },
+                                );
+                                if changed == 0 {
+                                    self.set_info(if shape_context.is_selected_shape() {
+                                        format!("{}を線だけにします。", shape_context.kind.label())
+                                    } else {
+                                        format!(
+                                            "選択中の図形{}個を線だけにします。",
+                                            shape_context.shape_count
+                                        )
+                                    });
                                 }
                             } else {
                                 self.set_info(format!(
@@ -986,18 +1206,33 @@ impl PaintApp {
                                 .unwrap_or(self.tool_colors.fill_color);
                             self.tool_colors.fill_enabled = true;
                             self.tool_colors.fill_color = fill_color;
-                            if shape_context.is_selected_shape() {
-                                if !self.replace_selected_shape(
+                            if shape_context.is_selection_target() {
+                                let changed = self.replace_selected_shapes(
                                     |shape| shape.with_fill_color(Some(fill_color)),
-                                    format!(
-                                        "選択中の{}を線と塗りにしました。",
-                                        shape_context.kind.label()
-                                    ),
-                                ) {
-                                    self.set_info(format!(
-                                        "{}を線と塗りにします。",
-                                        shape_context.kind.label()
-                                    ));
+                                    if shape_context.is_selected_shape() {
+                                        format!(
+                                            "選択中の{}を線と塗りにしました。",
+                                            shape_context.kind.label()
+                                        )
+                                    } else {
+                                        format!(
+                                            "選択中の図形{}個を線と塗りにしました。",
+                                            shape_context.fill_supported_count
+                                        )
+                                    },
+                                );
+                                if changed == 0 {
+                                    self.set_info(if shape_context.is_selected_shape() {
+                                        format!(
+                                            "{}を線と塗りにします。",
+                                            shape_context.kind.label()
+                                        )
+                                    } else {
+                                        format!(
+                                            "選択中の図形{}個を線と塗りにします。",
+                                            shape_context.fill_supported_count
+                                        )
+                                    });
                                 }
                             } else {
                                 self.set_info(format!(
@@ -1023,23 +1258,38 @@ impl PaintApp {
                     .changed()
                 {
                     self.tool_widths.draw_width = shape_width;
-                    if shape_context.is_selected_shape() {
-                        if !self.replace_selected_shape(
+                    if shape_context.is_selection_target() {
+                        let changed = self.replace_selected_shapes(
                             |shape| ShapeElement {
                                 width: shape_width,
                                 ..shape
                             },
-                            format!(
-                                "{}の線幅を {:.1}px に変更しました。",
-                                shape_context.kind.label(),
-                                shape_width
-                            ),
-                        ) {
-                            self.set_info(format!(
-                                "{}の線幅を {:.1}px にします。",
-                                shape_context.kind.label(),
-                                shape_width
-                            ));
+                            if shape_context.is_selected_shape() {
+                                format!(
+                                    "{}の線幅を {:.1}px に変更しました。",
+                                    shape_context.kind.label(),
+                                    shape_width
+                                )
+                            } else {
+                                format!(
+                                    "選択中の図形{}個の線幅を {:.1}px に変更しました。",
+                                    shape_context.shape_count, shape_width
+                                )
+                            },
+                        );
+                        if changed == 0 {
+                            self.set_info(if shape_context.is_selected_shape() {
+                                format!(
+                                    "{}の線幅を {:.1}px にします。",
+                                    shape_context.kind.label(),
+                                    shape_width
+                                )
+                            } else {
+                                format!(
+                                    "選択中の図形{}個の線幅を {:.1}px にします。",
+                                    shape_context.shape_count, shape_width
+                                )
+                            });
                         }
                     } else {
                         self.set_info(format!(
@@ -1054,28 +1304,22 @@ impl PaintApp {
 
         ui.label(RichText::new("色と不透明度").strong());
         if let Some(shape_context) = shape_context {
-            ui.small(if shape_context.is_selected_shape() {
-                "下の変更は選択中の図形へすぐ反映されます。"
-            } else {
-                shape_context.edit_summary()
-            });
+            ui.small(shape_context.edit_summary());
         } else if self.active_tool == CanvasToolKind::Bucket {
             ui.small("バケツ塗りは塗り色を使います。スポイトや色パレットで色を変え、塗りのゆるさで塗れ方を調整できます。");
         } else {
             ui.small("線色は描画と図形、塗り色は四角形・楕円・バケツ塗りに使います。");
         }
 
-        let editing_selected_shape =
-            shape_context.is_some_and(ShapeStyleContext::is_selected_shape);
         let fill_controls_available = shape_context
             .map(|context| context.supports_fill())
             .unwrap_or(true);
-        let shape_kind_label = shape_context.map(|context| context.kind.label());
+        let shape_kind_label = shape_context.map(|context| context.kind.label().to_owned());
         let stroke_source = shape_context
             .map(|context| context.stroke_color)
             .unwrap_or(self.tool_colors.stroke_color);
         let fill_enabled_source = shape_context
-            .map(|context| context.fill_enabled())
+            .map(|context| context.has_any_fill())
             .unwrap_or(self.tool_colors.fill_enabled);
         let fill_color_source = shape_context
             .and_then(|context| context.fill_color)
@@ -1129,8 +1373,10 @@ impl PaintApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("線").strong());
                 summary_chip(ui, format!("{}%", alpha_percent(stroke_source)), false);
-                if editing_selected_shape {
-                    layer_status_chip(ui, "選択中へ反映", true);
+                if let Some(shape_context) = shape_context
+                    && let Some(reflection_label) = shape_context.reflection_chip_label()
+                {
+                    layer_status_chip(ui, &reflection_label, true);
                 } else if shape_context.is_some() {
                     layer_status_chip(ui, "次に描く図形へ反映", false);
                 }
@@ -1141,13 +1387,22 @@ impl PaintApp {
                 let color = rgba_from_color32(stroke_color);
                 self.tool_colors.stroke_color = color;
                 self.push_recent_color(color);
-                if editing_selected_shape
-                    && let Some(kind_label) = shape_kind_label
-                    && self.replace_selected_shape(
-                        |shape| ShapeElement { color, ..shape },
-                        format!("{kind_label}の線色を変更しました。"),
-                    )
+                if let Some(shape_context) = shape_context
+                    && shape_context.is_selection_target()
                 {
+                    self.replace_selected_shapes(
+                        |shape| ShapeElement { color, ..shape },
+                        if shape_context.is_selected_shape() {
+                            format!(
+                                "{}の線色を変更しました。",
+                                shape_kind_label
+                                    .as_deref()
+                                    .unwrap_or(shape_context.kind.label())
+                            )
+                        } else {
+                            format!("選択中の図形{}個の線色を変更しました。", shape_context.shape_count)
+                        },
+                    );
                 } else {
                     self.set_info("線色を変更しました。");
                 }
@@ -1161,16 +1416,28 @@ impl PaintApp {
                 let next_stroke_color = set_alpha_percent(stroke_source, stroke_opacity);
                 self.tool_colors.stroke_color = next_stroke_color;
                 self.push_recent_color(next_stroke_color);
-                if editing_selected_shape
-                    && let Some(kind_label) = shape_kind_label
-                    && self.replace_selected_shape(
+                if let Some(shape_context) = shape_context
+                    && shape_context.is_selection_target()
+                {
+                    self.replace_selected_shapes(
                         |shape| ShapeElement {
                             color: next_stroke_color,
                             ..shape
                         },
-                        format!("{kind_label}の線の不透明度を {stroke_opacity}% に変更しました。"),
-                    )
-                {
+                        if shape_context.is_selected_shape() {
+                            format!(
+                                "{}の線の不透明度を {stroke_opacity}% に変更しました。",
+                                shape_kind_label
+                                    .as_deref()
+                                    .unwrap_or(shape_context.kind.label())
+                            )
+                        } else {
+                            format!(
+                                "選択中の図形{}個の線の不透明度を {stroke_opacity}% に変更しました。",
+                                shape_context.shape_count
+                            )
+                        },
+                    );
                 } else {
                     self.set_info(format!(
                         "線の不透明度を {}% に変更しました。",
@@ -1184,17 +1451,28 @@ impl PaintApp {
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("塗り").strong());
-                    if let Some(fill_color) = fill_enabled_source.then_some(fill_color_source) {
+                    if let Some(fill_color) = shape_context
+                        .filter(|context| context.has_any_fill())
+                        .map(|_| fill_color_source)
+                        .or(fill_enabled_source.then_some(fill_color_source))
+                    {
                         summary_chip(ui, format!("{}%", alpha_percent(fill_color)), false);
                     } else {
                         summary_chip(ui, "塗りなし", false);
                     }
-                    if editing_selected_shape {
-                        layer_status_chip(ui, "選択中へ反映", true);
+                    if let Some(shape_context) = shape_context
+                        && let Some(reflection_label) = shape_context.reflection_chip_label()
+                    {
+                        layer_status_chip(ui, &reflection_label, true);
                     } else if shape_context.is_some() {
                         layer_status_chip(ui, "次に描く図形へ反映", false);
                     }
                 });
+                if let Some(shape_context) = shape_context
+                    && let Some(fill_scope_note) = shape_context.fill_scope_note()
+                {
+                    ui.small(fill_scope_note);
+                }
                 let mut fill_enabled = fill_enabled_source;
                 if ui
                     .checkbox(&mut fill_enabled, "塗りを使う")
@@ -1205,9 +1483,10 @@ impl PaintApp {
                     if fill_enabled {
                         self.tool_colors.fill_color = fill_color_source;
                     }
-                    if editing_selected_shape
-                        && let Some(kind_label) = shape_kind_label
-                        && self.replace_selected_shape(
+                    if let Some(shape_context) = shape_context
+                        && shape_context.is_selection_target()
+                    {
+                        self.replace_selected_shapes(
                             |shape| {
                                 shape.with_fill_color(if fill_enabled {
                                     Some(fill_color_source)
@@ -1215,13 +1494,34 @@ impl PaintApp {
                                     None
                                 })
                             },
-                            if fill_enabled {
-                                format!("{kind_label}の塗りをオンにしました。")
+                            if shape_context.is_selected_shape() {
+                                if fill_enabled {
+                                    format!(
+                                        "{}の塗りをオンにしました。",
+                                        shape_kind_label
+                                            .as_deref()
+                                            .unwrap_or(shape_context.kind.label())
+                                    )
+                                } else {
+                                    format!(
+                                        "{}の塗りをオフにしました。",
+                                        shape_kind_label
+                                            .as_deref()
+                                            .unwrap_or(shape_context.kind.label())
+                                    )
+                                }
+                            } else if fill_enabled {
+                                format!(
+                                    "選択中の図形{}個の塗りをオンにしました。",
+                                    shape_context.fill_supported_count
+                                )
                             } else {
-                                format!("{kind_label}の塗りをオフにしました。")
+                                format!(
+                                    "選択中の図形{}個の塗りをオフにしました。",
+                                    shape_context.fill_supported_count
+                                )
                             },
-                        )
-                    {
+                        );
                     } else {
                         self.set_info(if fill_enabled {
                             "図形の塗りをオンにしました。".to_owned()
@@ -1238,13 +1538,25 @@ impl PaintApp {
                         self.tool_colors.fill_color = color;
                         self.tool_colors.fill_enabled = true;
                         self.push_recent_color(color);
-                        if editing_selected_shape
-                            && let Some(kind_label) = shape_kind_label
-                            && self.replace_selected_shape(
-                                |shape| shape.with_fill_color(Some(color)),
-                                format!("{kind_label}の塗り色を変更しました。"),
-                            )
+                        if let Some(shape_context) = shape_context
+                            && shape_context.is_selection_target()
                         {
+                            self.replace_selected_shapes(
+                                |shape| shape.with_fill_color(Some(color)),
+                                if shape_context.is_selected_shape() {
+                                    format!(
+                                        "{}の塗り色を変更しました。",
+                                        shape_kind_label
+                                            .as_deref()
+                                            .unwrap_or(shape_context.kind.label())
+                                    )
+                                } else {
+                                    format!(
+                                        "選択中の図形{}個の塗り色を変更しました。",
+                                        shape_context.fill_supported_count
+                                    )
+                                },
+                            );
                         } else {
                             self.set_info("塗り色を変更しました。");
                         }
@@ -1259,15 +1571,25 @@ impl PaintApp {
                         self.tool_colors.fill_color = next_fill_color;
                         self.tool_colors.fill_enabled = true;
                         self.push_recent_color(next_fill_color);
-                        if editing_selected_shape
-                            && let Some(kind_label) = shape_kind_label
-                            && self.replace_selected_shape(
-                                |shape| shape.with_fill_color(Some(next_fill_color)),
-                                format!(
-                                    "{kind_label}の塗りの不透明度を {fill_opacity}% に変更しました。"
-                                ),
-                            )
+                        if let Some(shape_context) = shape_context
+                            && shape_context.is_selection_target()
                         {
+                            self.replace_selected_shapes(
+                                |shape| shape.with_fill_color(Some(next_fill_color)),
+                                if shape_context.is_selected_shape() {
+                                    format!(
+                                        "{}の塗りの不透明度を {fill_opacity}% に変更しました。",
+                                        shape_kind_label
+                                            .as_deref()
+                                            .unwrap_or(shape_context.kind.label())
+                                    )
+                                } else {
+                                    format!(
+                                        "選択中の図形{}個の塗りの不透明度を {fill_opacity}% に変更しました。",
+                                        shape_context.fill_supported_count
+                                    )
+                                },
+                            );
                         } else {
                             self.set_info(format!(
                                 "塗りの不透明度を {}% に変更しました。",
@@ -2162,10 +2484,16 @@ impl PaintApp {
             let compact_summary = ui.available_width() < 760.0;
             let selected_shape_context = self
                 .current_shape_style_context()
-                .filter(|context| context.is_selected_shape());
+                .filter(|context| context.is_selection_target());
             let selected_shape_chip = selected_shape_context
                 .map(|context| {
-                    if compact_summary {
+                    if context.is_selected_shapes() {
+                        if compact_summary {
+                            format!("図形{}", context.shape_count)
+                        } else {
+                            format!("図形: {}個", context.shape_count)
+                        }
+                    } else if compact_summary {
                         context.kind.label().to_owned()
                     } else {
                         format!("図形: {}", context.kind.label())
@@ -2173,6 +2501,15 @@ impl PaintApp {
                 });
             let selected_shape_mode_chip =
                 selected_shape_context.map(ShapeStyleContext::paint_mode_label);
+            let multi_shape_style_chip = selected_shape_context
+                .filter(|context| context.is_selected_shapes())
+                .map(|_| {
+                    if compact_summary {
+                        "共通".to_owned()
+                    } else {
+                        "共通スタイル".to_owned()
+                    }
+                });
             ui.horizontal_wrapped(|ui| {
                 summary_chip(
                     ui,
@@ -2216,6 +2553,9 @@ impl PaintApp {
                 }
                 if let Some(mode_chip) = selected_shape_mode_chip {
                     summary_chip(ui, mode_chip, false);
+                }
+                if let Some(style_chip) = &multi_shape_style_chip {
+                    summary_chip(ui, style_chip.clone(), false);
                 }
                 if let Some(operation) = self.canvas.current_operation_label() {
                     summary_chip(ui, operation, true);
@@ -3781,6 +4121,125 @@ mod tests {
             panic!("selected element should stay a shape");
         };
         assert_eq!(shape.color, RgbaColor::from_rgba(180, 30, 120, 200));
+    }
+
+    #[test]
+    fn multi_selected_shape_context_tracks_shape_count_and_fill_support() {
+        let mut app = PaintApp::default();
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::from_rgba(20, 40, 60, 255),
+            9.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(80.0, 60.0),
+        ));
+        document.push_shape(
+            ShapeElement::new(
+                ShapeKind::Line,
+                RgbaColor::from_rgba(120, 50, 40, 255),
+                6.0,
+                PaintPoint::new(100.0, 20.0),
+                PaintPoint::new(180.0, 80.0),
+            )
+            .with_fill_color(Some(RgbaColor::from_rgba(250, 180, 90, 180))),
+        );
+        assert!(app.history.replace_document(document));
+        let layer_id = app.document().active_layer_id();
+        app.canvas.set_selection_indices(layer_id, vec![0, 1]);
+        app.set_active_tool(CanvasToolKind::Select, false);
+
+        let context = app
+            .current_shape_style_context()
+            .expect("multi selected shape context");
+
+        assert!(context.is_selected_shapes());
+        assert_eq!(context.shape_count, 2);
+        assert_eq!(context.total_selection_count, 2);
+        assert_eq!(context.fill_supported_count, 1);
+        assert_eq!(context.paint_mode_label(), "線だけ");
+        assert_eq!(
+            context.fill_scope_note(),
+            Some("直線には塗りを適用せず、四角形 / 楕円だけに反映します。")
+        );
+    }
+
+    #[test]
+    fn quick_color_updates_multiple_selected_shape_strokes() {
+        let mut app = PaintApp::default();
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::from_rgba(20, 40, 60, 255),
+            9.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(80.0, 60.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Ellipse,
+            RgbaColor::from_rgba(70, 90, 110, 255),
+            7.0,
+            PaintPoint::new(90.0, 20.0),
+            PaintPoint::new(160.0, 90.0),
+        ));
+        assert!(app.history.replace_document(document));
+        let layer_id = app.document().active_layer_id();
+        app.canvas.set_selection_indices(layer_id, vec![0, 1]);
+        app.set_active_tool(CanvasToolKind::Select, false);
+        app.tool_colors.quick_color_target = ColorTarget::Stroke;
+
+        app.apply_quick_color(RgbaColor::from_rgba(180, 30, 120, 200), "最近使った色");
+
+        let Some(PaintElement::Shape(first)) = app.document().element(0) else {
+            panic!("first selected element should stay a shape");
+        };
+        let Some(PaintElement::Shape(second)) = app.document().element(1) else {
+            panic!("second selected element should stay a shape");
+        };
+        assert_eq!(first.color, RgbaColor::from_rgba(180, 30, 120, 200));
+        assert_eq!(second.color, RgbaColor::from_rgba(180, 30, 120, 200));
+    }
+
+    #[test]
+    fn fill_color_updates_skip_selected_lines() {
+        let mut app = PaintApp::default();
+        let mut document = PaintDocument::default();
+        document.push_shape(
+            ShapeElement::new(
+                ShapeKind::Rectangle,
+                RgbaColor::from_rgba(20, 40, 60, 255),
+                9.0,
+                PaintPoint::new(10.0, 10.0),
+                PaintPoint::new(80.0, 60.0),
+            )
+            .with_fill_color(Some(RgbaColor::from_rgba(200, 180, 90, 140))),
+        );
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::from_rgba(120, 50, 40, 255),
+            6.0,
+            PaintPoint::new(100.0, 20.0),
+            PaintPoint::new(180.0, 80.0),
+        ));
+        assert!(app.history.replace_document(document));
+        let layer_id = app.document().active_layer_id();
+        app.canvas.set_selection_indices(layer_id, vec![0, 1]);
+        app.set_active_tool(CanvasToolKind::Select, false);
+        app.tool_colors.quick_color_target = ColorTarget::Fill;
+
+        app.apply_quick_color(RgbaColor::from_rgba(180, 30, 120, 200), "最近使った色");
+
+        let Some(PaintElement::Shape(rectangle)) = app.document().element(0) else {
+            panic!("rectangle should stay a shape");
+        };
+        let Some(PaintElement::Shape(line)) = app.document().element(1) else {
+            panic!("line should stay a shape");
+        };
+        assert_eq!(
+            rectangle.effective_fill_color(),
+            Some(RgbaColor::from_rgba(180, 30, 120, 200))
+        );
+        assert_eq!(line.effective_fill_color(), None);
     }
 
     #[test]
