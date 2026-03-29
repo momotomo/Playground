@@ -2105,6 +2105,16 @@ impl PaintApp {
 
             ui.add_space(4.0);
             let compact_summary = ui.available_width() < 760.0;
+            let selected_shape_chip = self
+                .current_shape_style_context()
+                .filter(|context| context.is_selected_shape())
+                .map(|context| {
+                    if compact_summary {
+                        context.kind.label().to_owned()
+                    } else {
+                        format!("図形: {}", context.kind.label())
+                    }
+                });
             ui.horizontal_wrapped(|ui| {
                 summary_chip(
                     ui,
@@ -2142,6 +2152,9 @@ impl PaintApp {
                         },
                         false,
                     );
+                }
+                if let Some(shape_chip) = &selected_shape_chip {
+                    summary_chip(ui, shape_chip.clone(), false);
                 }
                 if let Some(operation) = self.canvas.current_operation_label() {
                     summary_chip(ui, operation, true);
