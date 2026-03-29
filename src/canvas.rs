@@ -76,6 +76,21 @@ struct SelectionZoneStyle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleVisualState {
+    Inactive,
+    Hovered,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SelectionOverlayFeedback {
+    active_control: Option<ControlTarget>,
+    hovered_control: Option<ControlTarget>,
+    hovered_move_zone: bool,
+    move_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasToolKind {
     Select,
     Pan,
@@ -675,12 +690,46 @@ impl CanvasController {
             .selection_session
             .as_ref()
             .and_then(SelectionSession::control_target);
+        let hovered_control =
+            if tool_settings.tool == CanvasToolKind::Select && self.selection_session.is_none() {
+                hover_pos.and_then(|pointer| {
+                    self.hit_selection_control(
+                        document,
+                        canvas_rect,
+                        self.view.zoom,
+                        pointer,
+                        touch_active,
+                    )
+                })
+            } else {
+                None
+            };
+        let hovered_move_zone = if tool_settings.tool == CanvasToolKind::Select
+            && self.selection_session.is_none()
+            && hovered_control.is_none()
+        {
+            hover_pos
+                .map(|pointer| {
+                    let pointer_world =
+                        screen_to_canvas_from_canvas_rect(canvas_rect, self.view.zoom, pointer);
+                    self.hit_selection_move_bounds(document, pointer_world, touch_active)
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
         let can_transform_selection = self.selection_can_transform(document);
         let show_handles = !matches!(
             self.selection_session,
             Some(SelectionSession::Marquee { .. } | SelectionSession::GuideMove { .. })
         ) && can_transform_selection;
         let interaction_banner = self.interaction_overlay_text();
+        let overlay_feedback = SelectionOverlayFeedback {
+            active_control,
+            hovered_control,
+            hovered_move_zone,
+            move_active: matches!(self.selection_session, Some(SelectionSession::Move { .. })),
+        };
 
         paint_workspace(&painter, viewport);
         paint_background(&painter, canvas_rect, document.background);
@@ -721,7 +770,7 @@ impl CanvasController {
                 canvas_rect,
                 self.view.zoom,
                 &selected_visual,
-                active_control,
+                overlay_feedback,
                 show_handles,
                 touch_active,
             );
@@ -2816,7 +2865,7 @@ fn paint_selection_overlay(
     rect: Rect,
     zoom: f32,
     selected_elements: &[(usize, PaintElement)],
-    active_control: Option<ControlTarget>,
+    feedback: SelectionOverlayFeedback,
     show_handles: bool,
     touch_active: bool,
 ) {
@@ -2826,7 +2875,7 @@ fn paint_selection_overlay(
             rect,
             zoom,
             selected_elements[0].1.clone(),
-            active_control,
+            feedback,
             show_handles,
             touch_active,
         );
@@ -2836,7 +2885,7 @@ fn paint_selection_overlay(
             rect,
             zoom,
             selected_elements,
-            active_control,
+            feedback,
             show_handles,
             touch_active,
         );
@@ -2848,14 +2897,13 @@ fn paint_single_selection_overlay(
     rect: Rect,
     zoom: f32,
     element: PaintElement,
-    active_control: Option<ControlTarget>,
+    feedback: SelectionOverlayFeedback,
     show_handles: bool,
     touch_active: bool,
 ) {
     let accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
-    let handle_radius = handle_visual_radius(touch_active);
 
     match element {
         PaintElement::Stroke(stroke) => {
@@ -2866,17 +2914,36 @@ fn paint_single_selection_overlay(
                     zoom,
                     bounds,
                     SelectionZoneStyle {
-                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 22),
+                        fill: if feedback.move_active {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 34)
+                        } else if feedback.hovered_move_zone {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 28)
+                        } else {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 22)
+                        },
                         accent,
-                        expand: 6.0,
-                        stroke_width: 2.0,
+                        expand: if feedback.move_active { 8.0 } else { 6.0 },
+                        stroke_width: if feedback.move_active { 2.5 } else { 2.0 },
                     },
                 );
-                paint_axis_aligned_bounds(painter, rect, zoom, bounds, accent, 6.0, 2.0);
+                paint_axis_aligned_bounds(
+                    painter,
+                    rect,
+                    zoom,
+                    bounds,
+                    accent,
+                    if feedback.move_active { 8.0 } else { 6.0 },
+                    if feedback.move_active { 2.4 } else { 2.0 },
+                );
                 paint_selection_badge(
                     painter,
-                    selection_bounds_screen_rect(rect, zoom, bounds, 6.0),
-                    "ドラッグで移動",
+                    selection_bounds_screen_rect(
+                        rect,
+                        zoom,
+                        bounds,
+                        if feedback.move_active { 8.0 } else { 6.0 },
+                    ),
+                    single_selection_badge_text(feedback),
                     accent,
                 );
             }
@@ -2889,10 +2956,16 @@ fn paint_single_selection_overlay(
                     zoom,
                     shape.bounds(),
                     SelectionZoneStyle {
-                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 20),
+                        fill: if feedback.move_active {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 32)
+                        } else if feedback.hovered_move_zone {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 26)
+                        } else {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 20)
+                        },
                         accent,
-                        expand: 6.0,
-                        stroke_width: 2.0,
+                        expand: if feedback.move_active { 8.0 } else { 6.0 },
+                        stroke_width: if feedback.move_active { 2.5 } else { 2.0 },
                     },
                 );
                 paint_axis_aligned_bounds(painter, rect, zoom, shape.bounds(), accent, 6.0, 2.0);
@@ -2906,40 +2979,45 @@ fn paint_single_selection_overlay(
                 paint_selection_badge(
                     painter,
                     selection_bounds_screen_rect(rect, zoom, shape.bounds(), 6.0),
-                    single_selection_badge_text(active_control),
+                    single_selection_badge_text(feedback),
                     accent,
                 );
                 if show_handles {
                     for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
+                        let visual_state = handle_visual_state(
+                            feedback.active_control,
+                            feedback.hovered_control,
+                            ControlTarget::SingleResize(handle),
+                        );
                         paint_handle(
                             painter,
                             position,
-                            handle_radius,
-                            match active_control {
-                                Some(ControlTarget::SingleResize(active)) if active == handle => {
-                                    active_fill
-                                }
-                                _ => inactive_fill,
-                            },
+                            handle_draw_radius(touch_active, visual_state),
+                            handle_fill_color(visual_state, inactive_fill, active_fill),
                             accent,
+                            visual_state,
                         );
                     }
                     if let Some(rotation_handle) = shape_rotation_handle_screen(shape, rect, zoom) {
+                        let visual_state = handle_visual_state(
+                            feedback.active_control,
+                            feedback.hovered_control,
+                            ControlTarget::SingleRotate,
+                        );
                         paint_rotation_link(
                             painter,
                             canvas_to_screen(rect, zoom, shape.rotation_center()),
                             rotation_handle,
                             accent,
+                            visual_state,
                         );
                         paint_rotation_handle(
                             painter,
                             rotation_handle,
-                            handle_radius,
-                            match active_control {
-                                Some(ControlTarget::SingleRotate) => active_fill,
-                                _ => inactive_fill,
-                            },
+                            handle_draw_radius(touch_active, visual_state),
+                            handle_fill_color(visual_state, inactive_fill, active_fill),
                             accent,
+                            visual_state,
                         );
                     }
                 }
@@ -2951,10 +3029,16 @@ fn paint_single_selection_overlay(
                     zoom,
                     shape.bounds(),
                     SelectionZoneStyle {
-                        fill: Color32::from_rgba_unmultiplied(26, 115, 232, 18),
+                        fill: if feedback.move_active {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 30)
+                        } else if feedback.hovered_move_zone {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 24)
+                        } else {
+                            Color32::from_rgba_unmultiplied(26, 115, 232, 18)
+                        },
                         accent,
-                        expand: 8.0,
-                        stroke_width: 1.5,
+                        expand: if feedback.move_active { 10.0 } else { 8.0 },
+                        stroke_width: if feedback.move_active { 1.8 } else { 1.5 },
                     },
                 );
                 let outline: Vec<Pos2> = shape
@@ -2969,38 +3053,48 @@ fn paint_single_selection_overlay(
                 paint_selection_badge(
                     painter,
                     selection_bounds_screen_rect(rect, zoom, shape.bounds(), 8.0),
-                    single_selection_badge_text(active_control),
+                    single_selection_badge_text(feedback),
                     accent,
                 );
 
                 if show_handles {
                     for (handle, position) in shape_control_handles_screen(shape, rect, zoom) {
+                        let visual_state = handle_visual_state(
+                            feedback.active_control,
+                            feedback.hovered_control,
+                            ControlTarget::SingleResize(handle),
+                        );
                         paint_handle(
                             painter,
                             position,
-                            handle_radius,
-                            match active_control {
-                                Some(ControlTarget::SingleResize(active)) if active == handle => {
-                                    active_fill
-                                }
-                                _ => inactive_fill,
-                            },
+                            handle_draw_radius(touch_active, visual_state),
+                            handle_fill_color(visual_state, inactive_fill, active_fill),
                             accent,
+                            visual_state,
                         );
                     }
 
                     if let Some(rotation_handle) = shape_rotation_handle_screen(shape, rect, zoom) {
+                        let visual_state = handle_visual_state(
+                            feedback.active_control,
+                            feedback.hovered_control,
+                            ControlTarget::SingleRotate,
+                        );
                         let top_mid = outline[0].lerp(outline[1], 0.5);
-                        paint_rotation_link(painter, top_mid, rotation_handle, accent);
+                        paint_rotation_link(
+                            painter,
+                            top_mid,
+                            rotation_handle,
+                            accent,
+                            visual_state,
+                        );
                         paint_rotation_handle(
                             painter,
                             rotation_handle,
-                            handle_radius,
-                            match active_control {
-                                Some(ControlTarget::SingleRotate) => active_fill,
-                                _ => inactive_fill,
-                            },
+                            handle_draw_radius(touch_active, visual_state),
+                            handle_fill_color(visual_state, inactive_fill, active_fill),
                             accent,
+                            visual_state,
                         );
                     }
                 }
@@ -3015,7 +3109,7 @@ fn paint_multi_selection_overlay(
     rect: Rect,
     zoom: f32,
     selected_elements: &[(usize, PaintElement)],
-    active_control: Option<ControlTarget>,
+    feedback: SelectionOverlayFeedback,
     show_handles: bool,
     touch_active: bool,
 ) {
@@ -3023,10 +3117,15 @@ fn paint_multi_selection_overlay(
     let group_accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
-    let handle_radius = handle_visual_radius(touch_active);
 
     for (_, element) in selected_elements {
         if let Some(bounds) = element.bounds() {
+            let item_rect = selection_bounds_screen_rect(rect, zoom, bounds, 3.0);
+            painter.rect_filled(
+                item_rect,
+                6.0,
+                Color32::from_rgba_unmultiplied(26, 115, 232, 8),
+            );
             paint_axis_aligned_bounds(painter, rect, zoom, bounds, item_accent, 4.0, 1.5);
         }
     }
@@ -3038,46 +3137,72 @@ fn paint_multi_selection_overlay(
             zoom,
             group_bounds,
             SelectionZoneStyle {
-                fill: Color32::from_rgba_unmultiplied(26, 115, 232, 20),
+                fill: if feedback.move_active {
+                    Color32::from_rgba_unmultiplied(26, 115, 232, 34)
+                } else if feedback.hovered_move_zone {
+                    Color32::from_rgba_unmultiplied(26, 115, 232, 28)
+                } else {
+                    Color32::from_rgba_unmultiplied(26, 115, 232, 20)
+                },
                 accent: group_accent,
-                expand: 10.0,
-                stroke_width: 2.5,
+                expand: if feedback.move_active { 12.0 } else { 10.0 },
+                stroke_width: if feedback.move_active { 3.0 } else { 2.5 },
             },
         );
-        paint_axis_aligned_bounds(painter, rect, zoom, group_bounds, group_accent, 10.0, 2.5);
+        paint_axis_aligned_bounds(
+            painter,
+            rect,
+            zoom,
+            group_bounds,
+            group_accent,
+            if feedback.move_active { 12.0 } else { 10.0 },
+            if feedback.move_active { 3.0 } else { 2.5 },
+        );
         paint_selection_badge(
             painter,
             selection_bounds_screen_rect(rect, zoom, group_bounds, 10.0),
-            &multi_selection_badge_text(selected_elements.len(), active_control),
+            &multi_selection_badge_text(selected_elements.len(), feedback),
             group_accent,
         );
 
         if show_handles {
             for (handle, position) in bounds_control_handles_screen(group_bounds, rect, zoom) {
+                let visual_state = handle_visual_state(
+                    feedback.active_control,
+                    feedback.hovered_control,
+                    ControlTarget::GroupResize(handle),
+                );
                 paint_handle(
                     painter,
                     position,
-                    handle_radius,
-                    match active_control {
-                        Some(ControlTarget::GroupResize(active)) if active == handle => active_fill,
-                        _ => inactive_fill,
-                    },
+                    handle_draw_radius(touch_active, visual_state),
+                    handle_fill_color(visual_state, inactive_fill, active_fill),
                     group_accent,
+                    visual_state,
                 );
             }
 
             if let Some(rotation_handle) = bounds_rotation_handle_screen(group_bounds, rect, zoom) {
+                let visual_state = handle_visual_state(
+                    feedback.active_control,
+                    feedback.hovered_control,
+                    ControlTarget::GroupRotate,
+                );
                 let top_mid = group_bounds_screen_top_mid(group_bounds, rect, zoom);
-                paint_rotation_link(painter, top_mid, rotation_handle, group_accent);
+                paint_rotation_link(
+                    painter,
+                    top_mid,
+                    rotation_handle,
+                    group_accent,
+                    visual_state,
+                );
                 paint_rotation_handle(
                     painter,
                     rotation_handle,
-                    handle_radius,
-                    match active_control {
-                        Some(ControlTarget::GroupRotate) => active_fill,
-                        _ => inactive_fill,
-                    },
+                    handle_draw_radius(touch_active, visual_state),
+                    handle_fill_color(visual_state, inactive_fill, active_fill),
                     group_accent,
+                    visual_state,
                 );
             }
         }
@@ -3179,19 +3304,70 @@ fn paint_selection_move_zone(
     );
 }
 
+fn handle_visual_state(
+    active_control: Option<ControlTarget>,
+    hovered_control: Option<ControlTarget>,
+    candidate: ControlTarget,
+) -> HandleVisualState {
+    if active_control == Some(candidate) {
+        HandleVisualState::Active
+    } else if hovered_control == Some(candidate) {
+        HandleVisualState::Hovered
+    } else {
+        HandleVisualState::Inactive
+    }
+}
+
+fn handle_draw_radius(touch_active: bool, state: HandleVisualState) -> f32 {
+    let base = handle_visual_radius(touch_active);
+    match state {
+        HandleVisualState::Inactive => base,
+        HandleVisualState::Hovered => base + 1.5,
+        HandleVisualState::Active => base + 2.5,
+    }
+}
+
+fn handle_fill_color(
+    state: HandleVisualState,
+    inactive_fill: Color32,
+    active_fill: Color32,
+) -> Color32 {
+    match state {
+        HandleVisualState::Inactive => inactive_fill,
+        HandleVisualState::Hovered => Color32::from_rgb(227, 239, 255),
+        HandleVisualState::Active => active_fill,
+    }
+}
+
 fn paint_handle(
     painter: &Painter,
     center: Pos2,
     radius: f32,
     fill: Color32,
     stroke_color: Color32,
+    state: HandleVisualState,
 ) {
     let handle_rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
-    if radius > HANDLE_RADIUS {
+    if radius > HANDLE_RADIUS || state != HandleVisualState::Inactive {
         painter.rect_stroke(
-            handle_rect.expand(2.0),
+            handle_rect.expand(if state == HandleVisualState::Active {
+                3.0
+            } else {
+                2.0
+            }),
             4.5,
-            EguiStroke::new(1.0, stroke_color.linear_multiply(0.22)),
+            EguiStroke::new(
+                if state == HandleVisualState::Active {
+                    1.4
+                } else {
+                    1.0
+                },
+                stroke_color.linear_multiply(match state {
+                    HandleVisualState::Inactive => 0.22,
+                    HandleVisualState::Hovered => 0.42,
+                    HandleVisualState::Active => 0.62,
+                }),
+            ),
             egui::StrokeKind::Outside,
         );
     }
@@ -3199,7 +3375,14 @@ fn paint_handle(
     painter.rect_stroke(
         handle_rect,
         3.0,
-        EguiStroke::new(1.0, stroke_color),
+        EguiStroke::new(
+            if state == HandleVisualState::Active {
+                1.4
+            } else {
+                1.0
+            },
+            stroke_color,
+        ),
         egui::StrokeKind::Outside,
     );
 }
@@ -3210,21 +3393,65 @@ fn paint_rotation_handle(
     radius: f32,
     fill: Color32,
     stroke_color: Color32,
+    state: HandleVisualState,
 ) {
-    if radius > HANDLE_RADIUS {
+    if radius > HANDLE_RADIUS || state != HandleVisualState::Inactive {
         painter.circle_stroke(
             center,
-            radius + 2.0,
-            EguiStroke::new(1.0, stroke_color.linear_multiply(0.22)),
+            radius
+                + if state == HandleVisualState::Active {
+                    3.0
+                } else {
+                    2.0
+                },
+            EguiStroke::new(
+                if state == HandleVisualState::Active {
+                    1.4
+                } else {
+                    1.0
+                },
+                stroke_color.linear_multiply(match state {
+                    HandleVisualState::Inactive => 0.22,
+                    HandleVisualState::Hovered => 0.42,
+                    HandleVisualState::Active => 0.62,
+                }),
+            ),
         );
     }
     painter.circle_filled(center, radius, fill);
-    painter.circle_stroke(center, radius, EguiStroke::new(1.3, stroke_color));
+    painter.circle_stroke(
+        center,
+        radius,
+        EguiStroke::new(
+            if state == HandleVisualState::Active {
+                1.6
+            } else {
+                1.3
+            },
+            stroke_color,
+        ),
+    );
     painter.circle_filled(center, radius * 0.28, stroke_color);
 }
 
-fn paint_rotation_link(painter: &Painter, from: Pos2, to: Pos2, accent: Color32) {
-    painter.line_segment([from, to], EguiStroke::new(1.4, accent));
+fn paint_rotation_link(
+    painter: &Painter,
+    from: Pos2,
+    to: Pos2,
+    accent: Color32,
+    state: HandleVisualState,
+) {
+    painter.line_segment(
+        [from, to],
+        EguiStroke::new(
+            match state {
+                HandleVisualState::Inactive => 1.4,
+                HandleVisualState::Hovered => 1.8,
+                HandleVisualState::Active => 2.2,
+            },
+            accent,
+        ),
+    );
 }
 
 fn paint_interaction_banner(painter: &Painter, viewport: Rect, title: &str, detail: &str) {
@@ -3283,18 +3510,24 @@ fn paint_selection_badge(painter: &Painter, screen_rect: Rect, text: &str, accen
     painter.galley(label_pos, galley, Color32::from_gray(52));
 }
 
-fn single_selection_badge_text(active_control: Option<ControlTarget>) -> &'static str {
-    match active_control {
-        Some(ControlTarget::SingleResize(_)) => "サイズ変更",
-        Some(ControlTarget::SingleRotate) => "回転",
+fn single_selection_badge_text(feedback: SelectionOverlayFeedback) -> &'static str {
+    match (feedback.active_control, feedback.hovered_control) {
+        (Some(ControlTarget::SingleResize(_)), _) => "サイズ変更中",
+        (Some(ControlTarget::SingleRotate), _) => "回転中",
+        (_, Some(ControlTarget::SingleResize(_))) => "角でサイズ変更",
+        (_, Some(ControlTarget::SingleRotate)) => "丸で回転",
+        _ if feedback.move_active => "移動中",
         _ => "ドラッグで移動",
     }
 }
 
-fn multi_selection_badge_text(count: usize, active_control: Option<ControlTarget>) -> String {
-    match active_control {
-        Some(ControlTarget::GroupResize(_)) => format!("{count}個を拡大縮小"),
-        Some(ControlTarget::GroupRotate) => format!("{count}個を回転"),
+fn multi_selection_badge_text(count: usize, feedback: SelectionOverlayFeedback) -> String {
+    match (feedback.active_control, feedback.hovered_control) {
+        (Some(ControlTarget::GroupResize(_)), _) => format!("{count}個をサイズ変更中"),
+        (Some(ControlTarget::GroupRotate), _) => format!("{count}個を回転中"),
+        (_, Some(ControlTarget::GroupResize(_))) => format!("{count}個を角でサイズ変更"),
+        (_, Some(ControlTarget::GroupRotate)) => format!("{count}個を丸で回転"),
+        _ if feedback.move_active => format!("{count}個を移動中"),
         _ => format!("{count}個をまとめて移動"),
     }
 }
@@ -4005,13 +4238,15 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 mod tests {
     use super::{
         ActivePreview, CanvasController, CanvasViewState, ControlTarget, HANDLE_RADIUS,
-        SelectionSession, SelectionState, TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD, TouchContactKind,
-        bounds_from_points, bounds_rotation_handle_screen, bucket_fill_with_touch_assist,
-        canvas_rect, canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
-        handle_visual_radius, hit_tolerance_world, marquee_rect_is_visible,
-        normalize_selection_indices, ruler_step_world, screen_to_canvas,
-        shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
-        snap_point_for_document, touch_bucket_result_is_line_like, touch_contact_kind_from_events,
+        HandleVisualState, SelectionOverlayFeedback, SelectionSession, SelectionState,
+        TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD, TouchContactKind, bounds_from_points,
+        bounds_rotation_handle_screen, bucket_fill_with_touch_assist, canvas_rect,
+        canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
+        handle_visual_radius, handle_visual_state, hit_tolerance_world, marquee_rect_is_visible,
+        multi_selection_badge_text, normalize_selection_indices, ruler_step_world,
+        screen_to_canvas, shape_rotation_handle_screen, single_selection_badge_text,
+        smart_guide_axis_match, snap_axis_value_for_document, snap_point_for_document,
+        touch_bucket_result_is_line_like, touch_contact_kind_from_events,
     };
     use crate::fill::{FillTolerancePreset, FloodFillOptions};
     use crate::model::{
@@ -4412,6 +4647,39 @@ mod tests {
             ),
             Some(ControlTarget::GroupRotate)
         );
+    }
+
+    #[test]
+    fn handle_visual_state_prefers_active_before_hover() {
+        let candidate = ControlTarget::SingleResize(ShapeHandle::TopLeft);
+
+        assert_eq!(
+            handle_visual_state(Some(candidate), Some(candidate), candidate),
+            HandleVisualState::Active
+        );
+        assert_eq!(
+            handle_visual_state(None, Some(candidate), candidate),
+            HandleVisualState::Hovered
+        );
+        assert_eq!(
+            handle_visual_state(None, None, candidate),
+            HandleVisualState::Inactive
+        );
+    }
+
+    #[test]
+    fn selection_badge_text_changes_with_hover_and_active_state() {
+        let hovered = SelectionOverlayFeedback {
+            hovered_control: Some(ControlTarget::SingleRotate),
+            ..SelectionOverlayFeedback::default()
+        };
+        assert_eq!(single_selection_badge_text(hovered), "丸で回転");
+
+        let active = SelectionOverlayFeedback {
+            active_control: Some(ControlTarget::GroupResize(ShapeHandle::BottomRight)),
+            ..SelectionOverlayFeedback::default()
+        };
+        assert_eq!(multi_selection_badge_text(3, active), "3個をサイズ変更中");
     }
 
     #[test]

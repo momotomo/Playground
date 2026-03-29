@@ -2520,6 +2520,9 @@ impl PaintApp {
                     },
                     true,
                 );
+                if let Some(operation) = self.canvas.current_operation_label() {
+                    summary_chip(ui, operation, true);
+                }
                 if matches!(
                     self.active_tool,
                     CanvasToolKind::Brush | CanvasToolKind::Pencil | CanvasToolKind::Marker
@@ -2557,9 +2560,7 @@ impl PaintApp {
                 if let Some(style_chip) = &multi_shape_style_chip {
                     summary_chip(ui, style_chip.clone(), false);
                 }
-                if let Some(operation) = self.canvas.current_operation_label() {
-                    summary_chip(ui, operation, true);
-                } else if selection_count > 0 {
+                if self.canvas.current_operation_label().is_none() && selection_count > 0 {
                     summary_chip(
                         ui,
                         if compact_summary {
