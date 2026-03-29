@@ -18,7 +18,7 @@
 - [x] freehand SVG 品質改善
 - [x] ブラシ質感のさらなる強化
 - [x] 図形編集 UI のさらなる polish
-- [ ] 選択 / 変形 UI のさらなる polish
+- [x] 選択 / 変形 UI のさらなる polish
 - [x] レイヤー UI のさらなる polish
 - [ ] タブレット向けさらなる調整
 

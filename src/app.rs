@@ -992,7 +992,7 @@ impl PaintApp {
             if let Some(active_layer) = self.document().active_layer() {
                 ui.small(format!("レイヤー: {}", active_layer.name));
             }
-            if let Some(operation) = self.canvas.current_operation_label() {
+            if let Some(operation) = self.canvas.current_operation_summary(self.document()) {
                 ui.small(format!("操作: {operation}"));
             }
             ui.small(self.canvas.selection_summary(self.document()));
@@ -2741,6 +2741,7 @@ impl PaintApp {
 
             ui.add_space(4.0);
             let compact_summary = ui.available_width() < 760.0;
+            let operation_summary = self.canvas.current_operation_summary(self.document());
             let selected_shape_context = self
                 .current_shape_style_context()
                 .filter(|context| context.is_selection_target());
@@ -2779,8 +2780,8 @@ impl PaintApp {
                     },
                     true,
                 );
-                if let Some(operation) = self.canvas.current_operation_label() {
-                    summary_chip(ui, operation, true);
+                if let Some(operation) = &operation_summary {
+                    summary_chip(ui, operation.clone(), true);
                 }
                 if matches!(
                     self.active_tool,
@@ -2810,23 +2811,29 @@ impl PaintApp {
                         false,
                     );
                 }
-                if let Some(shape_chip) = &selected_shape_chip {
+                if operation_summary.is_none()
+                    && let Some(shape_chip) = &selected_shape_chip
+                {
                     summary_chip(ui, shape_chip.clone(), false);
                 }
-                if let Some(mode_chip) = selected_shape_mode_chip {
+                if operation_summary.is_none()
+                    && let Some(mode_chip) = selected_shape_mode_chip
+                {
                     summary_chip(ui, mode_chip, false);
                 }
-                if let Some(style_chip) = &multi_shape_style_chip {
+                if operation_summary.is_none()
+                    && let Some(style_chip) = &multi_shape_style_chip
+                {
                     summary_chip(ui, style_chip.clone(), false);
                 }
-                if self.canvas.current_operation_label().is_none() {
+                if operation_summary.is_none() {
                     let arrange_context =
                         SelectionArrangeContext::from_state(selection_count, has_canvas_interaction);
                     if let Some(arrange_chip) = arrange_context.summary_chip_label(compact_summary) {
                         summary_chip(ui, arrange_chip, false);
                     }
                 }
-                if self.canvas.current_operation_label().is_none() && selection_count > 0 {
+                if operation_summary.is_none() && selection_count > 0 {
                     summary_chip(
                         ui,
                         if compact_summary {

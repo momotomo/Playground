@@ -917,6 +917,54 @@ impl CanvasController {
         }
     }
 
+    pub fn current_operation_summary(&self, document: &PaintDocument) -> Option<String> {
+        if let Some(session) = &self.selection_session {
+            return Some(match session {
+                SelectionSession::Move { indices, .. } => {
+                    if let [index] = indices.as_slice()
+                        && let Some(element) = document.element(*index)
+                    {
+                        format!("{}を移動中", element.kind_label())
+                    } else {
+                        format!("{}個を移動中", indices.len())
+                    }
+                }
+                SelectionSession::SingleResize { base_shape, .. } => {
+                    format!("{}をサイズ変更中", base_shape.kind.label())
+                }
+                SelectionSession::SingleRotate { base_shape, .. } => {
+                    format!("{}を回転中", base_shape.kind.label())
+                }
+                SelectionSession::MultiResize { indices, .. } => {
+                    format!("{}個をサイズ変更中", indices.len())
+                }
+                SelectionSession::MultiRotate { indices, .. } => {
+                    format!("{}個を回転中", indices.len())
+                }
+                SelectionSession::GuideMove { axis, .. } => match axis {
+                    GuideAxis::Horizontal => "横ガイドを移動中".to_owned(),
+                    GuideAxis::Vertical => "縦ガイドを移動中".to_owned(),
+                },
+                SelectionSession::Marquee { additive, .. } => {
+                    if *additive {
+                        "追加選択中".to_owned()
+                    } else {
+                        "範囲選択中".to_owned()
+                    }
+                }
+            });
+        }
+
+        match &self.active_preview {
+            Some(ActivePreview::Stroke(stroke)) => Some(format!("{}で描画中", stroke.tool.label())),
+            Some(ActivePreview::Shape(shape)) => Some(format!("{}を作成中", shape.kind.label())),
+            None => self
+                .pending_long_press
+                .as_ref()
+                .map(|_| "長押しで選択".to_owned()),
+        }
+    }
+
     pub fn zoom_label(&self) -> String {
         format!("{:.0}%", self.view.zoom_percent())
     }
@@ -4250,8 +4298,8 @@ mod tests {
     };
     use crate::fill::{FillTolerancePreset, FloodFillOptions};
     use crate::model::{
-        CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintPoint, PaintVector,
-        RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
+        CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintElement, PaintPoint,
+        PaintVector, RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
     };
     use eframe::egui::{Event, Pos2, Rect, TouchDeviceId, TouchId, TouchPhase, Vec2};
 
@@ -4543,6 +4591,77 @@ mod tests {
             4.0,
         )));
         assert_eq!(controller.current_operation_label(), Some("描画中"));
+    }
+
+    #[test]
+    fn current_operation_summary_describes_single_shape_transform() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(80.0, 80.0),
+        ));
+
+        let shape = match document.element(0) {
+            Some(PaintElement::Shape(shape)) => *shape,
+            other => panic!("expected shape, got {other:?}"),
+        };
+
+        let controller = CanvasController {
+            selection_session: Some(SelectionSession::SingleResize {
+                index: 0,
+                base_shape: shape,
+                handle: ShapeHandle::TopLeft,
+                preview_shape: shape,
+            }),
+            ..CanvasController::default()
+        };
+
+        assert_eq!(
+            controller.current_operation_summary(&document),
+            Some("四角形をサイズ変更中".to_owned())
+        );
+    }
+
+    #[test]
+    fn current_operation_summary_describes_multi_transform_count() {
+        let mut document = test_document();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Rectangle,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(20.0, 20.0),
+            PaintPoint::new(35.0, 40.0),
+        ));
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Ellipse,
+            RgbaColor::charcoal(),
+            2.0,
+            PaintPoint::new(65.0, 20.0),
+            PaintPoint::new(80.0, 40.0),
+        ));
+
+        let base_elements = vec![
+            (0, document.element(0).cloned().expect("first element")),
+            (1, document.element(1).cloned().expect("second element")),
+        ];
+        let controller = CanvasController {
+            selection_session: Some(SelectionSession::MultiRotate {
+                indices: vec![0, 1],
+                base_elements,
+                group_center: PaintPoint::new(50.0, 30.0),
+                start_pointer_angle: 0.0,
+                preview_elements: Vec::new(),
+            }),
+            ..CanvasController::default()
+        };
+
+        assert_eq!(
+            controller.current_operation_summary(&document),
+            Some("2個を回転中".to_owned())
+        );
     }
 
     #[test]
