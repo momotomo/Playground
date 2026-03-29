@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+
 use eframe::egui::{
     self, Align2, Color32, FontId, Painter, PointerButton, Pos2, Rect, Sense, Stroke as EguiStroke,
     Vec2,
 };
 
-use crate::fill::{FillTolerancePreset, FloodFillFailure, FloodFillOptions, flood_fill_document};
+use crate::fill::{
+    FillTolerancePreset, FloodFillFailure, FloodFillOptions, FloodFillResult, flood_fill_document,
+};
 use crate::model::{
     AlignmentKind, CanvasSize, DistributionKind, ElementBounds, GuideAxis, GuideLine, LayerId,
     PaintDocument, PaintElement, PaintPoint, PaintVector, RgbaColor, ShapeElement, ShapeHandle,
@@ -15,22 +19,26 @@ const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const FIT_MARGIN: f32 = 24.0;
 const HIT_TOLERANCE_SCREEN: f32 = 8.0;
-const TOUCH_HIT_TOLERANCE_SCREEN: f32 = 20.0;
+const TOUCH_HIT_TOLERANCE_SCREEN: f32 = 24.0;
 const HANDLE_RADIUS: f32 = 7.5;
 const HANDLE_HIT_RADIUS: f32 = 14.0;
-const TOUCH_HANDLE_HIT_RADIUS: f32 = 28.0;
+const TOUCH_HANDLE_VISIBLE_RADIUS: f32 = 12.0;
+const TOUCH_HANDLE_HIT_RADIUS: f32 = 32.0;
 const ROTATION_HANDLE_OFFSET_SCREEN: f32 = 34.0;
 const MIN_SELECTION_TRANSFORM_EXTENT: f32 = 4.0;
 const MARQUEE_VISIBLE_MIN_SCREEN: f32 = 3.0;
 const SNAP_TOLERANCE_SCREEN: f32 = 10.0;
 const MIN_GRID_VISIBLE_SPACING_SCREEN: f32 = 12.0;
 const GUIDE_HIT_TOLERANCE_SCREEN: f32 = 8.0;
-const TOUCH_GUIDE_HIT_TOLERANCE_SCREEN: f32 = 16.0;
+const TOUCH_GUIDE_HIT_TOLERANCE_SCREEN: f32 = 18.0;
 const SMART_GUIDE_TOLERANCE_SCREEN: f32 = 10.0;
 const RULER_THICKNESS: f32 = 20.0;
 const RULER_LABEL_MIN_SPACING_SCREEN: f32 = 56.0;
-const TOUCH_LONG_PRESS_DURATION_SECONDS: f64 = 0.30;
-const TOUCH_LONG_PRESS_MOVE_TOLERANCE_SCREEN: f32 = 12.0;
+const TOUCH_LONG_PRESS_DURATION_SECONDS: f64 = 0.38;
+const TOUCH_LONG_PRESS_MOVE_TOLERANCE_SCREEN: f32 = 14.0;
+const TOUCH_BUCKET_SEARCH_RADIUS_SCREEN: f32 = 18.0;
+const TOUCH_BUCKET_MEANINGFUL_REGION_PIXELS: usize = 24;
+const TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SmartGuideOverlay {
@@ -1211,7 +1219,12 @@ impl CanvasController {
                             output.needs_repaint = output.picked_color.is_some();
                         }
                         CanvasToolKind::Bucket => {
-                            output = self.perform_bucket_fill(document, tool_settings, world);
+                            output = self.perform_bucket_fill(
+                                document,
+                                tool_settings,
+                                world,
+                                touch_active,
+                            );
                         }
                         CanvasToolKind::Brush
                         | CanvasToolKind::Pencil
@@ -1516,6 +1529,7 @@ impl CanvasController {
         document: &PaintDocument,
         tool_settings: ToolSettings,
         world: PaintPoint,
+        touch_active: bool,
     ) -> CanvasOutput {
         let Some(fill_color) = tool_settings.fill_color else {
             return CanvasOutput {
@@ -1527,7 +1541,13 @@ impl CanvasController {
         };
         let fill_options = FloodFillOptions::new(tool_settings.fill_tolerance);
 
-        match flood_fill_document(document, world, fill_color, fill_options) {
+        let fill_result = if touch_active {
+            bucket_fill_with_touch_assist(document, world, fill_color, fill_options, self.view.zoom)
+        } else {
+            flood_fill_document(document, world, fill_color, fill_options)
+        };
+
+        match fill_result {
             Ok(result) => {
                 let mut next = document.clone();
                 if next.insert_element_at(0, PaintElement::Fill(result.element)) {
@@ -2685,7 +2705,7 @@ fn paint_single_selection_overlay(
     let accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
-    let handle_radius = effective_screen_hit_tolerance(touch_active, HANDLE_RADIUS, 10.5);
+    let handle_radius = handle_visual_radius(touch_active);
 
     match element {
         PaintElement::Stroke(stroke) => {
@@ -2853,7 +2873,7 @@ fn paint_multi_selection_overlay(
     let group_accent = Color32::from_rgb(26, 115, 232);
     let inactive_fill = Color32::WHITE;
     let active_fill = Color32::from_rgb(26, 115, 232);
-    let handle_radius = effective_screen_hit_tolerance(touch_active, HANDLE_RADIUS, 10.5);
+    let handle_radius = handle_visual_radius(touch_active);
 
     for (_, element) in selected_elements {
         if let Some(bounds) = element.bounds() {
@@ -3017,6 +3037,14 @@ fn paint_handle(
     stroke_color: Color32,
 ) {
     let handle_rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
+    if radius > HANDLE_RADIUS {
+        painter.rect_stroke(
+            handle_rect.expand(2.0),
+            4.5,
+            EguiStroke::new(1.0, stroke_color.linear_multiply(0.22)),
+            egui::StrokeKind::Outside,
+        );
+    }
     painter.rect_filled(handle_rect, 3.0, fill);
     painter.rect_stroke(
         handle_rect,
@@ -3033,6 +3061,13 @@ fn paint_rotation_handle(
     fill: Color32,
     stroke_color: Color32,
 ) {
+    if radius > HANDLE_RADIUS {
+        painter.circle_stroke(
+            center,
+            radius + 2.0,
+            EguiStroke::new(1.0, stroke_color.linear_multiply(0.22)),
+        );
+    }
     painter.circle_filled(center, radius, fill);
     painter.circle_stroke(center, radius, EguiStroke::new(1.3, stroke_color));
     painter.circle_filled(center, radius * 0.28, stroke_color);
@@ -3659,6 +3694,122 @@ fn hit_tolerance_world(zoom: f32, touch_active: bool, base: f32, touch_minimum: 
     effective_screen_hit_tolerance(touch_active, base, touch_minimum) / zoom.max(MIN_ZOOM)
 }
 
+fn handle_visual_radius(touch_active: bool) -> f32 {
+    effective_screen_hit_tolerance(touch_active, HANDLE_RADIUS, TOUCH_HANDLE_VISIBLE_RADIUS)
+}
+
+fn bucket_fill_with_touch_assist(
+    document: &PaintDocument,
+    seed: PaintPoint,
+    fill_color: RgbaColor,
+    options: FloodFillOptions,
+    zoom: f32,
+) -> Result<FloodFillResult, FloodFillFailure> {
+    let exact = flood_fill_document(document, seed, fill_color, options);
+    if let Ok(result) = &exact
+        && !touch_bucket_result_needs_retry(result)
+    {
+        return Ok(result.clone());
+    }
+
+    let mut best_candidate = exact.as_ref().ok().map(|result| {
+        let score = touch_bucket_candidate_score(result, 0.0);
+        (result.clone(), score)
+    });
+
+    for (candidate, distance_sq) in touch_bucket_candidate_points(seed, zoom, document.canvas_size)
+    {
+        let Ok(result) = flood_fill_document(document, candidate, fill_color, options) else {
+            continue;
+        };
+        let score = touch_bucket_candidate_score(&result, distance_sq);
+        if best_candidate
+            .as_ref()
+            .is_none_or(|(_, best_score)| score < *best_score)
+        {
+            best_candidate = Some((result, score));
+        }
+    }
+
+    if let Some((result, _)) = best_candidate {
+        Ok(result)
+    } else {
+        exact
+    }
+}
+
+fn touch_bucket_candidate_points(
+    seed: PaintPoint,
+    zoom: f32,
+    canvas_size: CanvasSize,
+) -> Vec<(PaintPoint, f32)> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    let near = (TOUCH_BUCKET_SEARCH_RADIUS_SCREEN * 0.45) / zoom.max(MIN_ZOOM);
+    let far = TOUCH_BUCKET_SEARCH_RADIUS_SCREEN / zoom.max(MIN_ZOOM);
+    let offsets = [
+        PaintVector::new(near, 0.0),
+        PaintVector::new(-near, 0.0),
+        PaintVector::new(0.0, near),
+        PaintVector::new(0.0, -near),
+        PaintVector::new(near, near),
+        PaintVector::new(-near, near),
+        PaintVector::new(near, -near),
+        PaintVector::new(-near, -near),
+        PaintVector::new(far, 0.0),
+        PaintVector::new(-far, 0.0),
+        PaintVector::new(0.0, far),
+        PaintVector::new(0.0, -far),
+        PaintVector::new(far, far),
+        PaintVector::new(-far, far),
+        PaintVector::new(far, -far),
+        PaintVector::new(-far, -far),
+    ];
+
+    for offset in offsets {
+        let point = PaintPoint::new(
+            clamp_fill_seed_coordinate(seed.x + offset.dx, canvas_size.width),
+            clamp_fill_seed_coordinate(seed.y + offset.dy, canvas_size.height),
+        );
+        let key = (point.x.round() as i32, point.y.round() as i32);
+        if seen.insert(key) {
+            candidates.push((point, offset.dx * offset.dx + offset.dy * offset.dy));
+        }
+    }
+
+    candidates
+}
+
+fn clamp_fill_seed_coordinate(value: f32, limit: f32) -> f32 {
+    value.clamp(0.0, (limit - f32::EPSILON).max(0.0))
+}
+
+fn touch_bucket_result_needs_retry(result: &FloodFillResult) -> bool {
+    touch_bucket_result_is_line_like(result)
+        || result.pixel_count < TOUCH_BUCKET_MEANINGFUL_REGION_PIXELS
+}
+
+fn touch_bucket_result_is_line_like(result: &FloodFillResult) -> bool {
+    let Some(bounds) = result.element.bounds() else {
+        return false;
+    };
+    let min_extent = bounds.width().min(bounds.height());
+    let max_extent = bounds.width().max(bounds.height());
+    min_extent <= TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD && max_extent >= min_extent * 3.0
+}
+
+fn touch_bucket_candidate_score(
+    result: &FloodFillResult,
+    distance_sq: f32,
+) -> (u8, u8, i32, usize) {
+    (
+        u8::from(touch_bucket_result_is_line_like(result)),
+        u8::from(result.pixel_count < TOUCH_BUCKET_MEANINGFUL_REGION_PIXELS),
+        (distance_sq * 1000.0).round() as i32,
+        result.pixel_count,
+    )
+}
+
 fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContactKind> {
     let mut saw_touch = false;
     let mut saw_force = false;
@@ -3681,13 +3832,16 @@ fn touch_contact_kind_from_events(events: &[egui::Event]) -> Option<TouchContact
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivePreview, CanvasController, CanvasViewState, ControlTarget, SelectionSession,
-        SelectionState, TouchContactKind, bounds_from_points, bounds_rotation_handle_screen,
+        ActivePreview, CanvasController, CanvasViewState, ControlTarget, HANDLE_RADIUS,
+        SelectionSession, SelectionState, TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD, TouchContactKind,
+        bounds_from_points, bounds_rotation_handle_screen, bucket_fill_with_touch_assist,
         canvas_rect, canvas_to_screen, effective_screen_hit_tolerance, group_resize_transform,
-        hit_tolerance_world, marquee_rect_is_visible, normalize_selection_indices,
-        ruler_step_world, screen_to_canvas, shape_rotation_handle_screen, smart_guide_axis_match,
-        snap_axis_value_for_document, snap_point_for_document, touch_contact_kind_from_events,
+        handle_visual_radius, hit_tolerance_world, marquee_rect_is_visible,
+        normalize_selection_indices, ruler_step_world, screen_to_canvas,
+        shape_rotation_handle_screen, smart_guide_axis_match, snap_axis_value_for_document,
+        snap_point_for_document, touch_bucket_result_is_line_like, touch_contact_kind_from_events,
     };
+    use crate::fill::{FillTolerancePreset, FloodFillOptions};
     use crate::model::{
         CanvasSize, ElementBounds, GuideAxis, LayerId, PaintDocument, PaintPoint, PaintVector,
         RgbaColor, ShapeElement, ShapeHandle, ShapeKind, Stroke, ToolKind,
@@ -4211,9 +4365,46 @@ mod tests {
     }
 
     #[test]
+    fn handle_visual_radius_expands_for_touch_input() {
+        assert!((handle_visual_radius(false) - HANDLE_RADIUS).abs() < f32::EPSILON);
+        assert!(handle_visual_radius(true) > HANDLE_RADIUS);
+    }
+
+    #[test]
     fn touch_world_tolerance_scales_with_zoom() {
         let tolerance = hit_tolerance_world(2.0, true, 8.0, 18.0);
         assert!((tolerance - 9.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn touch_bucket_fill_prefers_nearby_region_over_line_like_boundary_fill() {
+        let mut document = test_document();
+        document.push_shape(
+            ShapeElement::new(
+                ShapeKind::Rectangle,
+                RgbaColor::charcoal(),
+                2.0,
+                PaintPoint::new(20.0, 20.0),
+                PaintPoint::new(80.0, 80.0),
+            )
+            .with_fill_color(None),
+        );
+
+        let fill_color = RgbaColor::from_rgba(220, 40, 60, 255);
+        let result = bucket_fill_with_touch_assist(
+            &document,
+            PaintPoint::new(20.0, 50.0),
+            fill_color,
+            FloodFillOptions::new(FillTolerancePreset::Standard),
+            1.0,
+        )
+        .expect("touch bucket fill should find nearby enclosed region");
+
+        assert!(!touch_bucket_result_is_line_like(&result));
+        let bounds = result.element.bounds().expect("fill bounds");
+        assert!(bounds.width() > 20.0);
+        assert!(bounds.height() > 20.0);
+        assert!(bounds.width().min(bounds.height()) > TOUCH_BUCKET_LINE_LIKE_THICKNESS_WORLD);
     }
 
     #[test]
