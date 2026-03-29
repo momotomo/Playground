@@ -69,7 +69,9 @@
   - shape の vector path / style 分離による SVG / 将来の fill 拡張の土台
 - `src/fill.rs`
   - visible layer を合成した見た目を基準にした flood fill
+  - `塗りのゆるさ` に応じた色比較
   - scanline span による領域抽出
+  - 失敗時の短いヒント生成
   - `FillElement` 生成
 - `src/storage.rs`
   - JSON encode / decode
@@ -106,6 +108,7 @@
   - `spans`
   - バケツ塗り結果を scanline span で持つ第一版のラスタ塗り要素
   - PNG / 透過PNG では見たまま描画し、SVG では 1px 高の矩形列へ簡略化して出力する
+  - `塗りのゆるさ` 自体は作品要素ではなく、UI 側の塗り判定設定として持つ
 - `ShapeElement` は次の情報を保持する
   - `kind`
   - `color` (`線色`)
@@ -362,6 +365,7 @@
 - レイヤー間移動 / 複製の結果も追加メタデータなしでそのまま保存できるため、format version は `4` のまま維持している
 - grid / guides も `document` に直接保存するため、同じ `format.version = 4` のまま後方互換を保てる
 - spacing や guide position の変更も追加 migration なしで保存できる
+- `塗りのゆるさ` は作品データではなく UI 状態として持つため、JSON format version は上げていない
 
 ## PNG 出力の責務
 
@@ -369,7 +373,7 @@
 - `render` が作品データからピクセルデータを生成する
 - `storage` が PNG バイト列化と native / web 保存導線を担当する
 - `スポイト` は UI 補助表示ではなく、作品ラスタライズ結果から色を拾う
-- バケツ塗りは visible layer を合成した見た目を境界判定に使い、結果は active layer へ `FillElement` として積む
+- バケツ塗りは visible layer を合成した見た目を境界判定に使い、`塗りのゆるさ` に応じた色比較を行い、結果は active layer へ `FillElement` として積む
 - visible な layer だけを順番に描画する
 - locked layer も visible なら描画する
 - 回転やリサイズ後の図形も作品データからそのまま描画する
