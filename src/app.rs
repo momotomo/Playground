@@ -248,7 +248,7 @@ impl Default for ToolColorSettings {
 #[derive(Clone, Copy)]
 enum ShapeStyleTarget {
     SelectedShape,
-    NewShape { tool: CanvasToolKind },
+    NewShape,
 }
 
 #[derive(Clone, Copy)]
@@ -273,25 +273,10 @@ impl ShapeStyleContext {
         self.fill_color.is_some()
     }
 
-    fn target_summary(self) -> String {
-        match self.target {
-            ShapeStyleTarget::SelectedShape => {
-                format!(
-                    "選択中: {} ({})",
-                    self.kind.label(),
-                    self.paint_mode_label()
-                )
-            }
-            ShapeStyleTarget::NewShape { tool } => {
-                format!("次に描く: {} ({})", tool.label(), self.paint_mode_label())
-            }
-        }
-    }
-
     fn edit_summary(self) -> &'static str {
         match self.target {
             ShapeStyleTarget::SelectedShape => "ここで変えると選択中の図形へ反映されます。",
-            ShapeStyleTarget::NewShape { .. } => "ここで変えると次に描く図形へ反映されます。",
+            ShapeStyleTarget::NewShape => "ここで変えると次に描く図形へ反映されます。",
         }
     }
 
@@ -473,9 +458,7 @@ impl PaintApp {
 
         let kind = self.active_tool.shape_kind()?;
         Some(ShapeStyleContext {
-            target: ShapeStyleTarget::NewShape {
-                tool: self.active_tool,
-            },
+            target: ShapeStyleTarget::NewShape,
             kind,
             stroke_color: self.tool_colors.stroke_color,
             fill_color: self
@@ -747,7 +730,12 @@ impl PaintApp {
                 ui.small(selection_context);
             }
             if let Some(shape_context) = shape_context {
-                ui.small(format!("図形: {}", shape_context.target_summary()));
+                if shape_context.is_selected_shape() {
+                    ui.small(format!("選択図形: {}", shape_context.kind.label()));
+                } else {
+                    ui.small(format!("次の図形: {}", shape_context.kind.label()));
+                }
+                ui.small(format!("見え方: {}", shape_context.paint_mode_label()));
             }
             ui.horizontal_wrapped(|ui| {
                 let show_fill_swatch = shape_context
@@ -911,24 +899,32 @@ impl PaintApp {
         if let Some(shape_context) = shape_context {
             ui.add_space(6.0);
             ui.group(|ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("図形スタイル").strong());
                     if shape_context.is_selected_shape() {
                         layer_status_chip(ui, "選択中", true);
                     } else {
                         layer_status_chip(ui, "次に描く図形", false);
                     }
-                });
-                ui.small(shape_context.target_summary());
-                ui.small(shape_context.edit_summary());
-                ui.horizontal_wrapped(|ui| {
                     summary_chip(ui, shape_context.kind.label(), true);
                     summary_chip(
                         ui,
                         shape_context.paint_mode_label(),
                         shape_context.fill_enabled(),
                     );
-                    summary_chip(ui, format!("{:.1}px", shape_context.width), false);
+                });
+                ui.small(if shape_context.is_selected_shape() {
+                    "色・線幅・見え方を変えると、選択中の図形へすぐ反映されます。"
+                } else {
+                    "ここで整えた見え方が、次に描く図形へ反映されます。"
+                });
+                ui.horizontal_wrapped(|ui| {
+                    summary_chip(
+                        ui,
+                        format!("線 {}%", alpha_percent(shape_context.stroke_color)),
+                        false,
+                    );
+                    summary_chip(ui, format!("線幅 {:.1}px", shape_context.width), false);
                     if shape_context.supports_fill() {
                         if let Some(fill_color) = shape_context.fill_color {
                             summary_chip(
@@ -940,14 +936,18 @@ impl PaintApp {
                             summary_chip(ui, "塗りなし", false);
                         }
                     } else {
-                        summary_chip(ui, "直線は線だけ", false);
+                        summary_chip(ui, "直線は線のみ", false);
                     }
                 });
                 if shape_context.supports_fill() {
+                    let mode_button_width = ((ui.available_width() - 8.0) / 2.0).max(96.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label("見え方");
                         if ui
-                            .selectable_label(!shape_context.fill_enabled(), "線だけ")
+                            .add_sized(
+                                [mode_button_width, 34.0],
+                                egui::Button::new("線だけ").selected(!shape_context.fill_enabled()),
+                            )
                             .on_hover_text("塗りなしで、線だけの図形にします。")
                             .clicked()
                         {
@@ -973,7 +973,11 @@ impl PaintApp {
                             }
                         }
                         if ui
-                            .selectable_label(shape_context.fill_enabled(), "線と塗り")
+                            .add_sized(
+                                [mode_button_width, 34.0],
+                                egui::Button::new("線と塗り")
+                                    .selected(shape_context.fill_enabled()),
+                            )
                             .on_hover_text("線と塗りの両方を使う図形にします。")
                             .clicked()
                         {
@@ -1003,13 +1007,58 @@ impl PaintApp {
                             }
                         }
                     });
+                } else {
+                    ui.small("直線は線だけです。塗り設定は使いません。");
+                }
+
+                ui.add_space(4.0);
+                ui.label("線幅");
+                let mut shape_width = shape_context.width;
+                if ui
+                    .add(egui::Slider::new(
+                        &mut shape_width,
+                        MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
+                    ))
+                    .on_hover_text("選択中の図形、または次に描く図形の線幅を変えます。")
+                    .changed()
+                {
+                    self.tool_widths.draw_width = shape_width;
+                    if shape_context.is_selected_shape() {
+                        if !self.replace_selected_shape(
+                            |shape| ShapeElement {
+                                width: shape_width,
+                                ..shape
+                            },
+                            format!(
+                                "{}の線幅を {:.1}px に変更しました。",
+                                shape_context.kind.label(),
+                                shape_width
+                            ),
+                        ) {
+                            self.set_info(format!(
+                                "{}の線幅を {:.1}px にします。",
+                                shape_context.kind.label(),
+                                shape_width
+                            ));
+                        }
+                    } else {
+                        self.set_info(format!(
+                            "次に描く{}の線幅を {:.1}px に変更しました。",
+                            shape_context.kind.label(),
+                            shape_width
+                        ));
+                    }
                 }
             });
         }
 
         ui.label(RichText::new("色と不透明度").strong());
         if let Some(shape_context) = shape_context {
-            ui.small(shape_context.edit_summary());
+            ui.small(if shape_context.is_selected_shape() {
+                "下の変更は選択中の図形へすぐ反映されます。"
+            } else {
+                shape_context.edit_summary()
+            });
         } else if self.active_tool == CanvasToolKind::Bucket {
             ui.small("バケツ塗りは塗り色を使います。スポイトや色パレットで色を変え、塗りのゆるさで塗れ方を調整できます。");
         } else {
@@ -1076,135 +1125,161 @@ impl PaintApp {
         });
         ui.small("スポイト、最近使った色、簡易パレットはここで選んだ色へ入ります。");
 
-        ui.label("線色");
-        let mut stroke_color = color32_from_rgba(stroke_source);
-        if ui.color_edit_button_srgba(&mut stroke_color).changed() {
-            let color = rgba_from_color32(stroke_color);
-            self.tool_colors.stroke_color = color;
-            self.push_recent_color(color);
-            if editing_selected_shape
-                && let Some(kind_label) = shape_kind_label
-                && self.replace_selected_shape(
-                    |shape| ShapeElement { color, ..shape },
-                    format!("{kind_label}の線色を変更しました。"),
-                )
-            {
-            } else {
-                self.set_info("線色を変更しました。");
-            }
-        }
-        let mut stroke_opacity = alpha_percent(stroke_source);
-        if ui
-            .add(egui::Slider::new(&mut stroke_opacity, 0..=100).suffix("%"))
-            .on_hover_text("描画ツールや図形の線の不透明度を変えます。")
-            .changed()
-        {
-            let next_stroke_color = set_alpha_percent(stroke_source, stroke_opacity);
-            self.tool_colors.stroke_color = next_stroke_color;
-            self.push_recent_color(next_stroke_color);
-            if editing_selected_shape
-                && let Some(kind_label) = shape_kind_label
-                && self.replace_selected_shape(
-                    |shape| ShapeElement {
-                        color: next_stroke_color,
-                        ..shape
-                    },
-                    format!("{kind_label}の線の不透明度を {stroke_opacity}% に変更しました。"),
-                )
-            {
-            } else {
-                self.set_info(format!(
-                    "線の不透明度を {}% に変更しました。",
-                    stroke_opacity
-                ));
-            }
-        }
-
-        if fill_controls_available {
-            let mut fill_enabled = fill_enabled_source;
-            if ui
-                .checkbox(&mut fill_enabled, "塗りを使う")
-                .on_hover_text("四角形や楕円の内側を塗ります。")
-                .changed()
-            {
-                self.tool_colors.fill_enabled = fill_enabled;
-                if fill_enabled {
-                    self.tool_colors.fill_color = fill_color_source;
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("線").strong());
+                summary_chip(ui, format!("{}%", alpha_percent(stroke_source)), false);
+                if editing_selected_shape {
+                    layer_status_chip(ui, "選択中へ反映", true);
+                } else if shape_context.is_some() {
+                    layer_status_chip(ui, "次に描く図形へ反映", false);
                 }
+            });
+            ui.label("線色");
+            let mut stroke_color = color32_from_rgba(stroke_source);
+            if ui.color_edit_button_srgba(&mut stroke_color).changed() {
+                let color = rgba_from_color32(stroke_color);
+                self.tool_colors.stroke_color = color;
+                self.push_recent_color(color);
                 if editing_selected_shape
                     && let Some(kind_label) = shape_kind_label
                     && self.replace_selected_shape(
-                        |shape| {
-                            shape.with_fill_color(if fill_enabled {
-                                Some(fill_color_source)
-                            } else {
-                                None
-                            })
-                        },
-                        if fill_enabled {
-                            format!("{kind_label}の塗りをオンにしました。")
-                        } else {
-                            format!("{kind_label}の塗りをオフにしました。")
-                        },
+                        |shape| ShapeElement { color, ..shape },
+                        format!("{kind_label}の線色を変更しました。"),
                     )
                 {
                 } else {
-                    self.set_info(if fill_enabled {
-                        "図形の塗りをオンにしました。".to_owned()
-                    } else {
-                        "図形の塗りをオフにしました。".to_owned()
-                    });
+                    self.set_info("線色を変更しました。");
                 }
             }
-            ui.add_enabled_ui(fill_enabled, |ui| {
-                ui.label("塗り色");
-                let mut fill_color = color32_from_rgba(fill_color_source);
-                if ui.color_edit_button_srgba(&mut fill_color).changed() {
-                    let color = rgba_from_color32(fill_color);
-                    self.tool_colors.fill_color = color;
-                    self.tool_colors.fill_enabled = true;
-                    self.push_recent_color(color);
-                    if editing_selected_shape
-                        && let Some(kind_label) = shape_kind_label
-                        && self.replace_selected_shape(
-                            |shape| shape.with_fill_color(Some(color)),
-                            format!("{kind_label}の塗り色を変更しました。"),
-                        )
-                    {
-                    } else {
-                        self.set_info("塗り色を変更しました。");
-                    }
+            let mut stroke_opacity = alpha_percent(stroke_source);
+            if ui
+                .add(egui::Slider::new(&mut stroke_opacity, 0..=100).suffix("%"))
+                .on_hover_text("描画ツールや図形の線の不透明度を変えます。")
+                .changed()
+            {
+                let next_stroke_color = set_alpha_percent(stroke_source, stroke_opacity);
+                self.tool_colors.stroke_color = next_stroke_color;
+                self.push_recent_color(next_stroke_color);
+                if editing_selected_shape
+                    && let Some(kind_label) = shape_kind_label
+                    && self.replace_selected_shape(
+                        |shape| ShapeElement {
+                            color: next_stroke_color,
+                            ..shape
+                        },
+                        format!("{kind_label}の線の不透明度を {stroke_opacity}% に変更しました。"),
+                    )
+                {
+                } else {
+                    self.set_info(format!(
+                        "線の不透明度を {}% に変更しました。",
+                        stroke_opacity
+                    ));
                 }
-                let mut fill_opacity = alpha_percent(fill_color_source);
+            }
+        });
+
+        if fill_controls_available {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("塗り").strong());
+                    if let Some(fill_color) = fill_enabled_source.then_some(fill_color_source) {
+                        summary_chip(ui, format!("{}%", alpha_percent(fill_color)), false);
+                    } else {
+                        summary_chip(ui, "塗りなし", false);
+                    }
+                    if editing_selected_shape {
+                        layer_status_chip(ui, "選択中へ反映", true);
+                    } else if shape_context.is_some() {
+                        layer_status_chip(ui, "次に描く図形へ反映", false);
+                    }
+                });
+                let mut fill_enabled = fill_enabled_source;
                 if ui
-                    .add(egui::Slider::new(&mut fill_opacity, 0..=100).suffix("%"))
-                    .on_hover_text("四角形や楕円の塗りの不透明度を変えます。")
+                    .checkbox(&mut fill_enabled, "塗りを使う")
+                    .on_hover_text("四角形や楕円の内側を塗ります。")
                     .changed()
                 {
-                    let next_fill_color = set_alpha_percent(fill_color_source, fill_opacity);
-                    self.tool_colors.fill_color = next_fill_color;
-                    self.tool_colors.fill_enabled = true;
-                    self.push_recent_color(next_fill_color);
+                    self.tool_colors.fill_enabled = fill_enabled;
+                    if fill_enabled {
+                        self.tool_colors.fill_color = fill_color_source;
+                    }
                     if editing_selected_shape
                         && let Some(kind_label) = shape_kind_label
                         && self.replace_selected_shape(
-                            |shape| shape.with_fill_color(Some(next_fill_color)),
-                            format!(
-                                "{kind_label}の塗りの不透明度を {fill_opacity}% に変更しました。"
-                            ),
+                            |shape| {
+                                shape.with_fill_color(if fill_enabled {
+                                    Some(fill_color_source)
+                                } else {
+                                    None
+                                })
+                            },
+                            if fill_enabled {
+                                format!("{kind_label}の塗りをオンにしました。")
+                            } else {
+                                format!("{kind_label}の塗りをオフにしました。")
+                            },
                         )
                     {
                     } else {
-                        self.set_info(format!(
-                            "塗りの不透明度を {}% に変更しました。",
-                            fill_opacity
-                        ));
+                        self.set_info(if fill_enabled {
+                            "図形の塗りをオンにしました。".to_owned()
+                        } else {
+                            "図形の塗りをオフにしました。".to_owned()
+                        });
                     }
                 }
-                ui.small(if fill_enabled {
-                    "塗りを使うと、透過PNGでも塗りの透明度がそのまま出ます。"
-                } else {
-                    "塗りなしです。必要なら「塗りを使う」をオンにします。"
+                ui.add_enabled_ui(fill_enabled, |ui| {
+                    ui.label("塗り色");
+                    let mut fill_color = color32_from_rgba(fill_color_source);
+                    if ui.color_edit_button_srgba(&mut fill_color).changed() {
+                        let color = rgba_from_color32(fill_color);
+                        self.tool_colors.fill_color = color;
+                        self.tool_colors.fill_enabled = true;
+                        self.push_recent_color(color);
+                        if editing_selected_shape
+                            && let Some(kind_label) = shape_kind_label
+                            && self.replace_selected_shape(
+                                |shape| shape.with_fill_color(Some(color)),
+                                format!("{kind_label}の塗り色を変更しました。"),
+                            )
+                        {
+                        } else {
+                            self.set_info("塗り色を変更しました。");
+                        }
+                    }
+                    let mut fill_opacity = alpha_percent(fill_color_source);
+                    if ui
+                        .add(egui::Slider::new(&mut fill_opacity, 0..=100).suffix("%"))
+                        .on_hover_text("四角形や楕円の塗りの不透明度を変えます。")
+                        .changed()
+                    {
+                        let next_fill_color = set_alpha_percent(fill_color_source, fill_opacity);
+                        self.tool_colors.fill_color = next_fill_color;
+                        self.tool_colors.fill_enabled = true;
+                        self.push_recent_color(next_fill_color);
+                        if editing_selected_shape
+                            && let Some(kind_label) = shape_kind_label
+                            && self.replace_selected_shape(
+                                |shape| shape.with_fill_color(Some(next_fill_color)),
+                                format!(
+                                    "{kind_label}の塗りの不透明度を {fill_opacity}% に変更しました。"
+                                ),
+                            )
+                        {
+                        } else {
+                            self.set_info(format!(
+                                "塗りの不透明度を {}% に変更しました。",
+                                fill_opacity
+                            ));
+                        }
+                    }
+                    ui.small(if fill_enabled {
+                        "塗りを使うと、透過PNGでも塗りの透明度がそのまま出ます。"
+                    } else {
+                        "塗りなしです。必要なら「塗りを使う」をオンにします。"
+                    });
                 });
             });
         } else {
@@ -1244,45 +1319,25 @@ impl PaintApp {
             }
         });
 
-        ui.add_space(8.0);
-        ui.label("描く太さ");
-        let width_source = shape_context
-            .map(|context| context.width)
-            .unwrap_or(self.tool_widths.draw_width);
-        let mut draw_width = width_source;
-        if ui
-            .add(egui::Slider::new(
-                &mut draw_width,
-                MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
-            ))
-            .on_hover_text("ペン、えんぴつ、マーカー、四角形、楕円、直線の太さを変えます。")
-            .changed()
-        {
-            self.tool_widths.draw_width = draw_width;
-            if editing_selected_shape
-                && let Some(kind_label) = shape_kind_label
-                && self.replace_selected_shape(
-                    |shape| ShapeElement {
-                        width: draw_width,
-                        ..shape
-                    },
-                    format!("{kind_label}の線幅を {:.1}px に変更しました。", draw_width),
-                )
+        if shape_context.is_none() {
+            ui.add_space(8.0);
+            ui.label("描く太さ");
+            let width_source = self.tool_widths.draw_width;
+            let mut draw_width = width_source;
+            if ui
+                .add(egui::Slider::new(
+                    &mut draw_width,
+                    MIN_BRUSH_WIDTH..=MAX_BRUSH_WIDTH,
+                ))
+                .on_hover_text("ペン、えんぴつ、マーカー、四角形、楕円、直線の太さを変えます。")
+                .changed()
             {
-            } else {
+                self.tool_widths.draw_width = draw_width;
                 self.set_info(format!(
                     "描く太さを {:.1}px に変更しました。描画ツールと図形に使います。",
                     draw_width
                 ));
             }
-        }
-        if let Some(shape_context) = shape_context {
-            ui.small(format!(
-                "{:.1}px · {}",
-                draw_width,
-                shape_context.target_summary()
-            ));
-        } else {
             ui.small(format!(
                 "{:.1}px · ペン / えんぴつ / マーカー / 四角形 / 楕円 / 直線",
                 draw_width
@@ -2105,9 +2160,10 @@ impl PaintApp {
 
             ui.add_space(4.0);
             let compact_summary = ui.available_width() < 760.0;
-            let selected_shape_chip = self
+            let selected_shape_context = self
                 .current_shape_style_context()
-                .filter(|context| context.is_selected_shape())
+                .filter(|context| context.is_selected_shape());
+            let selected_shape_chip = selected_shape_context
                 .map(|context| {
                     if compact_summary {
                         context.kind.label().to_owned()
@@ -2115,6 +2171,8 @@ impl PaintApp {
                         format!("図形: {}", context.kind.label())
                     }
                 });
+            let selected_shape_mode_chip =
+                selected_shape_context.map(ShapeStyleContext::paint_mode_label);
             ui.horizontal_wrapped(|ui| {
                 summary_chip(
                     ui,
@@ -2155,6 +2213,9 @@ impl PaintApp {
                 }
                 if let Some(shape_chip) = &selected_shape_chip {
                     summary_chip(ui, shape_chip.clone(), false);
+                }
+                if let Some(mode_chip) = selected_shape_mode_chip {
+                    summary_chip(ui, mode_chip, false);
                 }
                 if let Some(operation) = self.canvas.current_operation_label() {
                     summary_chip(ui, operation, true);
@@ -3661,12 +3722,40 @@ mod tests {
 
         assert!(context.is_selected_shape());
         assert_eq!(context.kind, ShapeKind::Rectangle);
+        assert_eq!(context.paint_mode_label(), "線と塗り");
         assert_eq!(context.stroke_color, RgbaColor::from_rgba(20, 40, 60, 255));
         assert_eq!(
             context.fill_color,
             Some(RgbaColor::from_rgba(200, 180, 90, 140))
         );
         assert_eq!(context.width, 9.0);
+    }
+
+    #[test]
+    fn selected_line_shape_context_stays_stroke_only() {
+        let mut app = PaintApp::default();
+        let mut document = PaintDocument::default();
+        document.push_shape(ShapeElement::new(
+            ShapeKind::Line,
+            RgbaColor::from_rgba(20, 40, 60, 220),
+            6.0,
+            PaintPoint::new(10.0, 10.0),
+            PaintPoint::new(80.0, 60.0),
+        ));
+        assert!(app.history.replace_document(document));
+        let layer_id = app.document().active_layer_id();
+        app.canvas.set_selection_indices(layer_id, vec![0]);
+        app.set_active_tool(CanvasToolKind::Select, false);
+
+        let context = app
+            .current_shape_style_context()
+            .expect("selected line context");
+
+        assert!(context.is_selected_shape());
+        assert_eq!(context.kind, ShapeKind::Line);
+        assert!(!context.supports_fill());
+        assert_eq!(context.paint_mode_label(), "線だけ");
+        assert_eq!(context.fill_color, None);
     }
 
     #[test]
