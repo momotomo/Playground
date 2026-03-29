@@ -37,13 +37,12 @@
 
 - 現状
   - 図形の一括 style 編集はある
-  - freehand や fill は無理に巻き込んでいない
+  - freehand / fill だけの選択では、色・不透明度・線幅を安全側でまとめて直せる
 - 候補
-  - stroke の一括色変更
-  - fill 要素の扱い整理
   - mixed selection 向けの最小 UI
+  - freehand / fill / 図形 をまたぐ一括編集の範囲整理
 - 未決理由
-  - 対象が増えると UI と undo の複雑さが上がる
+  - shape と stroke / fill を同時に触ると、UI と undo の複雑さが上がる
 
 ## export の役割分担
 
