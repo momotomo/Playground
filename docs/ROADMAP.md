@@ -26,5 +26,5 @@
 
 - [ ] 本格バケツ塗りの改良
 - [x] SVG export 本格強化
-- [ ] freehand / fill の一括編集拡張
+- [x] freehand / fill の一括編集拡張
 - [ ] ブラシ種別の追加
